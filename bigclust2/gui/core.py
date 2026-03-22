@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtGui import QIcon, QAction
 from PySide6.QtCore import Qt, QSize, QSettings
+from importlib.resources import files
 
 from .loaders import OpenProjectDialog
 from .controls import ScatterControls
@@ -251,15 +252,15 @@ class MainWidget(QWidget):
         buttons = []
 
         icon_defs = [
-            ("assets/button_fullscreen.png", "Show only top widget"),
-            ("assets/button_split_vertical.png", "Stack widgets vertically"),
-            ("assets/button_split_horizontal.png", "Place widgets side by side"),
+            (files("bigclust").joinpath("assets/button_fullscreen.png"), "Show only top widget"),
+            (files("bigclust").joinpath("assets/button_split_vertical.png"), "Stack widgets vertically"),
+            (files("bigclust").joinpath("assets/button_split_horizontal.png"), "Place widgets side by side"),
         ]
 
         for icon_path, tip in icon_defs:
             button = QPushButton()
             button.setFixedSize(button_size, button_size)
-            button.setIcon(QIcon(icon_path))
+            button.setIcon(QIcon(str(icon_path)))
             button.setIconSize(QSize(button_size - 12, button_size - 12))
             button.setParent(top_widget)
             button.setFlat(True)

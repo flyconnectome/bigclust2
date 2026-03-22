@@ -24,4 +24,10 @@ dependencies = [
 ]
 
 [project.scripts]
-bigclust = "bigclust.cli:app"
+bigclust2 = "bigclust2.cli:app"
+
+[tool.setuptools.packages.find]
+exclude = ["assets*", "scripts*"]
+
+[tool.setuptools.package-data]
+bigclust2 = ["assets/*.png"]

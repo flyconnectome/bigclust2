@@ -4,6 +4,7 @@ import logging
 
 import numpy as np
 
+from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -34,6 +35,11 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 
 
 logger = logging.getLogger(__name__)
+
+try:
+    ASSETS_FILE_PATH = files("bigclust2") / "assets"
+except ModuleNotFoundError:
+    ASSETS_FILE_PATH = Path(__file__).parent.parent / "assets"
 
 
 def resize_figures(func):
@@ -252,9 +258,18 @@ class MainWidget(QWidget):
         buttons = []
 
         icon_defs = [
-            (files("bigclust").joinpath("assets/button_fullscreen.png"), "Show only top widget"),
-            (files("bigclust").joinpath("assets/button_split_vertical.png"), "Stack widgets vertically"),
-            (files("bigclust").joinpath("assets/button_split_horizontal.png"), "Place widgets side by side"),
+            (
+                str(ASSETS_FILE_PATH / "button_fullscreen.png"),
+                "Show only top widget",
+            ),
+            (
+                str(ASSETS_FILE_PATH / "button_split_vertical.png"),
+                "Stack widgets vertically",
+            ),
+            (
+                str(ASSETS_FILE_PATH / "button_split_horizontal.png"),
+                "Place widgets side by side",
+            ),
         ]
 
         for icon_path, tip in icon_defs:

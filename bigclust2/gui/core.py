@@ -223,6 +223,8 @@ class MainWidget(QWidget):
         main_layout.addWidget(splitter)
         top_widget.setLayout(main_layout)
         top_widget.splitter = splitter
+        top_widget.sidebar = sidebar
+        top_widget.content = content
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
@@ -388,6 +390,8 @@ class MainWidget(QWidget):
         main_layout.addWidget(splitter)
         bottom_widget.setLayout(main_layout)
         bottom_widget.splitter = splitter
+        bottom_widget.sidebar = sidebar
+        bottom_widget.content = content
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
@@ -500,8 +504,14 @@ class MainWidget(QWidget):
 
     def resize_figures(self):
         """Resize figures to match their parent widgets."""
-        self.fig_scatter.size = (self.top_widget.width(), self.top_widget.height())
-        self.ngl_viewer.size = (self.bottom_widget.width(), self.bottom_widget.height())
+        self.fig_scatter.size = (
+            self.top_widget.content.width(),
+            self.top_widget.content.height(),
+        )
+        self.ngl_viewer.size = (
+            self.bottom_widget.content.width(),
+            self.bottom_widget.content.height(),
+        )
 
     def force_update(self):
         """Force a repaint of the main window to avoid visual glitches."""
@@ -547,7 +557,9 @@ class MainWindow(QMainWindow):
         # Menu bar with File -> Open Project
         menu_bar = self.menuBar()
         menu_bar.clear()
-        menu_bar.setNativeMenuBar(True) # keep it visible inside the window across platforms
+        menu_bar.setNativeMenuBar(
+            True
+        )  # keep it visible inside the window across platforms
         file_menu = menu_bar.addMenu("File")
         open_project_action = QAction("Open Project", self)
         # Keyboard shortcut
@@ -615,7 +627,7 @@ class MainWindow(QMainWindow):
             about_dialog.setModal(True)
             layout = QVBoxLayout()
             about_label = QLabel(
-                "BigClust2<br><br>"
+                "BigClust<br><br>"
                 f"Version {__version__}<br>"
                 "A graphical interface for inspecting large clusterings.<br><br>"
                 "For more information visit<br>"
@@ -649,7 +661,7 @@ class MainWindow(QMainWindow):
             else:
                 logger.info("Select All not supported by current figure")
         except Exception as e:
-            logger.warning(f"Select All failed: {e}")
+            logger.debug(f"Select All failed: {e}")
 
     def on_deselect_all(self):
         try:
@@ -661,7 +673,7 @@ class MainWindow(QMainWindow):
             else:
                 logger.info("Deselect All not supported by current figure")
         except Exception as e:
-            logger.warning(f"Deselect All failed: {e}")
+            logger.debug(f"Deselect All failed: {e}")
 
     def on_copy_ids_to_clipboard(self):
         fig = self.centralWidget().fig_scatter
@@ -690,6 +702,7 @@ class MainWindow(QMainWindow):
             logger.info("No selection to copy metadata from")
 
     def show_open_project_dialog(self):
+        """Show the open project dialog and load the selected project."""
         dialog = OpenProjectDialog(self)
 
         # Show the dialog and wait for user action
@@ -731,6 +744,7 @@ class MainWindow(QMainWindow):
                 QApplication.processEvents()
 
                 import umap
+
                 if dialog.embedding_combo.currentText() == "calculate from distances":
                     reducer = umap.UMAP(
                         n_components=2,
@@ -770,14 +784,20 @@ class MainWindow(QMainWindow):
                 id_col="id",
                 color_col="_color",  # this color is populated during data loading based on project info
                 marker_col="dataset",
-                hover_col="\n".join([f"{c}: {{{c}}}" for c in self._data["meta"].columns]),
+                hover_col="\n".join(
+                    [
+                        f"{c}: {{{c}}}"
+                        for c in self._data["meta"].columns
+                        if not str(c).startswith("_")
+                    ]
+                ),
                 dataset_col="dataset",
                 point_size=10,
                 distances=self._data.get("distances", None),
                 features=self._data.get("features", None),
             )
             # We have to update bits and pieces on the controls panels based on the new data
-            self.centralWidget().scatter_controls.update_umap_options()
+            self.centralWidget().scatter_controls.update_controls()
 
             # Set up the 3D viewer
             if "neuroglancer" in project.info:
@@ -795,7 +815,10 @@ class MainWindow(QMainWindow):
                     if isinstance(sources, dict):
                         # Map dataset to source URL
                         ngl_data["source"] = ngl_data.dataset.map(sources)
-                    elif isinstance(sources, str) and sources in self._data["meta"].columns:
+                    elif (
+                        isinstance(sources, str)
+                        and sources in self._data["meta"].columns
+                    ):
                         # Column name with source URLs
                         ngl_data["source"] = self._data["meta"][sources]
                     else:

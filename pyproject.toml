@@ -24,7 +24,10 @@ dependencies = [
 ]
 
 [project.scripts]
-bigclust2 = "bigclust2.cli:app"
+bigclust2 = "bigclust2_launcher:main"
+
+[tool.setuptools]
+py-modules = ["bigclust2_launcher"]
 
 [tool.setuptools.packages.find]
 exclude = ["assets*", "scripts*"]

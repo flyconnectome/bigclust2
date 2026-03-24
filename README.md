@@ -109,6 +109,7 @@ The top-level `info` file would look like this:
 - [ ] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
 - [ ] Support sharing figure state (e.g. `uv run bigclust --state <state_id>`)
 - [ ] Fine-control over hover info
+- [ ] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
 
 
 ## Usage
@@ -116,11 +117,20 @@ The top-level `info` file would look like this:
 You can start the BigClust 2.0 GUI using [`uv`](https://docs.astral.sh/uv/). First make sure you have `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/) and then run:
 
 ```bash
-uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust
+uvx bigclust2
+```
+
+This will install the latest released version of `bigclust2` from PyPI and start the GUI. Please
+see [UV's documentation on tools](https://docs.astral.sh/uv/concepts/tools/#tool-versions) for information about to update to the latest version or to install a specific version of `bigclust2`.
+
+For the latest development version, you can install directly from GitHub:
+
+```bash
+uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
 ```
 
 > [!TIP]
-> Note the `@main` in above command? We're asking `uvx` to always use the latest version of `jumpstart` but we could also point it at a specific release using e.g. `@02ea911`.
+> Note the `@main` in above command? We're asking `uvx` to always use the latest version of `bigclust2` but we could also point it at a specific release using e.g. `@02ea911`.
 
 
 ## Troubleshooting
@@ -133,5 +143,5 @@ uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust
 ## Development
 
 1. Clone this repository
-2. `cd bigclust-jump-start` to change into this directory
+2. `cd bigclust2` to change into this directory
 3. `uv run run.py --debug` to start the GUI

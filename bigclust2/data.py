@@ -8,10 +8,9 @@ import pandas as pd
 import polars as pl
 
 from abc import ABC
-from io import StringIO
 from pathlib import Path
 
-from .utils import is_relative, is_url, string_to_polars_filter
+from .utils import is_url, string_to_polars_filter, Url
 
 
 logger = logging.getLogger(__name__)
@@ -48,14 +47,15 @@ def parse_directory(path):
             info = json.load(f)
     else:
         # Note to self: we could make this compatible with GS:// and S3:// URLs later
-        response = requests.get(f"{path}/info")
+        path = Url(path)
+        response = requests.get(path / "info")
         response.raise_for_status()
         info = response.json()
 
     if isinstance(info, list):
         return MultiProjectLoader(path, info)
     elif isinstance(info, dict):
-        return SingleProjectLoader(path, info)
+        return SingleProjectLoader(name=info.get('name', 'unnamed'), path=path, info=info)
     else:
         raise ValueError("Invalid info format:", type(info))
 
@@ -71,14 +71,21 @@ class BaseProjectLoader(ABC):
     @path.setter
     def path(self, value):
         """Set the path to the dataset."""
-        self._path = Path(value)
+        if isinstance(value, Url):
+            self._path = value
+        elif is_url(value):
+            self._path = Url(value)
+        else:
+            self._path = Path(value)
 
     @property
     def is_remote(self):
         """Check if the dataset is remote (URL) or local."""
+        if isinstance(self._path, Url):
+            return True
         return is_url(self._path)
 
-    def load_file(self, file):
+    def load_file(self, file, relative=True):
         """Load a file from the dataset.
 
         Parameters
@@ -98,8 +105,16 @@ class BaseProjectLoader(ABC):
             Loaded file content.
 
         """
-        file = Path(file)
-        filepath = self.path / file
+        if isinstance(file, str):
+            if self.is_remote:
+                file = Url(file)
+            else:
+                file = Path(file)
+
+        if relative:
+            filepath = self.path / file
+        else:
+            filepath = file
 
         if file.suffix == ".json" or file.name == "info":
             if self.is_remote:
@@ -112,11 +127,11 @@ class BaseProjectLoader(ABC):
                 with open(filepath, "r") as f:
                     return json.load(f)
         elif file.suffix == ".feather":
-            return pd.read_feather(filepath)
+            return pd.read_feather(str(filepath))  # need to convert Url to str
         elif file.suffix == ".csv":
-            return pd.read_csv(filepath)
+            return pd.read_csv(str(filepath))
         elif file.suffix == ".parquet":
-            return pd.read_parquet(filepath)
+            return pd.read_parquet(str(filepath))
         else:
             raise ValueError(f"Unsupported file type: {file}")
 
@@ -153,7 +168,7 @@ class MultiProjectLoader(BaseProjectLoader):
 
     Parameters
     ----------
-    path : str | Path
+    path : str | Path | Url
         Path to the directory with multiple BigClust datasets (local or remote).
     info : list
         List of project info dictionaries.
@@ -424,6 +439,7 @@ class SingleProjectLoader(BaseProjectLoader):
 
             for i, attr in enumerate(["meta", "distances", "features", "embeddings"]):
                 if attr != "meta" and self.info.get(attr, None) is None:
+                    data[attr] = None
                     continue
 
                 report_if_callback(progress_callback, text=f"Loading {attr}...")
@@ -564,7 +580,7 @@ class SingleProjectLoader(BaseProjectLoader):
         else:
             data["meta"]["_color"] = "white"
 
-        logger.warning(
+        logger.debug(
             (
                 "Loaded dataset with: \n"
                 f" - {len(data['meta'])} metadata entries\n"

@@ -1,6 +1,7 @@
 import re
 import os
 import uuid
+import logging
 import warnings
 import pyperclip
 import traceback
@@ -13,13 +14,6 @@ from PySide6 import QtWidgets, QtCore
 from PySide6.QtGui import QAction
 from concurrent.futures import ThreadPoolExecutor
 
-# TODOs:
-# - add custom legend formatting (e.g. "{object.name}")
-# - show type of object in legend
-# - add dropdown to manipulate all selected objects
-# - add filter to legend (use item.setHidden(True/False) to show/hide items)
-# - highlight object in legend when hovered over in scene
-# - make legend tabbed (QTabWidget)
 
 CLIO_CLIENT = None
 CLIO_ANN = None
@@ -27,6 +21,7 @@ NEUPRINT_CLIENT = None
 FLYWIRE_ANN = None
 HB_ANN = None
 
+logger = logging.getLogger(__name__)
 
 def requires_selection(func):
     """Decorator to check if a selection is required."""
@@ -147,10 +142,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab1_layout.addLayout(self.label_layout)
         self.label_layout.addWidget(QtWidgets.QLabel("Labels:"))
         self.label_combo_box = QtWidgets.QComboBox()
-        self.label_combo_box.addItem("Default")
-        if self.meta_data is not None:
-            for col in sorted(self.meta_data.columns):
-                self.label_combo_box.addItem(col)
         self.label_layout.addWidget(self.label_combo_box)
         self.label_combo_box.currentIndexChanged.connect(self.set_labels)
         self._current_leaf_labels = self.label_combo_box.currentText()
@@ -210,6 +201,42 @@ class ScatterControls(QtWidgets.QWidget):
         self.empty_deselect.setChecked(self.figure.deselect_on_empty)
         self.empty_deselect.stateChanged.connect(self.set_empty_deselect)
         self.tab1_layout.addWidget(self.empty_deselect)
+
+        # Add horizontal divider
+        self.add_split(self.tab1_layout)
+
+        # Add a checkbox + spinbox to show distances as edges
+        self.show_distance_edges_check = QtWidgets.QCheckBox("Show distances as edges")
+        self.show_distance_edges_check.setToolTip(
+            "Whether to show actual distances as edges between points."
+        )
+        self.show_distance_edges_check.setChecked(False)
+        self.tab1_layout.addWidget(self.show_distance_edges_check)
+
+        hlayout = QtWidgets.QHBoxLayout()
+        self.tab1_layout.addLayout(hlayout)
+        self.distance_edges_threshold = QtWidgets.QLabel("Edge threshold:")
+        self.distance_edges_threshold.setToolTip(
+            "Set the threshold for showing edges between points."
+        )
+        hlayout.addWidget(self.distance_edges_threshold)
+        self.distance_edges_slider = QtWidgets.QDoubleSpinBox()
+        self.distance_edges_slider.setRange(0.0, 1.0)
+        self.distance_edges_slider.setSingleStep(0.05)
+        self.distance_edges_slider.setValue(self.figure.distance_edges_threshold)
+        self.distance_edges_slider.setDecimals(2)
+        self.distance_edges_slider.valueChanged.connect(
+            lambda x: setattr(self.figure, "distance_edges_threshold", float(x))
+        )
+        hlayout.addWidget(self.distance_edges_slider)
+        self.show_distance_edges_check.stateChanged.connect(
+            lambda x: setattr(self.figure, "show_distance_edges", bool(x))
+        )
+        self.show_distance_edges_check.stateChanged.connect(
+            lambda x: self.distance_edges_slider.setEnabled(
+                self.show_distance_edges_check.isChecked()
+            )
+        )
 
         # This would make it so the legend does not stretch when
         # we resize the window vertically
@@ -763,39 +790,6 @@ class ScatterControls(QtWidgets.QWidget):
         )
         hlayout.addWidget(self.umap_random_seed)
 
-        # Add a checkbox + spinbox to show distances as edges
-        self.show_distance_edges_check = QtWidgets.QCheckBox("Show distances as edges")
-        self.show_distance_edges_check.setToolTip(
-            "Whether to show actual distances as edges between points."
-        )
-        self.show_distance_edges_check.setChecked(False)
-        self.tab5_layout.addWidget(self.show_distance_edges_check)
-
-        hlayout = QtWidgets.QHBoxLayout()
-        self.tab5_layout.addLayout(hlayout)
-        self.distance_edges_threshold = QtWidgets.QLabel("Edge threshold:")
-        self.distance_edges_threshold.setToolTip(
-            "Set the threshold for showing edges between points."
-        )
-        hlayout.addWidget(self.distance_edges_threshold)
-        self.distance_edges_slider = QtWidgets.QDoubleSpinBox()
-        self.distance_edges_slider.setRange(0.0, 1.0)
-        self.distance_edges_slider.setSingleStep(0.05)
-        self.distance_edges_slider.setValue(self.figure.distance_edges_threshold)
-        self.distance_edges_slider.setDecimals(2)
-        self.distance_edges_slider.valueChanged.connect(
-            lambda x: setattr(self.figure, "distance_edges_threshold", float(x))
-        )
-        hlayout.addWidget(self.distance_edges_slider)
-        self.show_distance_edges_check.stateChanged.connect(
-            lambda x: setattr(self.figure, "show_distance_edges", bool(x))
-        )
-        self.show_distance_edges_check.stateChanged.connect(
-            lambda x: self.distance_edges_slider.setEnabled(
-                self.show_distance_edges_check.isChecked()
-            )
-        )
-
         # Stretch
         self.tab5_layout.addStretch(1)
 
@@ -808,7 +802,53 @@ class ScatterControls(QtWidgets.QWidget):
         layout.addWidget(QHLine())
         # layout.addSpacing(5)
 
+    def update_controls(self):
+        """Update the controls based on the current figure state."""
+        # self.update_ann_combo_box()
+        self.update_umap_options()
+        self.update_label_combo_box()
+        self.update_searchbar_completer()
+        self.update_distance_edges_controls()
+
+    def update_label_combo_box(self):
+        """Update the items in the label combo box."""
+        # First clear all existing items
+        self.label_combo_box.clear()
+
+        self.label_combo_box.addItem("Default")
+        if self.meta_data is not None:
+            for col in sorted(self.meta_data.columns):
+                if col.startswith("_"):
+                    continue
+                self.label_combo_box.addItem(col)
+
+    def update_distance_edges_controls(self):
+        """Update the distance edges controls."""
+        dists = getattr(self.figure, "dists", None)
+        self.show_distance_edges_check.setEnabled(False)
+        self.distance_edges_threshold.setEnabled(False)
+        self.distance_edges_slider.setEnabled(False)
+
+        if dists is None:
+            return
+        elif (
+            isinstance(dists, (np.ndarray, pd.DataFrame))
+            and dists.shape[0] != dists.shape[1]
+        ):
+            return
+        elif (
+            isinstance(dists, dict)
+            and ("distances" not in dists)
+            or (dists["distances"].shape[0] != dists["distances"].shape[1])
+        ):
+            return
+
+        self.show_distance_edges_check.setEnabled(True)
+        self.distance_edges_threshold.setEnabled(True)
+        self.distance_edges_slider.setEnabled(True)
+
     def update_umap_options(self):
+        """Update the items in the UMAP distance combo box."""
         self.umap_dist_combo_box.clear()
 
         if getattr(self.figure, "dists", None) is None:
@@ -833,29 +873,29 @@ class ScatterControls(QtWidgets.QWidget):
             self.pca_check.setChecked(False)
             self.pca_check.setEnabled(False)
 
-    def update_ann_combo_box(self):
-        """Update the items in the annotation combo box."""
-        # First clear all existing items
-        self.ann_combo_box.clear()
+    # def update_ann_combo_box(self):
+    #     """Update the items in the annotation combo box."""
+    #     # First clear all existing items
+    #     self.ann_combo_box.clear()
 
-        if self.figure.selected_labels is None:
-            return
+    #     if self.figure.selected_labels is None:
+    #         return
 
-        # Now add the new items currently selected
-        for label in sorted(list(set(self.figure.selected_labels))):
-            # Skip if this label is NaN or None (i.e. not a string)
-            if not isinstance(label, str):
-                continue
+    #     # Now add the new items currently selected
+    #     for label in sorted(list(set(self.figure.selected_labels))):
+    #         # Skip if this label is NaN or None (i.e. not a string)
+    #         if not isinstance(label, str):
+    #             continue
 
-            if re.match(".*?\([0-9]+\)", label):
-                label = label.split("(")[0]
+    #         if re.match(".*?\([0-9]+\)", label):
+    #             label = label.split("(")[0]
 
-            # Replace the "*"
-            label = label.replace("*", "")
+    #         # Replace the "*"
+    #         label = label.replace("*", "")
 
-            if label in ("untyped",):
-                continue
-            self.ann_combo_box.addItem(label)
+    #         if label in ("untyped",):
+    #             continue
+    #         self.ann_combo_box.addItem(label)
 
     @requires_selection
     def selected_set_dimorphism(self, dimorphism):
@@ -1184,7 +1224,7 @@ class ScatterControls(QtWidgets.QWidget):
 
             if (
                 not hasattr(self, "_label_search")
-                or self._label_search.label != text
+                or self._label_search.query != text
                 or self._label_search.regex != regex
             ):
                 self._label_search = self.figure.find_label(text, regex=regex)
@@ -1204,7 +1244,7 @@ class ScatterControls(QtWidgets.QWidget):
 
             if (
                 not hasattr(self, "_label_search")
-                or self._label_search.label != text
+                or self._label_search.query != text
                 or self._label_search.regex != regex
             ):
                 self._label_search = self.figure.find_label(text, regex=regex)
@@ -1224,7 +1264,7 @@ class ScatterControls(QtWidgets.QWidget):
 
             if (
                 not hasattr(self, "_label_search")
-                or self._label_search.label != text
+                or self._label_search.query != text
                 or self._label_search.regex != regex
             ):
                 self._label_search = self.figure.find_label(text, regex=regex)
@@ -1253,7 +1293,54 @@ class ScatterControls(QtWidgets.QWidget):
 
     def set_labels(self):
         """Set the leaf labels."""
-        raise NotImplementedError("This method should be implemented in a subclass.")
+        label = self.label_combo_box.currentText()
+
+        if not label:
+            return
+
+        if label == "Default":
+            label = self.figure.default_label_col
+
+        # Nothing to do here
+        if self._current_leaf_labels != label:
+            self._last_leaf_labels, self._current_leaf_labels = (
+                self._current_leaf_labels,
+                label,
+            )
+
+        labels = self.meta_data[label].astype(str).fillna("").values
+
+        # For labels that were set manually by the user (via pushing annotations)
+        for i, label in self.label_overrides.items():
+            # Label overrides {dend index: label}
+            # We need to translate into original indices
+            labels[i] = label
+
+        # Add counts - e.g. "CB12345(10)"
+        if self.label_count_check.isChecked():
+            counts = pd.Series(labels).value_counts().to_dict()  # dict is much faster
+            labels = [
+                f"{label}({counts[label]})" if counts[label] > 1 else label
+                for label in labels
+            ]
+        self.figure.labels = labels
+
+        # Update searchbar completer
+        if not hasattr(self, "_label_models"):
+            self._label_models = {}
+        if (label, self.label_count_check.isChecked()) not in self._label_models:
+            self._label_models[(label, self.label_count_check.isChecked())] = (
+                QtCore.QStringListModel(np.unique(labels).tolist())
+            )
+
+        self.searchbar_completer.setModel(
+            self._label_models[(label, self.label_count_check.isChecked())]
+        )
+
+        # Update label lines
+        if hasattr(self.figure, "_label_line_group"):
+            # Re-trigger making label lines
+            self.figure.make_label_lines()
 
     def switch_labels(self):
         """Switch between current and last labels."""
@@ -1356,7 +1443,7 @@ class ScatterControls(QtWidgets.QWidget):
 
             # Get the data for the selected indices
             data = (
-                self.figure._data.iloc[selected_indices].copy().reset_index(drop=True)
+                self.meta_data.iloc[selected_indices].copy().reset_index(drop=True)
             )
 
             if metric == "cosine" and self.pca_check.isChecked():
@@ -1441,6 +1528,23 @@ class ScatterControls(QtWidgets.QWidget):
             self.umap_button.setText("Run PCA")
 
         self.calculate_embeddings_maybe()
+
+    def update_searchbar_completer(self):
+        """Update the searchbar completer."""
+        if not hasattr(self, "_label_models"):
+            self._label_models = {}
+
+        label = self.label_combo_box.currentText()
+        labels = self.figure.labels
+        logger.debug(f"Updating searchbar completer for {label} with {len(labels)} labels")
+        if (label, self.label_count_check.isChecked()) not in self._label_models:
+            self._label_models[(label, self.label_count_check.isChecked())] = (
+                QtCore.QStringListModel(np.unique(labels).tolist())
+            )
+
+        self.searchbar_completer.setModel(
+            self._label_models[(label, self.label_count_check.isChecked())]
+        )
 
     def calculate_embeddings_maybe(self):
         """Recalculate embeddings if the auto-run checkbox is checked."""

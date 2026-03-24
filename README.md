@@ -1,7 +1,9 @@
 # BigClust 2.0
 
 > [!CAUTION]
-> `bigclust2` is work in progress. Currently, this is just a prototype to test out the new data structure and GUI. The API is not stable yet and there are likely to be breaking changes in the future.
+> `bigclust2` is work in progress. Currently, this is just a prototype to test out the new data structure and GUI. We have not published this version on PyPI yet but you can install it directly from GitHub (see below).
+
+![BigClust 2.0 GUI](./_static/screenshot.png)
 
 ## Overview
 A new GUI for BigClust built with PySide6. This update also fundamentally changes how data is represented:

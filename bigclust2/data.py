@@ -373,13 +373,22 @@ class SingleProjectLoader(BaseProjectLoader):
 
     def load_meta(self):
         """Load or update the meta data."""
-        meta = self.load_file(self.info["meta"]["file"])
+        if isinstance(self.info["meta"], dict):
+            file = self.info["meta"]["file"]
+        else:
+            file = self.info["meta"]
+
+        meta = self.load_file(file)
         self._meta = meta
 
     def load_distances(self):
         """Load or update the pairwise distances."""
         if "distances" in self.info and self.info["distances"] is not None:
-            return self.load_file(self.info["distances"]["file"])
+            if isinstance(self.info["distances"], dict):
+                file = self.info["distances"]["file"]
+            else:
+                file = self.info["distances"]
+            return self.load_file(file)
         else:
             return None
 
@@ -565,7 +574,13 @@ class SingleProjectLoader(BaseProjectLoader):
 
                 report_if_callback(progress_callback, value=40)
 
-        color = self.info["meta"].get("color", None)
+        if isinstance(self.info["meta"], dict):
+            color = self.info["meta"].get("color", None)
+        elif "color" in self.meta.columns:
+            color = "color"
+        else:
+            color = None
+
         if color is not None:
             if isinstance(color, str) and color in data["meta"].columns:
                 data["meta"]["_color"] = data["meta"][color]

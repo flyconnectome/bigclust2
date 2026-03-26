@@ -1,8 +1,6 @@
 import re
 import cmap
-import umap
 import inspect
-import warnings
 
 import numpy as np
 import pygfx as gfx
@@ -208,6 +206,13 @@ class ScatterFigure(BaseFigure):
                 self
             ), "Selection mask must be the same length as the plot."
             x = np.where(x)[0]
+
+        # Which points are newly selected
+        # Update the selection counter and last selected time
+        newly_selected = set(x) - set(self._selected) if self._selected is not None else set(x)
+        if newly_selected:
+            self._selection_counter += 1
+            self.metadata.loc[list(newly_selected), '_last_selected'] = self._selection_counter
 
         # Set the selected points (make sure to sort them)
         self._selected = np.asarray(sorted(x), dtype=int)
@@ -902,12 +907,19 @@ class ScatterFigure(BaseFigure):
             An (N, N) array of pairwise distances between points, or an (N, M) array of features.
             If provided, these can be used to re-compute point positions based on dimensionality reduction techniques.
         """
+        # Make sure metadata has RangeIndex
+        assert isinstance(metadata.index, pd.RangeIndex), "Metadata index must be a RangeIndex."
+
         self.positions = points.astype(np.float32)
-        self.metadata = metadata.reset_index(drop=True)
+        self.metadata = metadata
 
         for col in [label_col, id_col, color_col, marker_col, dataset_col]:
             if col not in metadata.columns:
                 raise ValueError(f"Column '{col}' not found in metadata.")
+
+        # Add column to track when this row was last selected (for selection history tracking)
+        self.metadata["_last_selected"] = -1
+        self._selection_counter = 0
 
         self.default_label_col = label_col
         self.label_visuals = [None] * len(metadata) if label_col else None
@@ -1327,7 +1339,7 @@ class LabelSearch:
 
     def search_ids(self, id):
         """Search for an ID in the scatter."""
-        return np.where(self.scatter._ids == id)[0]
+        return np.where(self.scatter.ids == id)[0]
 
     def select_all(self):
         """Select all labels found by the search."""

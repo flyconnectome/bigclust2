@@ -367,6 +367,13 @@ class SingleProjectLoader(BaseProjectLoader):
         """Check if project features are loaded."""
         return "features" in self.info and self.info["features"] is not None
 
+    @property
+    def feature_type(self):
+        """Low-dimensional embeddings as a Pandas DataFrame."""
+        if not self.has_features:
+            return None
+        return self.info['features'].get('type', None)
+
     def load_info(self):
         """Load or update the info JSON file."""
         self._info = self.load_file("info")
@@ -604,6 +611,9 @@ class SingleProjectLoader(BaseProjectLoader):
                 f" - {data['embeddings'].shape if data['embeddings'] is not None else 'no'} precomputed embeddings\n"
             )
         )
+
+        # Make doubly sure that metadata index is a RangeIndex (this is important for the scatter plot selection tracking)
+        data["meta"].reset_index(drop=True, inplace=True)
 
         return data
 

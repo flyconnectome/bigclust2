@@ -153,6 +153,15 @@ class ScatterControls(QtWidgets.QWidget):
         self.label_count_check.stateChanged.connect(self.set_label_counts)
         self.tab1_layout.addWidget(self.label_count_check)
 
+        # Checkbox for whether to show label outlines
+        self.label_outlines_check = QtWidgets.QCheckBox("Show label outlines")
+        self.label_outlines_check.setToolTip(
+            "Whether to add draw polygons around neurons with the same label."
+        )
+        self.label_outlines_check.setChecked(False)
+        self.label_outlines_check.stateChanged.connect(self.set_label_outlines)
+        self.tab1_layout.addWidget(self.label_outlines_check)
+
         # Add horizontal divider
         self.add_split(self.tab1_layout)
 
@@ -1290,6 +1299,10 @@ class ScatterControls(QtWidgets.QWidget):
         """Set the color mode."""
         mode = self.color_combo_box.currentText()
         self.figure.set_viewer_color_mode(mode.lower())
+
+    def set_label_outlines(self):
+        """Draw polygons around neurons with the same label."""
+        self.figure.show_label_lines = self.label_outlines_check.isChecked()
 
     def set_labels(self):
         """Set the leaf labels."""

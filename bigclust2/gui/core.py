@@ -1,6 +1,8 @@
 import sys
 import cmap
+import json
 import logging
+from html import escape
 
 import numpy as np
 
@@ -15,17 +17,19 @@ from PySide6.QtWidgets import (
     QPushButton,
     QFrame,
     QLabel,
-    QMenuBar,
     QDialog,
     QSizePolicy,
     QProgressDialog,
+    QWidgetAction,
 )
-from PySide6.QtGui import QIcon, QAction
+from PySide6.QtGui import QIcon, QAction, QKeySequence
 from PySide6.QtCore import Qt, QSize, QSettings
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
+from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
+from .widgets.connectivity import ConnectivityTable
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
 from ..__version__ import __version__
@@ -533,9 +537,16 @@ class MainWidget(QWidget):
 class MainWindow(QMainWindow):
     """Main application window."""
 
+    RECENT_PROJECTS_KEY = "openRecentProjects/v1"
+    MAX_RECENT_PROJECTS = 10
+
     def __init__(self):
         super().__init__()
         self.settings = QSettings("BigClust", "BigClustGUI")
+        self.open_recent_menu = None
+        self.connectivity_table_action = None
+        self._current_project_loader = None
+        self._connectivity_widgets = []
         self.init_ui()
 
     def init_ui(self):
@@ -571,6 +582,17 @@ class MainWindow(QMainWindow):
         open_project_action.setShortcut("Ctrl+O")
         open_project_action.triggered.connect(self.show_open_project_dialog)
         file_menu.addAction(open_project_action)
+
+        self.open_recent_menu = file_menu.addMenu("Open Recent")
+        self.refresh_open_recent_menu()
+
+        # View menu
+        view_menu = menu_bar.addMenu("View")
+        self.connectivity_table_action = QAction("Connectivity Table", self)
+        self.connectivity_table_action.setShortcut(QKeySequence("Shift+Meta+C"))
+        self.connectivity_table_action.setEnabled(False)
+        self.connectivity_table_action.triggered.connect(self.show_connectivity_table)
+        view_menu.addAction(self.connectivity_table_action)
 
         # Selection menu
         selection_menu = menu_bar.addMenu("Selection")
@@ -649,6 +671,263 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(show_about_dialog)
         help_menu.addAction(about_action)
 
+    def _can_open_connectivity_table(self):
+        """Whether the connectivity table can be opened for the current project."""
+        project = self._current_project_loader
+        if project is None:
+            return False
+
+        return project.feature_type == "connectivity"
+
+    def _update_view_actions(self):
+        """Update View menu action states."""
+        if self.connectivity_table_action is not None:
+            self.connectivity_table_action.setEnabled(self._can_open_connectivity_table())
+
+    def show_connectivity_table(self):
+        """Open the connectivity table widget for the current project."""
+        if not self._can_open_connectivity_table():
+            return
+
+        features = self._data.get("features") if hasattr(self, "_data") else None
+        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
+        fig = self.centralWidget().fig_scatter
+
+        if features is None or meta_data is None:
+            return
+
+        widget = ConnectivityTable(
+            features,
+            figure=fig,
+            meta_data=meta_data,
+            parent=self,
+        )
+        fig.sync_widget(widget)
+        widget.show()
+
+        # Keep a strong reference so the window is not garbage collected.
+        self._connectivity_widgets.append(widget)
+        widget.destroyed.connect(
+            lambda _obj=None, w=widget: self._connectivity_widgets.remove(w)
+            if w in self._connectivity_widgets
+            else None
+        )
+
+    def _normalize_recent_state(self, state):
+        """Normalize and validate a recent project state payload."""
+        if not isinstance(state, dict):
+            return None
+
+        path = str(state.get("path", "")).strip()
+        if not path:
+            return None
+
+        project_name = str(state.get("project_name", "")).strip()
+        filter_expr = str(state.get("filter_expr", "")).strip()
+        embedding_mode = str(state.get("embedding_mode", "")).strip()
+
+        try:
+            project_index = int(state.get("project_index", -1))
+        except (TypeError, ValueError):
+            project_index = -1
+
+        source_type = str(state.get("source_type", "")).strip().lower()
+        if source_type not in ("local", "remote"):
+            source_type = "remote" if path.startswith(("http://", "https://")) else "local"
+
+        return {
+            "path": path,
+            "source_type": source_type,
+            "project_name": project_name,
+            "project_index": project_index,
+            "filter_expr": filter_expr,
+            "embedding_mode": embedding_mode,
+        }
+
+    def _recent_state_key(self, state):
+        """Stable identity for deduplicating recent items."""
+        return (
+            state.get("path", ""),
+            state.get("project_name", ""),
+            state.get("project_index", -1),
+            state.get("filter_expr", ""),
+            state.get("embedding_mode", ""),
+        )
+
+    def load_recent_projects(self):
+        """Load the saved recent project list from settings."""
+        raw = self.settings.value(self.RECENT_PROJECTS_KEY, "[]")
+        if isinstance(raw, (list, tuple)):
+            parsed = raw
+        else:
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = []
+
+        recent = []
+        seen = set()
+        for item in parsed:
+            normalized = self._normalize_recent_state(item)
+            if not normalized:
+                continue
+            key = self._recent_state_key(normalized)
+            if key in seen:
+                continue
+            seen.add(key)
+            recent.append(normalized)
+            if len(recent) >= self.MAX_RECENT_PROJECTS:
+                break
+        return recent
+
+    def save_recent_projects(self, recent):
+        """Persist recent projects to settings."""
+        self.settings.setValue(self.RECENT_PROJECTS_KEY, json.dumps(recent))
+
+    def add_recent_project(self, state):
+        """Insert a state at the top of the recent projects list."""
+        normalized = self._normalize_recent_state(state)
+        if not normalized:
+            return
+
+        recent = self.load_recent_projects()
+        recent = [r for r in recent if self._recent_state_key(r) != self._recent_state_key(normalized)]
+        recent.insert(0, normalized)
+        recent = recent[: self.MAX_RECENT_PROJECTS]
+        self.save_recent_projects(recent)
+        self.refresh_open_recent_menu()
+
+    def clear_recent_projects(self):
+        self.save_recent_projects([])
+        self.refresh_open_recent_menu()
+
+    def _recent_project_label(self, state):
+        """Plain-text fallback label for recent project menu action."""
+        project_name = state.get("project_name", "")
+        path = state.get("path", "")
+        filter_expr = state.get("filter_expr", "")
+
+        project_part = project_name or "(unnamed project)"
+        source_part = f"{path}"
+        filter_part = (
+            f"filters: {filter_expr}" if str(filter_expr).strip() else "filters: none"
+        )
+        return f"{project_part} | {source_part} | {filter_part}"
+
+    def _recent_project_rich_label(self, state):
+        """Rich-text label for recent project menu action."""
+        project_name = escape(state.get("project_name", "") or "(unnamed project)")
+        path = escape(state.get("path", ""))
+        filter_expr = str(state.get("filter_expr", "")).strip()
+        filter_part = escape(filter_expr) if filter_expr else "none"
+
+        return (
+            f"<span>{project_name}</span> "
+            f"<span style='font-size: 11px; color: #666666;'>source: {path}</span> "
+            f"<span style='font-size: 11px; color: #666666;'>filters: {filter_part}</span>"
+        )
+
+    def refresh_open_recent_menu(self):
+        """Rebuild the File -> Open Recent submenu."""
+        if self.open_recent_menu is None:
+            return
+
+        self.open_recent_menu.clear()
+        recent = self.load_recent_projects()
+
+        if not recent:
+            empty_action = QAction("No recent projects", self)
+            empty_action.setEnabled(False)
+            self.open_recent_menu.addAction(empty_action)
+            return
+
+        for state in recent:
+            # Native menus (macOS app menu) do not support custom rich-text widgets,
+            # so we use plain text there and rich text elsewhere.
+            if self.menuBar().isNativeMenuBar():
+                action = QAction(self._recent_project_label(state), self)
+                action.triggered.connect(
+                    lambda _checked=False, s=state: self.open_recent_project(s)
+                )
+                self.open_recent_menu.addAction(action)
+            else:
+                rich_action = QWidgetAction(self.open_recent_menu)
+                rich_action.setText(self._recent_project_label(state))
+                label = QLabel(self._recent_project_rich_label(state))
+                label.setTextFormat(Qt.RichText)
+                label.setContentsMargins(4, 2, 4, 2)
+                rich_action.setDefaultWidget(label)
+                rich_action.triggered.connect(
+                    lambda _checked=False, s=state: self.open_recent_project(s)
+                )
+                self.open_recent_menu.addAction(rich_action)
+
+        self.open_recent_menu.addSeparator()
+        clear_action = QAction("Clear Menu", self)
+        clear_action.triggered.connect(self.clear_recent_projects)
+        self.open_recent_menu.addAction(clear_action)
+
+    def _select_project_from_state(self, state):
+        """Resolve a saved state to a concrete project loader."""
+        path = state.get("path", "")
+        parsed = parse_directory(path)
+        if isinstance(parsed, SingleProjectLoader):
+            projects = [parsed]
+        else:
+            projects = list(parsed)
+
+        if not projects:
+            return None
+
+        project_name = state.get("project_name", "")
+        selected = None
+
+        if project_name:
+            for project in projects:
+                if project is not None and project.name == project_name:
+                    selected = project
+                    break
+
+        if selected is None:
+            project_index = state.get("project_index", -1)
+            if isinstance(project_index, int) and 0 <= project_index < len(projects):
+                selected = projects[project_index]
+
+        if selected is None:
+            for project in projects:
+                if project is not None:
+                    selected = project
+                    break
+
+        if selected is None:
+            return None
+
+        filter_expr = str(state.get("filter_expr", "")).strip()
+        if filter_expr:
+            selected.filter_expr = filter_expr
+
+        return selected
+
+    def open_recent_project(self, state):
+        """Load a project from a recent state entry."""
+        normalized = self._normalize_recent_state(state)
+        if not normalized:
+            return
+
+        try:
+            project = self._select_project_from_state(normalized)
+            if project is None:
+                return
+            self._load_project(project, normalized.get("embedding_mode", ""))
+            self.add_recent_project(normalized)
+        except Exception as e:
+            logger.error(f"Failed to open recent project: {e}")
+
+            # Fall back to opening the dialog with the saved state prefilled.
+            dialog = OpenProjectDialog(self, initial_state=normalized)
+            if dialog.exec() == QDialog.Accepted:
+                self._load_project_from_dialog(dialog)
+
     def closeEvent(self, event):
         # Persist geometry and maximized state
         try:
@@ -714,6 +993,12 @@ class MainWindow(QMainWindow):
         if dialog.exec() != QDialog.Accepted:
             return
 
+        self._load_project_from_dialog(dialog)
+
+    def _load_project_from_dialog(self, dialog):
+        """Load a project from a configured dialog instance."""
+        state = dialog.current_state()
+
         # Load the selected project
         project = dialog.selected_project_loader()
         logger.info(f"Loading selected project: {project}")
@@ -721,6 +1006,13 @@ class MainWindow(QMainWindow):
         # No project? Just return
         if project is None:
             return
+
+        self._load_project(project, state.get("embedding_mode", ""))
+        self.add_recent_project(state)
+
+    def _load_project(self, project, embedding_mode=""):
+        """Load a resolved project loader into the current visualization."""
+        embedding_mode = (embedding_mode or "").strip()
 
         # Create progress dialog with range
         progress = QProgressDialog("Loading project data...", None, 0, 100, self)
@@ -740,7 +1032,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
             # (Re-)calculate embeddings if needed
-            if dialog.embedding_combo.currentText() in (
+            if embedding_mode in (
                 "calculate from distances",
                 "calculate from features",
             ):
@@ -750,7 +1042,7 @@ class MainWindow(QMainWindow):
 
                 import umap
 
-                if dialog.embedding_combo.currentText() == "calculate from distances":
+                if embedding_mode == "calculate from distances":
                     reducer = umap.UMAP(
                         n_components=2,
                         n_neighbors=10,
@@ -849,14 +1141,56 @@ class MainWindow(QMainWindow):
                 if neuropil_mesh:
                     ngl_viewer.set_neuropil_mesh(neuropil_mesh)
 
+            self._current_project_loader = project
+            self._update_view_actions()
+            self.setWindowTitle(f"BigClust - {project.name}")
+
             progress.setValue(100)
         finally:
             progress.close()
 
 
-def main():
+def main(dataset=None):
     """Main application entry point."""
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    if dataset is not None:
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(0, lambda: _load_dataset_from_arg(window, dataset))
     sys.exit(app.exec())
+
+
+def _load_dataset_from_arg(window, dataset):
+    """Load a dataset specified via the --from command-line argument."""
+    try:
+        parsed = parse_directory(dataset)
+        if isinstance(parsed, SingleProjectLoader):
+            project = parsed
+        else:
+            projects = [p for p in parsed if p is not None]
+            if not projects:
+                logger.error(f"No projects found at: {dataset}")
+                return
+            if len(projects) == 1:
+                project = projects[0]
+            else:
+                # Multiple projects: show a quick selection dialog
+                from PySide6.QtWidgets import QInputDialog
+                names = [p.name for p in projects]
+                name, ok = QInputDialog.getItem(
+                    window,
+                    "Select Project",
+                    f"Multiple projects found in '{dataset}':\nSelect one to load:",
+                    names,
+                    0,
+                    False,
+                )
+                if not ok:
+                    return
+                project = projects[names.index(name)]
+        window._load_project(project)
+    except Exception as e:
+        logger.error(f"Failed to load dataset '{dataset}': {e}")
+        from PySide6.QtWidgets import QMessageBox
+        QMessageBox.critical(window, "Load Error", f"Could not load dataset:\n{e}")

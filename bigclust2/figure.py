@@ -5,11 +5,10 @@ import pygfx as gfx
 import numpy as np
 import pylinalg as la
 
-from abc import abstractmethod
 from functools import wraps
 from rendercanvas.auto import RenderCanvas
 
-from . import utils, visuals
+from . import visuals
 
 
 def update_figure(func):

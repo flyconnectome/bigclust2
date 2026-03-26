@@ -29,13 +29,14 @@ __all__ = ["OpenProjectDialog"]
 class OpenProjectDialog(QDialog):
     """Simple dialog to choose a project source."""
 
-    def __init__(self, parent=None):
+    def __init__(self, parent=None, initial_state=None):
         super().__init__(parent)
         self.setWindowTitle("Open Project")
         self.setModal(True)
         self.resize(600, 480)
         self.settings = QSettings("BigClust", "BigClustGUI")
         self.projects = []  # Store parsed projects
+        self.initial_state = initial_state or {}
         self.init_ui()
 
     def init_ui(self):
@@ -140,6 +141,9 @@ class OpenProjectDialog(QDialog):
         if last_project >= 0:
             self.project_combo.setCurrentIndex(last_project)
 
+        if self.initial_state:
+            self.apply_state(self.initial_state)
+
     def open_file_dialog(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Project Directory")
         if directory:
@@ -211,7 +215,7 @@ class OpenProjectDialog(QDialog):
                 self.project_combo.addItem(project.name, i)
         except Exception as e:
             # Invalid path - add red outline and print error
-            print(f"Error validating path: {e}")
+            logger.debug(f"Error validating path: {e}")
             self.path_edit.setStyleSheet(
                 "QLineEdit { border: 2px solid red; border-radius: 3px; }"
             )
@@ -239,7 +243,7 @@ class OpenProjectDialog(QDialog):
             self.load_btn.setEnabled(True)
         except Exception as e:
             # Invalid filter - add red outline and disable Load button
-            logger.warning(f"Invalid filter expression: {e}")
+            logger.debug(f"Invalid filter expression: {e}")
             self.filter_edit.setStyleSheet(
                 "QLineEdit { border: 2px solid red; border-radius: 3px; }"
             )
@@ -254,9 +258,53 @@ class OpenProjectDialog(QDialog):
         if project >= 0:
             self.settings.setValue("last_project_index", project)
         filter_expr = self.filter_edit.text().strip()
-        if filter_expr:
-            self.settings.setValue("last_project_filter", filter_expr)
+        self.settings.setValue("last_project_filter", filter_expr)
         self.accept()
+
+    def apply_state(self, state):
+        """Apply a previously captured dialog state."""
+        if not isinstance(state, dict):
+            return
+
+        path = str(state.get("path", "")).strip()
+        if path:
+            self.path_edit.setText(path)
+        else:
+            self.scan_path()
+
+        project_name = str(state.get("project_name", "")).strip()
+        if project_name:
+            idx = self.project_combo.findText(project_name)
+            if idx >= 0:
+                self.project_combo.setCurrentIndex(idx)
+        elif "project_index" in state:
+            try:
+                idx = int(state.get("project_index", -1))
+                if 0 <= idx < self.project_combo.count():
+                    self.project_combo.setCurrentIndex(idx)
+            except (TypeError, ValueError):
+                pass
+
+        filter_expr = str(state.get("filter_expr", "")).strip()
+        self.filter_edit.setText(filter_expr)
+
+        embedding_mode = str(state.get("embedding_mode", "")).strip()
+        if embedding_mode:
+            emb_idx = self.embedding_combo.findText(embedding_mode)
+            if emb_idx >= 0:
+                self.embedding_combo.setCurrentIndex(emb_idx)
+
+    def current_state(self):
+        """Capture the full current dialog state for reuse."""
+        path = self.selected_path()
+        return {
+            "path": path,
+            "source_type": "remote" if path.startswith(("http://", "https://")) else "local",
+            "project_index": self.project_combo.currentIndex(),
+            "project_name": self.project_combo.currentText(),
+            "filter_expr": self.selected_filter(),
+            "embedding_mode": self.embedding_combo.currentText(),
+        }
 
     def selected_path(self):
         return self.path_edit.text().strip()

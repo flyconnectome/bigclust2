@@ -24,6 +24,7 @@ dependencies = [
     "pyperclip>=1.11.0",
     "nglscenes",
     "pyarrow>=23.0.0",
+    "pyqtgraph>=0.14.0",
 ]
 
 [project.scripts]

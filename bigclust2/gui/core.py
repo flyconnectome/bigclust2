@@ -253,6 +253,7 @@ class MainWidget(QWidget):
             self.ngl_viewer.force_single_render()
 
         left_button.clicked.connect(toggle_sidebar)
+        self.fig_scatter.key_events["c"] = toggle_sidebar
 
         # Create three square buttons for the overlay (icon buttons)
         button_size = 25
@@ -362,14 +363,15 @@ class MainWidget(QWidget):
         sidebar.setMinimumWidth(150)
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
-        menu_items = [
-            QPushButton("Menu Item 1"),
-            QPushButton("Menu Item 2"),
-            QPushButton("Menu Item 3"),
-        ]
-        for i, item in enumerate(menu_items, start=1):
-            item.setToolTip(f"Bottom menu item {i}")
-            sidebar_layout.addWidget(item)
+
+        # Add viewer controls to sidebar
+        self.ngl_viewer.viewer.show_controls()
+        self.viewer_controls = self.ngl_viewer.viewer._controls
+        self.viewer_controls.setSizePolicy(
+            QSizePolicy.Expanding, QSizePolicy.Preferred
+        )
+        sidebar_layout.addWidget(self.viewer_controls, 1)
+
         sidebar_layout.addStretch()
         sidebar.setLayout(sidebar_layout)
         sidebar.setVisible(False)
@@ -417,6 +419,9 @@ class MainWidget(QWidget):
             self.force_update()
 
         left_button.clicked.connect(toggle_sidebar)
+
+        # Make it so that pressing 'c' in the viewer opens/closes the controls sidebar
+        self.ngl_viewer.viewer._key_events['c'] = toggle_sidebar
 
         # Create three square buttons for the overlay (icon buttons)
         button_size = 25

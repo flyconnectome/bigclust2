@@ -9,10 +9,15 @@ import traceback
 import pandas as pd
 import numpy as np
 
-from functools import partial
 from PySide6 import QtWidgets, QtCore
-from PySide6.QtGui import QAction
 from concurrent.futures import ThreadPoolExecutor
+
+from ...embeddings import (
+    is_precomputed_distance_matrix,
+    make_embedding_estimator,
+    prepare_embedding_input,
+    neighborhood_fidelity,
+)
 
 
 CLIO_CLIENT = None
@@ -22,6 +27,7 @@ FLYWIRE_ANN = None
 HB_ANN = None
 
 logger = logging.getLogger(__name__)
+
 
 def requires_selection(func):
     """Decorator to check if a selection is required."""
@@ -60,27 +66,32 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab3 = QtWidgets.QWidget()
         self.tab4 = QtWidgets.QWidget()
         self.tab5 = QtWidgets.QWidget()
+        self.tab6 = QtWidgets.QWidget()
         self.tab1_layout = QtWidgets.QVBoxLayout()
         self.tab2_layout = QtWidgets.QVBoxLayout()
         self.tab3_layout = QtWidgets.QVBoxLayout()
         self.tab4_layout = QtWidgets.QVBoxLayout()
         self.tab5_layout = QtWidgets.QVBoxLayout()
+        self.tab6_layout = QtWidgets.QVBoxLayout()
         self.tab1.setLayout(self.tab1_layout)
         self.tab2.setLayout(self.tab2_layout)
         self.tab3.setLayout(self.tab3_layout)
         self.tab4.setLayout(self.tab4_layout)
         self.tab5.setLayout(self.tab5_layout)
+        self.tab6.setLayout(self.tab6_layout)
         self.tabs.addTab(self.tab1, "General")
         self.tabs.addTab(self.tab2, "Annotation")
-        self.tabs.addTab(self.tab3, "Neuroglancer")
+        # self.tabs.addTab(self.tab3, "Neuroglancer")
         self.tabs.addTab(self.tab4, "Settings")
         self.tabs.addTab(self.tab5, "Embeddings")
+        self.tabs.addTab(self.tab6, "Fidelity")
 
         self.build_control_gui()
         # self.build_annotation_gui()
         # self.build_neuroglancer_gui()
         # self.build_settings_gui()
         self.build_embeddings_gui()
+        self.build_fidelity_gui()
 
         # Holds the futures for requested data
         self.futures = {}
@@ -571,17 +582,43 @@ class ScatterControls(QtWidgets.QWidget):
 
     def build_embeddings_gui(self):
         """Build the GUI for the Embeddings tab."""
-        # Add a button to run the umap
+        # Top action row
+        actions_row = QtWidgets.QHBoxLayout()
+        self.tab5_layout.addLayout(actions_row)
+
         self.umap_button = QtWidgets.QPushButton("Re-calculate positions")
         self.umap_button.setToolTip(
             "Run dimensionality reduction on the current dataset. This will overwrite the current positions."
         )
         self.umap_button.clicked.connect(self.calculate_embeddings)
-        self.tab5_layout.addWidget(self.umap_button)
+        actions_row.addWidget(self.umap_button)
 
-        # Add a dropdown to choose the method
-        self.umap_method_label = QtWidgets.QLabel("Method:")
-        self.tab5_layout.addWidget(self.umap_method_label)
+        actions_row.addStretch(1)
+
+        self.umap_auto_run = QtWidgets.QCheckBox("Auto run")
+        self.umap_auto_run.setToolTip(
+            "Automatically run dimensionality reduction when changing settings."
+        )
+        self.umap_auto_run.setChecked(False)
+        self.umap_auto_run.stateChanged.connect(
+            lambda: setattr(self.figure, "_auto_umap", self.umap_auto_run.isChecked())
+        )
+        actions_row.addWidget(self.umap_auto_run)
+
+        self.umap_selection_only = QtWidgets.QCheckBox("Selection only")
+        self.umap_selection_only.setToolTip(
+            "Run on current selection only. This spawns a new figure."
+        )
+        self.umap_selection_only.setChecked(False)
+        actions_row.addWidget(self.umap_selection_only)
+
+        # Input group
+        input_group = QtWidgets.QGroupBox("Input")
+        input_form = QtWidgets.QFormLayout()
+        input_form.setContentsMargins(8, 6, 8, 6)
+        input_group.setLayout(input_form)
+        self.tab5_layout.addWidget(input_group)
+
         self.umap_method_combo_box = QtWidgets.QComboBox()
         self.umap_method_combo_box.setToolTip(
             "Select the method to use for dimensionality reduction."
@@ -593,98 +630,128 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_method_combo_box.currentIndexChanged.connect(
             self.update_embedding_settings
         )
-        self.tab5_layout.addWidget(self.umap_method_combo_box)
+        input_form.addRow("Method:", self.umap_method_combo_box)
 
-        # Add a dropdown to choose which data to use for clustering
-        self.umap_dist_label = QtWidgets.QLabel("Data:")
-        self.tab5_layout.addWidget(self.umap_dist_label)
         self.umap_dist_combo_box = QtWidgets.QComboBox()
         self.umap_dist_combo_box.setToolTip(
-            "Select the distance to use for clustering."
+            "Select the data source used for embedding."
         )
 
         def update_and_calculate_embeddings_maybe():
             """Update the run button when the distance is changed."""
-            # Nothing selected? Just return
-            if not self.umap_dist_combo_box.currentText():
-                return
-
-            dists = self.figure.dists[self.umap_dist_combo_box.currentText()]
-            if dists.shape[0] == dists.shape[1]:
-                self.pca_check.setEnabled(False)
-            else:
-                self.pca_check.setEnabled(True)
-
+            self._update_embedding_input_controls()
             self.calculate_embeddings_maybe()
 
         self.umap_dist_combo_box.currentIndexChanged.connect(
             update_and_calculate_embeddings_maybe
         )
-        self.tab5_layout.addWidget(self.umap_dist_combo_box)
-        # Populate options
-        self.update_umap_options()
+        input_form.addRow("Data:", self.umap_dist_combo_box)
 
-        # Add a checkbox and spinbox to optionally run PCA before UMAP
-        hlayout = QtWidgets.QHBoxLayout()
-        self.tab5_layout.addLayout(hlayout)
-        self.pca_check = QtWidgets.QCheckBox("Reduce dimensions to")
+        # Feature-dependent options are grouped together and enabled only for feature vectors.
+        self.feature_options_group = QtWidgets.QGroupBox("Feature Options")
+        prep_form = QtWidgets.QFormLayout()
+        prep_form.setContentsMargins(8, 6, 8, 6)
+        self.feature_options_group.setLayout(prep_form)
+        self.tab5_layout.addWidget(self.feature_options_group)
+
+        # For non-square inputs (feature vectors), allow choosing a distance metric.
+        self.umap_feature_metric_widget = QtWidgets.QWidget()
+        metric_layout = QtWidgets.QHBoxLayout()
+        metric_layout.setContentsMargins(0, 0, 0, 0)
+        self.umap_feature_metric_widget.setLayout(metric_layout)
+        self.umap_feature_metric_combo_box = QtWidgets.QComboBox()
+        self.umap_feature_metric_combo_box.setToolTip(
+            "Distance metric used when embedding feature vectors."
+        )
+        self.umap_feature_metric_combo_box.addItems(
+            ["cosine", "euclidean", "manhattan", "correlation", "chebyshev"]
+        )
+        self.umap_feature_metric_combo_box.currentIndexChanged.connect(
+            self.calculate_embeddings_maybe
+        )
+        metric_layout.addWidget(self.umap_feature_metric_combo_box)
+        prep_form.addRow("Feature metric:", self.umap_feature_metric_widget)
+
+        # Optional feature rebalancing to reduce dominance of a few dimensions.
+        self.umap_feature_rebalance_widget = QtWidgets.QWidget()
+        rebalance_layout = QtWidgets.QHBoxLayout()
+        rebalance_layout.setContentsMargins(0, 0, 0, 0)
+        self.umap_feature_rebalance_widget.setLayout(rebalance_layout)
+        self.umap_feature_rebalance_combo_box = QtWidgets.QComboBox()
+        self.umap_feature_rebalance_combo_box.setToolTip(
+            "Preprocessing applied per feature before embedding to reduce feature dominance."
+        )
+        self.umap_feature_rebalance_combo_box.addItems(
+            ["none", "z-score", "robust (median/IQR)", "log1p + z-score"]
+        )
+        self.umap_feature_rebalance_combo_box.currentIndexChanged.connect(
+            self.calculate_embeddings_maybe
+        )
+        rebalance_layout.addWidget(self.umap_feature_rebalance_combo_box)
+        prep_form.addRow("Feature rebalancing:", self.umap_feature_rebalance_widget)
+
+        pca_widget = QtWidgets.QWidget()
+        pca_row = QtWidgets.QHBoxLayout()
+        pca_row.setContentsMargins(0, 0, 0, 0)
+        pca_widget.setLayout(pca_row)
+
+        self.pca_check = QtWidgets.QCheckBox("Enable PCA")
         self.pca_check.setToolTip(
-            "Whether to reduce the dimensions of the data before running UMAP."
+            "Reduce dimensionality before embedding (feature vectors only)."
         )
         self.pca_check.setChecked(False)
-        hlayout.addWidget(self.pca_check)
+        pca_row.addWidget(self.pca_check)
+
         self.pca_n_components_slider = QtWidgets.QSpinBox()
         self.pca_n_components_slider.setRange(1, 2000)
         self.pca_n_components_slider.setSingleStep(1)
         self.pca_n_components_slider.setValue(100)
         self.pca_n_components_slider.setToolTip(
-            "Set the number of components to keep after PCA. This is useful for large datasets."
+            "Number of components to keep after PCA."
         )
         self.pca_n_components_slider.valueChanged.connect(
             self.calculate_embeddings_maybe
         )
         self.pca_n_components_slider.setEnabled(self.pca_check.isChecked())
-        hlayout.addWidget(self.pca_n_components_slider)
+        pca_row.addWidget(self.pca_n_components_slider)
+
         self.pca_check.stateChanged.connect(
             lambda _: self.pca_n_components_slider.setEnabled(
                 self.pca_check.isChecked()
             )
         )
+        prep_form.addRow("PCA:", pca_widget)
 
-        # Add a checkbox to automatically run UMAP
-        self.umap_auto_run = QtWidgets.QCheckBox("Auto run")
-        self.umap_auto_run.setToolTip(
-            "Whether to automatically run dimensionality reduction when changing settings."
-        )
-        self.umap_auto_run.setChecked(False)
-        self.umap_auto_run.stateChanged.connect(
-            lambda: setattr(self.figure, "_auto_umap", self.umap_auto_run.isChecked())
-        )
-        self.tab5_layout.addWidget(self.umap_auto_run)
+        # Method-specific settings
+        settings_group = QtWidgets.QGroupBox("Method Settings")
+        settings_layout = QtWidgets.QVBoxLayout()
+        settings_layout.setContentsMargins(8, 6, 8, 6)
+        settings_group.setLayout(settings_layout)
+        self.tab5_layout.addWidget(settings_group)
 
-        # Add checkbox to run UMAP on the current selection
-        self.umap_selection_only = QtWidgets.QCheckBox("Run on selection only")
-        self.umap_selection_only.setToolTip(
-            "Whether to run dimensionality reduction on the current selection only. This will spawn a new figure."
-        )
-        self.umap_selection_only.setChecked(False)
-        self.tab5_layout.addWidget(self.umap_selection_only)
+        method_common_widget = QtWidgets.QWidget()
+        method_common_form = QtWidgets.QFormLayout()
+        method_common_form.setContentsMargins(0, 0, 0, 0)
+        method_common_widget.setLayout(method_common_form)
+        settings_layout.addWidget(method_common_widget)
 
-        ## Settings for UMAP:
-        # Create a wrapper layout and widget for UMAP settings
+        self.umap_random_seed = QtWidgets.QLineEdit()
+        self.umap_random_seed.setToolTip(
+            "Random seed. Leave empty for random initialization."
+        )
+        self.umap_random_seed.setPlaceholderText("random initialization")
+        self.umap_random_seed.setText(str(42))
+        self.umap_random_seed.textChanged.connect(
+            lambda x: self.calculate_embeddings_maybe()
+        )
+        method_common_form.addRow("Random seed:", self.umap_random_seed)
+
         self.umap_settings_widget = QtWidgets.QWidget()
-        self.umap_settings_layout = QtWidgets.QVBoxLayout()
+        self.umap_settings_layout = QtWidgets.QFormLayout()
+        self.umap_settings_layout.setContentsMargins(0, 0, 0, 0)
         self.umap_settings_widget.setLayout(self.umap_settings_layout)
-        self.tab5_layout.addWidget(self.umap_settings_widget)
+        settings_layout.addWidget(self.umap_settings_widget)
 
-        # Spinbox for number of neighbors
-        hlayout = QtWidgets.QHBoxLayout()
-        self.umap_settings_layout.addLayout(hlayout)
-        n_neighbors_label = QtWidgets.QLabel("Number of neighbors:")
-        n_neighbors_label.setToolTip(
-            "Set the number of neighbors for the UMAP. This is useful for large datasets."
-        )
-        hlayout.addWidget(n_neighbors_label)
         self.umap_n_neighbors_slider = QtWidgets.QSpinBox()
         self.umap_n_neighbors_slider.setRange(1, 200)
         self.umap_n_neighbors_slider.setSingleStep(1)
@@ -692,118 +759,231 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_n_neighbors_slider.valueChanged.connect(
             self.calculate_embeddings_maybe
         )
-        hlayout.addWidget(self.umap_n_neighbors_slider)
-
-        # Spinbox for minimum distance
-        hlayout = QtWidgets.QHBoxLayout()
-        self.umap_settings_layout.addLayout(hlayout)
-        umap_min_dist_label = QtWidgets.QLabel("Minimum distance:")
-        umap_min_dist_label.setToolTip(
-            "Smaller values will result in a more clustered/clumped embedding where nearby points "
-            "on the manifold are drawn closer together, while larger values will "
-            "result on a more even dispersal of points. The value should be set "
-            "relative to the ``spread`` value, which determines the scale at which "
-            "embedded points will be spread out."
+        self.umap_settings_layout.addRow(
+            "Number of neighbors:", self.umap_n_neighbors_slider
         )
-        hlayout.addWidget(umap_min_dist_label)
+
         self.umap_min_dist_slider = QtWidgets.QDoubleSpinBox()
-        self.umap_min_dist_slider.setRange(0.0, 10.0)
+        self.umap_min_dist_slider.setRange(0.0, 100.0)
         self.umap_min_dist_slider.setSingleStep(0.05)
         self.umap_min_dist_slider.setValue(0.1)
         self.umap_min_dist_slider.valueChanged.connect(self.calculate_embeddings_maybe)
-        hlayout.addWidget(self.umap_min_dist_slider)
+        self.umap_settings_layout.addRow("Minimum distance:", self.umap_min_dist_slider)
 
-        # Spinbox for spread
-        hlayout = QtWidgets.QHBoxLayout()
-        self.umap_settings_layout.addLayout(hlayout)
-        spread_label = QtWidgets.QLabel("Spread:")
-        spread_label.setToolTip(
-            "The effective scale of embedded points. In combination with ``min_dist`` "
-            "this determines how clustered/clumped the embedded points are."
-        )
-        hlayout.addWidget(spread_label)
         self.umap_spread_slider = QtWidgets.QDoubleSpinBox()
-        self.umap_spread_slider.setRange(0.0, 10.0)
+        self.umap_spread_slider.setRange(0.0, 1000.0)
         self.umap_spread_slider.setSingleStep(0.05)
         self.umap_spread_slider.setValue(1)
         self.umap_spread_slider.valueChanged.connect(self.calculate_embeddings_maybe)
-        hlayout.addWidget(self.umap_spread_slider)
+        self.umap_settings_layout.addRow("Spread:", self.umap_spread_slider)
 
-        ## Settings for MDS
-
-        # Create a wrapper layout and widget for MDS settings
         self.mds_settings_widget = QtWidgets.QWidget()
-        self.mds_settings_layout = QtWidgets.QVBoxLayout()
+        self.mds_settings_layout = QtWidgets.QFormLayout()
+        self.mds_settings_layout.setContentsMargins(0, 0, 0, 0)
         self.mds_settings_widget.setLayout(self.mds_settings_layout)
-        self.tab5_layout.addWidget(self.mds_settings_widget)
+        settings_layout.addWidget(self.mds_settings_widget)
 
-        # Spinbox for number of initialisations
-        hlayout = QtWidgets.QHBoxLayout()
-        self.mds_settings_layout.addLayout(hlayout)
-        n_init_label = QtWidgets.QLabel("Number of initializations:")
-        n_init_label.setToolTip("Set the number of initializations for the MDS.")
-        hlayout.addWidget(n_init_label)
         self.mds_n_init_slider = QtWidgets.QSpinBox()
         self.mds_n_init_slider.setRange(1, 200)
         self.mds_n_init_slider.setSingleStep(1)
         self.mds_n_init_slider.setValue(4)
         self.mds_n_init_slider.valueChanged.connect(self.calculate_embeddings_maybe)
-        hlayout.addWidget(self.mds_n_init_slider)
-
-        # Spinbox for max number of iterations
-        hlayout = QtWidgets.QHBoxLayout()
-        self.mds_settings_layout.addLayout(hlayout)
-        max_iter_label = QtWidgets.QLabel("Max iterations:")
-        max_iter_label.setToolTip(
-            "Set the maximum number of iterations for the MDS. This is useful for large datasets."
+        self.mds_settings_layout.addRow(
+            "Number of initializations:", self.mds_n_init_slider
         )
-        hlayout.addWidget(max_iter_label)
+
         self.mds_max_iter_slider = QtWidgets.QSpinBox()
         self.mds_max_iter_slider.setRange(1, 10000)
         self.mds_max_iter_slider.setSingleStep(1)
         self.mds_max_iter_slider.setValue(300)
         self.mds_max_iter_slider.valueChanged.connect(self.calculate_embeddings_maybe)
-        hlayout.addWidget(self.mds_max_iter_slider)
+        self.mds_settings_layout.addRow("Max iterations:", self.mds_max_iter_slider)
 
-        # Spinbox for relative tolerance
-        hlayout = QtWidgets.QHBoxLayout()
-        self.mds_settings_layout.addLayout(hlayout)
-        rel_tol_label = QtWidgets.QLabel("Relative tolerance:")
-        rel_tol_label.setToolTip(
-            "Relative tolerance with respect to stress at which to declare convergence."
-        )
-        hlayout.addWidget(rel_tol_label)
         self.mds_eps_slider = QtWidgets.QDoubleSpinBox()
         self.mds_eps_slider.setRange(0.0000, 1.0000)
         self.mds_eps_slider.setSingleStep(0.001)
         self.mds_eps_slider.setDecimals(4)
         self.mds_eps_slider.setValue(0.001)
         self.mds_eps_slider.valueChanged.connect(self.calculate_embeddings_maybe)
-        hlayout.addWidget(self.mds_eps_slider)
+        self.mds_settings_layout.addRow("Relative tolerance:", self.mds_eps_slider)
 
-        ## General settings
+        # Populate options
+        self.update_umap_options()
 
-        # Random seed
-        hlayout = QtWidgets.QHBoxLayout()
-        self.tab5_layout.addLayout(hlayout)
-        random_seed_label = QtWidgets.QLabel("Random seed:")
-        hlayout.addWidget(random_seed_label)
-        self.umap_random_seed = QtWidgets.QLineEdit()
-        self.umap_random_seed.setToolTip(
-            "Set the random seed. Leave empty for random initialization."
-        )
-        self.umap_random_seed.setPlaceholderText("random initialization")
-        self.umap_random_seed.setText(str(42))
-        self.umap_random_seed.textChanged.connect(
-            lambda x: self.calculate_embeddings_maybe()
-        )
-        hlayout.addWidget(self.umap_random_seed)
-
-        # Stretch
         self.tab5_layout.addStretch(1)
 
-        # Make sure the UMAP settings are hidden by default
+        # Make sure method settings are in sync by default.
         self.update_embedding_settings()
+
+    def build_fidelity_gui(self):
+        """Build the GUI for the Fidelity tab."""
+
+        # Neighboorhood fidelity settings
+        settings_group = QtWidgets.QGroupBox("Neighborhood Fidelity")
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_group.setLayout(settings_form)
+        self.tab6_layout.addWidget(settings_group)
+
+        self.add_tooltip(
+            settings_group,
+            "Neighborhood fidelity measures how well local relationships are "
+            "preserved by the 2D embedding. Higher values mean nearby neurons "
+            "in the original space remain nearby in the plot.",
+            anchor="group_label",
+        )
+
+        self.fidelity_point_size_check = QtWidgets.QCheckBox()
+        self.fidelity_point_size_check.setToolTip(
+            "Show neighborhood fidelity scores as point sizes."
+        )
+        self.fidelity_point_size_check.setChecked(False)
+        self.fidelity_point_size_check.stateChanged.connect(self.set_fidelity_mode)
+        settings_form.addRow("Show:", self.fidelity_point_size_check)
+
+        self.fidelity_k_slider = QtWidgets.QSpinBox()
+        self.fidelity_k_slider.setRange(1, 200)
+        self.fidelity_k_slider.setSingleStep(1)
+        self.fidelity_k_slider.setValue(10)
+        self.fidelity_k_slider.setToolTip(
+            "Number of nearest neighbors (k) used to compute neighborhood fidelity."
+        )
+        self.fidelity_k_slider.valueChanged.connect(self.set_fidelity_mode)
+        settings_form.addRow("k neighbors:", self.fidelity_k_slider)
+
+        self.fidelity_distance_combo_box = QtWidgets.QComboBox()
+        self.fidelity_distance_combo_box.setToolTip(
+            "Distance metric used when fidelity is computed from feature vectors."
+        )
+        self.fidelity_distance_combo_box.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        self.fidelity_distance_combo_box.currentIndexChanged.connect(
+            self.set_fidelity_mode
+        )
+        settings_form.addRow("Distance:", self.fidelity_distance_combo_box)
+
+        self.fidelity_use_rank_check = QtWidgets.QCheckBox("Use rank")
+        self.fidelity_use_rank_check.setToolTip(
+            "Use rank-based neighborhood overlap instead of distance-weighted overlap."
+        )
+        self.fidelity_use_rank_check.setChecked(True)
+        self.fidelity_use_rank_check.stateChanged.connect(self.set_fidelity_mode)
+        settings_form.addRow(self.fidelity_use_rank_check)
+
+        # KNN lines
+        settings_group = QtWidgets.QGroupBox("K-Nearest Neighbors")
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_group.setLayout(settings_form)
+        self.tab6_layout.addWidget(settings_group)
+
+        self.add_tooltip(
+            settings_group,
+            "Show lines connecting each point to its k nearest neighbors in the original feature space. "
+            "This can help visualize how well local relationships are preserved in the embedding.",
+            anchor="group_label",
+        )
+
+        self.fidelity_knn_combo_box = QtWidgets.QComboBox()
+        self.fidelity_knn_combo_box.setToolTip(
+            "Show lines connecting each point to its k nearest neighbors in the original feature space."
+        )
+        self.fidelity_knn_combo_box.addItems(["Off", "Selected only", "All points"])
+        self.fidelity_knn_combo_box.currentIndexChanged.connect(
+            self.set_knn_edges
+        )
+        settings_form.addRow("Show:", self.fidelity_knn_combo_box)
+
+        self.fidelity_knn_k_slider = QtWidgets.QSpinBox()
+        self.fidelity_knn_k_slider.setRange(1, 200)
+        self.fidelity_knn_k_slider.setSingleStep(1)
+        self.fidelity_knn_k_slider.setValue(10)
+        self.fidelity_knn_k_slider.setToolTip(
+            "Number of nearest neighbors (k) used to compute neighborhood fidelity."
+        )
+        self.fidelity_knn_k_slider.valueChanged.connect(self.set_knn_edges)
+        settings_form.addRow("k neighbors:", self.fidelity_knn_k_slider)
+
+        self.fidelity_knn_distance_combo_box = QtWidgets.QComboBox()
+        self.fidelity_knn_distance_combo_box.setToolTip(
+            "Distance metric used when fidelity is computed from feature vectors."
+        )
+        self.fidelity_knn_distance_combo_box.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        self.fidelity_knn_distance_combo_box.currentIndexChanged.connect(
+            self.set_knn_edges
+        )
+        settings_form.addRow("Distance:", self.fidelity_knn_distance_combo_box)
+
+        self.tab6_layout.addStretch(1)
+
+        self.update_fidelity_options()
+
+    def add_tooltip(self, widget, text, anchor="group_label"):
+        """Add a reusable round help icon tooltip to a widget."""
+        if not hasattr(self, "_tooltip_anchors"):
+            self._tooltip_anchors = {}
+
+        button = QtWidgets.QToolButton(widget)
+        button.setText("?")
+        button.setAutoRaise(True)
+        button.setFixedSize(14, 14)
+        button.setStyleSheet(
+            "QToolButton {"
+            "border: 1px solid palette(mid);"
+            "border-radius: 7px;"
+            "font-weight: bold;"
+            "padding: 0px;"
+            "}"
+        )
+        button.setToolTip(text)
+
+        self._tooltip_anchors.setdefault(widget, []).append((button, anchor))
+        widget.installEventFilter(self)
+        QtCore.QTimer.singleShot(0, lambda: self._position_tooltips(widget))
+        return button
+
+    def _position_tooltips(self, widget):
+        """Position one or more tooltip icons for a widget."""
+        items = getattr(self, "_tooltip_anchors", {}).get(widget, [])
+        if not items:
+            return
+
+        for i, (button, anchor) in enumerate(items):
+            if anchor == "group_label" and isinstance(widget, QtWidgets.QGroupBox):
+                opt = QtWidgets.QStyleOptionGroupBox()
+                widget.initStyleOption(opt)
+                label_rect = widget.style().subControlRect(
+                    QtWidgets.QStyle.CC_GroupBox,
+                    opt,
+                    QtWidgets.QStyle.SC_GroupBoxLabel,
+                    widget,
+                )
+                if label_rect.isValid():
+                    x = label_rect.right() + 4 + i * (button.width() + 3)
+                    y = label_rect.center().y() - (button.height() // 2)
+                else:
+                    x = widget.width() - button.width() - 6 - i * (button.width() + 3)
+                    y = 6
+            else:
+                x = widget.width() - button.width() - 6 - i * (button.width() + 3)
+                y = 6
+
+            max_x = max(0, widget.width() - button.width() - 6)
+            button.move(max(0, min(x, max_x)), max(0, y))
+            button.raise_()
+
+    def eventFilter(self, obj, event):
+        """Keep custom tooltip buttons aligned when host widgets change."""
+        if obj in getattr(self, "_tooltip_anchors", {}) and event.type() in (
+            QtCore.QEvent.Resize,
+            QtCore.QEvent.Show,
+            QtCore.QEvent.LayoutRequest,
+        ):
+            self._position_tooltips(obj)
+        return super().eventFilter(obj, event)
 
     def add_split(self, layout):
         """Add horizontal divider."""
@@ -815,6 +995,7 @@ class ScatterControls(QtWidgets.QWidget):
         """Update the controls based on the current figure state."""
         # self.update_ann_combo_box()
         self.update_umap_options()
+        self.update_fidelity_options()
         self.update_label_combo_box()
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
@@ -860,27 +1041,107 @@ class ScatterControls(QtWidgets.QWidget):
         """Update the items in the UMAP distance combo box."""
         self.umap_dist_combo_box.clear()
 
-        if getattr(self.figure, "dists", None) is None:
-            self.tabs.setTabEnabled(4, False)
-            return
-        self.tabs.setTabEnabled(4, True)
+        embeddings_tab_index = self.tabs.indexOf(self.tab5)
 
+        if getattr(self.figure, "dists", None) is None:
+            self.tabs.setTabEnabled(embeddings_tab_index, False)
+            return
+        self.tabs.setTabEnabled(embeddings_tab_index, True)
+
+        # Add any distances we have
         if isinstance(self.figure.dists, dict):
             for key in self.figure.dists.keys():
                 self.umap_dist_combo_box.addItem(key)
 
-        # Hide the options if the distances are precomputed
-        if not isinstance(self.figure.dists, dict) and (
-            self.figure.dists.shape[0] == self.figure.dists.shape[1]
+        self._update_embedding_input_controls()
+
+    def update_fidelity_options(self):
+        """Update fidelity controls based on available distances/features."""
+        fidelity_tab_index = self.tabs.indexOf(self.tab6)
+        dists = getattr(self.figure, "dists", None)
+
+        if dists is None:
+            self.tabs.setTabEnabled(fidelity_tab_index, False)
+            for box in (
+                self.fidelity_distance_combo_box,
+                self.fidelity_knn_distance_combo_box,
+            ):
+                box.blockSignals(True)
+                box.clear()
+                box.blockSignals(False)
+            return
+
+        self.tabs.setTabEnabled(fidelity_tab_index, True)
+
+        options = []
+        has_precomputed = False
+        has_features = False
+
+        if isinstance(dists, dict):
+            has_precomputed = "distances" in dists
+            has_features = "features" in dists
+        elif isinstance(dists, (np.ndarray, pd.DataFrame)):
+            has_precomputed = dists.shape[0] == dists.shape[1]
+            has_features = not has_precomputed
+
+        if has_precomputed:
+            options.append("precomputed")
+        if has_features:
+            options.extend(
+                ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+            )
+
+        for box in (
+            self.fidelity_distance_combo_box,
+            self.fidelity_knn_distance_combo_box,
         ):
+            current_text = box.currentText()
+            box.blockSignals(True)
+            box.clear()
+            box.addItems(options)
+            box.blockSignals(False)
+
+            if current_text in options:
+                box.setCurrentText(current_text)
+            elif options:
+                box.setCurrentIndex(0)
+
+            box.setEnabled(len(options) > 1)
+
+    def _selected_embedding_data(self):
+        """Return the currently selected distance/feature matrix."""
+        dists = getattr(self.figure, "dists", None)
+        if dists is None:
+            return None
+
+        if isinstance(dists, dict):
+            key = self.umap_dist_combo_box.currentText()
+            if not key:
+                return None
+            return dists.get(key)
+
+        return dists
+
+    def _update_embedding_input_controls(self):
+        """Toggle embedding controls based on selected input type."""
+        if not hasattr(self, "pca_check"):
+            return
+
+        arr = self._selected_embedding_data()
+        is_feature_input = (arr is not None) and (
+            not is_precomputed_distance_matrix(arr)
+        )
+
+        if hasattr(self, "feature_options_group"):
+            self.feature_options_group.setEnabled(is_feature_input)
+
+        # PCA pre-reduction is only meaningful for feature vectors.
+        if not is_feature_input:
             self.pca_check.setChecked(False)
-            self.pca_check.setEnabled(False)
-        elif isinstance(self.figure.dists, dict) and (
-            self.figure.dists[self.umap_dist_combo_box.currentText()].shape[0]
-            == self.figure.dists[self.umap_dist_combo_box.currentText()].shape[1]
-        ):
-            self.pca_check.setChecked(False)
-            self.pca_check.setEnabled(False)
+        self.pca_check.setEnabled(is_feature_input)
+        self.pca_n_components_slider.setEnabled(
+            is_feature_input and self.pca_check.isChecked()
+        )
 
     # def update_ann_combo_box(self):
     #     """Update the items in the annotation combo box."""
@@ -1304,6 +1565,31 @@ class ScatterControls(QtWidgets.QWidget):
         """Draw polygons around neurons with the same label."""
         self.figure.show_label_lines = self.label_outlines_check.isChecked()
 
+    def set_fidelity_mode(self):
+        """Set the fidelity mode."""
+        if not self.fidelity_point_size_check.isChecked():
+            self.figure.fidelity_mode = False
+        else:
+            self.figure.fidelity_mode = {
+                "mode": "point_size",
+                "k": self.fidelity_k_slider.value(),
+                "distance": self.fidelity_distance_combo_box.currentText(),
+                "rank": self.fidelity_use_rank_check.isChecked(),
+            }
+
+    def set_knn_edges(self):
+        """Set the KNN line mode."""
+        mode = self.fidelity_knn_combo_box.currentText()
+        if mode == "Off":
+            self.figure.show_knn_edges = False
+        else:
+            self.figure.show_knn_edges = {
+                "mode": "selected" if mode == "Selected only" else "all",
+                "k": self.fidelity_knn_k_slider.value(),
+                "metric": self.fidelity_knn_distance_combo_box.currentText(),
+                "distance": self.fidelity_knn_distance_combo_box.currentText(),
+            }
+
     def set_labels(self):
         """Set the leaf labels."""
         label = self.label_combo_box.currentText()
@@ -1391,57 +1677,32 @@ class ScatterControls(QtWidgets.QWidget):
 
     def calculate_embeddings(self):
         """Re-calculate embeddings and move points to their new positions."""
-        if isinstance(self.figure.dists, dict):
-            dists = self.figure.dists[self.umap_dist_combo_box.currentText()]
-        else:
-            dists = self.figure.dists
+        dists = self._selected_embedding_data()
+        if dists is None:
+            return
 
-        metric = "precomputed" if (dists.shape[0] == dists.shape[1]) else "cosine"
-
-        if self.umap_method_combo_box.currentText() == "UMAP":
-            import umap
-
-            fit = umap.UMAP(
-                metric=metric,
-                n_components=2,
-                n_neighbors=self.umap_n_neighbors_slider.value(),
-                min_dist=self.umap_min_dist_slider.value(),
-                spread=self.umap_spread_slider.value(),
-                random_state=(
-                    int(self.umap_random_seed.text())
-                    if self.umap_random_seed.text()
-                    else None
-                ),
-            )
-        elif self.umap_method_combo_box.currentText() == "MDS":
-            from sklearn.manifold import MDS
-
-            fit = MDS(
-                n_components=2,
-                n_init=self.mds_n_init_slider.value(),
-                max_iter=self.mds_max_iter_slider.value(),
-                eps=self.mds_eps_slider.value(),
-                dissimilarity=metric,
-                random_state=(
-                    int(self.umap_random_seed.text())
-                    if self.umap_random_seed.text()
-                    else None
-                ),
-            )
-        elif self.umap_method_combo_box.currentText() == "PCA":
-            # We need KernelPCA because we are using a precomputed distance matrix
-            from sklearn.decomposition import KernelPCA
-
-            fit = KernelPCA(
-                n_components=2,
-                kernel=metric,
-            )
-        elif self.umap_method_combo_box.currentText() == "PaCMAP":
-            import pacmap
-
-            fit = pacmap.PaCMAP(
-                n_components=2, n_neighbors=10, MN_ratio=0.5, FP_ratio=2.0
-            )
+        is_precomputed = is_precomputed_distance_matrix(dists)
+        metric = (
+            "precomputed"
+            if is_precomputed
+            else self.umap_feature_metric_combo_box.currentText().strip().lower()
+        )
+        method = self.umap_method_combo_box.currentText()
+        random_state = (
+            int(self.umap_random_seed.text()) if self.umap_random_seed.text() else None
+        )
+        fit = make_embedding_estimator(
+            method,
+            metric=metric,
+            is_precomputed=is_precomputed,
+            random_state=random_state,
+            umap_n_neighbors=self.umap_n_neighbors_slider.value(),
+            umap_min_dist=self.umap_min_dist_slider.value(),
+            umap_spread=self.umap_spread_slider.value(),
+            mds_n_init=self.mds_n_init_slider.value(),
+            mds_max_iter=self.mds_max_iter_slider.value(),
+            mds_eps=self.mds_eps_slider.value(),
+        )
 
         if self.umap_selection_only.isChecked():
             assert isinstance(dists, pd.DataFrame)
@@ -1455,28 +1716,28 @@ class ScatterControls(QtWidgets.QWidget):
                 dists = dists.iloc[selected_indices].copy()
 
             # Get the data for the selected indices
-            data = (
-                self.meta_data.iloc[selected_indices].copy().reset_index(drop=True)
+            data = self.meta_data.iloc[selected_indices].copy().reset_index(drop=True)
+
+            pca_components = (
+                self.pca_n_components_slider.value()
+                if ((not is_precomputed) and self.pca_check.isChecked())
+                else None
             )
-
-            if metric == "cosine" and self.pca_check.isChecked():
-                from sklearn.decomposition import PCA
-
-                pca = PCA(
-                    n_components=self.pca_n_components_slider.value(),
-                    random_state=(
-                        int(self.umap_random_seed.text())
-                        if self.umap_random_seed.text()
-                        else None
-                    ),
-                )
+            if pca_components is not None:
                 print(
-                    f" Using PCA to reduce {dists.shape} observation vector to {self.pca_n_components_slider.value()} components",
+                    f" Using PCA to reduce {dists.shape} observation vector to {pca_components} components",
                     flush=True,
                 )
-                _dists = pca.fit_transform(dists.astype(np.float64))
-            else:
-                _dists = dists.values.astype(np.float64)
+
+            _dists = prepare_embedding_input(
+                dists.values if isinstance(dists, pd.DataFrame) else dists,
+                is_precomputed=is_precomputed,
+                method=method,
+                metric=metric,
+                rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
+                pca_n_components=pca_components,
+                random_state=random_state,
+            )
 
             # Re-calculate the x/y coordinates
             with warnings.catch_warnings(action="ignore"):
@@ -1499,25 +1760,26 @@ class ScatterControls(QtWidgets.QWidget):
                 new_fig.sync_viewer(ngl)
 
         else:
-            if isinstance(dists, pd.DataFrame):
-                dists = dists.values.astype(np.float64)
-
-            if metric == "cosine" and self.pca_check.isChecked():
-                from sklearn.decomposition import PCA
-
-                pca = PCA(
-                    n_components=self.pca_n_components_slider.value(),
-                    random_state=(
-                        int(self.umap_random_seed.text())
-                        if self.umap_random_seed.text()
-                        else None
-                    ),
-                )
+            pca_components = (
+                self.pca_n_components_slider.value()
+                if ((not is_precomputed) and self.pca_check.isChecked())
+                else None
+            )
+            if pca_components is not None:
                 print(
-                    f" Using PCA to reduce {dists.shape} observation vector to {self.pca_n_components_slider.value()} components",
+                    f" Using PCA to reduce {dists.shape} observation vector to {pca_components} components",
                     flush=True,
                 )
-                dists = pca.fit_transform(dists)
+
+            dists = prepare_embedding_input(
+                dists.values if isinstance(dists, pd.DataFrame) else dists,
+                is_precomputed=is_precomputed,
+                method=method,
+                metric=metric,
+                rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
+                pca_n_components=pca_components,
+                random_state=random_state,
+            )
 
             with warnings.catch_warnings(action="ignore"):
                 xy = fit.fit_transform(dists)
@@ -1527,18 +1789,19 @@ class ScatterControls(QtWidgets.QWidget):
 
     def update_embedding_settings(self):
         """Update the embedding settings based on the selected method."""
-        if self.umap_method_combo_box.currentText() == "UMAP":
+        method = self.umap_method_combo_box.currentText()
+        if method == "UMAP":
             self.umap_settings_widget.show()
             self.mds_settings_widget.hide()
             self.umap_button.setText("Run UMAP")
-        elif self.umap_method_combo_box.currentText() == "MDS":
+        elif method == "MDS":
             self.umap_settings_widget.hide()
             self.mds_settings_widget.show()
             self.umap_button.setText("Run MDS")
         else:
             self.umap_settings_widget.hide()
             self.mds_settings_widget.hide()
-            self.umap_button.setText("Run PCA")
+            self.umap_button.setText(f"Run {method}")
 
         self.calculate_embeddings_maybe()
 
@@ -1549,7 +1812,9 @@ class ScatterControls(QtWidgets.QWidget):
 
         label = self.label_combo_box.currentText()
         labels = self.figure.labels
-        logger.debug(f"Updating searchbar completer for {label} with {len(labels)} labels")
+        logger.debug(
+            f"Updating searchbar completer for {label} with {len(labels)} labels"
+        )
         if (label, self.label_count_check.isChecked()) not in self._label_models:
             self._label_models[(label, self.label_count_check.isChecked())] = (
                 QtCore.QStringListModel(np.unique(labels).tolist())

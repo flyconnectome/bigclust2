@@ -335,18 +335,19 @@ class NglViewer:
         """Clear the cache."""
         self.cache.clear()
 
-    def neuroglancer_scene(self, group_by="source", use_colors=True):
+    def neuroglancer_scene(self, group_by="source", use_colors="viewer"):
         """Generate neuroglancer scene for the current state.
 
         Parameters
         ----------
-        groupby :   "source" | "color" | "label"
+        group_by :  "source" | "color" | "label"
                     Logic for how to group the segments. If "color" or "label" we
                     will try combine different sources by using sub-sources. This
                     will not work if IDs exist in multiple sources!
-        use_colors : bool
+        use_colors : bool | "viewer"
                     Whether to use the colors from the viewer for the neuroglancer
                     scene. If False, neuroglancer will determine the colors itself.
+
         """
         layers = []
         id2source = self.data.source.to_dict()
@@ -376,9 +377,18 @@ class NglViewer:
 
                 # Set colors for the segments
                 if use_colors:
-                    layer.set_colors(
-                        {i: self._colors.get(ii, "w") for i, ii in zip(ids_flat, ids)}
-                    )
+                    # Collect colors from the actual viewer
+                    if use_colors == "viewer":
+                        colors = {
+                            i[0]: self._segments[i].material.color.hex
+                            for i in ids
+                            if i in self._segments
+                        }
+                    else:
+                        colors = {
+                            i: self._colors.get(ii, "w") for i, ii in zip(ids_flat, ids)
+                        }
+                    layer.set_colors(colors)
 
                 layers.append(layer)
         elif group_by == "color":

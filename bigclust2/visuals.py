@@ -78,8 +78,8 @@ def points2gfx(
                     Color to use for plotting. If multiple colors,
                     must be a list of colors with the same length as
                     the number of points.
-    size :          int, optional
-                    Marker size.
+    size :          float | array of floats, optional
+                    Marker size(s).
     marker :        str, optional
                     See gfx.MarkerShape for available markers.
     size_space :    "screen" | "world" | "model", optional

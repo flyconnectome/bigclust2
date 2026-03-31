@@ -30,6 +30,7 @@ from .loaders import OpenProjectDialog
 from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
+from .widgets.distances import DistancesTable
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
 from ..__version__ import __version__
@@ -196,7 +197,7 @@ class MainWidget(QWidget):
 
         # Create sidebar
         sidebar = QFrame()
-        sidebar.setMinimumWidth(150)
+        sidebar.setMinimumWidth(80)
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -222,7 +223,7 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([200, 600])  # Initial sizes
+        splitter.setSizes([100, 600])  # Initial sizes
 
         main_layout.addWidget(splitter)
         top_widget.setLayout(main_layout)
@@ -364,7 +365,7 @@ class MainWidget(QWidget):
 
         # Create sidebar
         sidebar = QFrame()
-        sidebar.setMinimumWidth(150)
+        sidebar.setMinimumWidth(80)
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -391,7 +392,7 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([200, 600])  # Initial sizes
+        splitter.setSizes([100, 600])  # Initial sizes
 
         main_layout.addWidget(splitter)
         bottom_widget.setLayout(main_layout)
@@ -545,8 +546,10 @@ class MainWindow(QMainWindow):
         self.settings = QSettings("BigClust", "BigClustGUI")
         self.open_recent_menu = None
         self.connectivity_table_action = None
+        self.distances_table_action = None
         self._current_project_loader = None
         self._connectivity_widgets = []
+        self._distance_widgets = []
         self.init_ui()
 
     def init_ui(self):
@@ -594,6 +597,12 @@ class MainWindow(QMainWindow):
         self.connectivity_table_action.triggered.connect(self.show_connectivity_table)
         view_menu.addAction(self.connectivity_table_action)
 
+        self.distances_table_action = QAction("Distance Heatmap", self)
+        self.distances_table_action.setShortcut(QKeySequence("Shift+Meta+D"))
+        self.distances_table_action.setEnabled(False)
+        self.distances_table_action.triggered.connect(self.show_distances_table)
+        view_menu.addAction(self.distances_table_action)
+
         # Selection menu
         selection_menu = menu_bar.addMenu("Selection")
 
@@ -604,6 +613,11 @@ class MainWindow(QMainWindow):
         deselect_all_action = QAction("Deselect All", self)
         deselect_all_action.triggered.connect(self.on_deselect_all)
         selection_menu.addAction(deselect_all_action)
+
+        selection_menu.addSeparator()
+        open_in_neuroglancer_action = QAction("Open in Neuroglancer", self)
+        open_in_neuroglancer_action.triggered.connect(self.on_open_in_neuroglancer)
+        selection_menu.addAction(open_in_neuroglancer_action)
 
         copy_menu = selection_menu.addMenu("Copy to Clipboard")
         copy_ids_action = QAction("IDs", self)
@@ -679,10 +693,23 @@ class MainWindow(QMainWindow):
 
         return project.feature_type == "connectivity"
 
+    def _can_open_distances_table(self):
+        """Whether the distance heatmap can be opened for the current project."""
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
+            return False
+
+        dists = self._data.get("distances")
+        if dists is None or not hasattr(dists, "shape") or len(dists.shape) != 2:
+            return False
+
+        return dists.shape[0] == dists.shape[1]
+
     def _update_view_actions(self):
         """Update View menu action states."""
         if self.connectivity_table_action is not None:
             self.connectivity_table_action.setEnabled(self._can_open_connectivity_table())
+        if self.distances_table_action is not None:
+            self.distances_table_action.setEnabled(self._can_open_distances_table())
 
     def show_connectivity_table(self):
         """Open the connectivity table widget for the current project."""
@@ -710,6 +737,34 @@ class MainWindow(QMainWindow):
         widget.destroyed.connect(
             lambda _obj=None, w=widget: self._connectivity_widgets.remove(w)
             if w in self._connectivity_widgets
+            else None
+        )
+
+    def show_distances_table(self):
+        """Open the pairwise distance heatmap widget for the current project."""
+        if not self._can_open_distances_table():
+            return
+
+        distances = self._data.get("distances") if hasattr(self, "_data") else None
+        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
+        fig = self.centralWidget().fig_scatter
+
+        if distances is None or meta_data is None:
+            return
+
+        widget = DistancesTable(
+            distances,
+            figure=fig,
+            meta_data=meta_data,
+            parent=self,
+        )
+        fig.sync_widget(widget)
+        widget.show()
+
+        self._distance_widgets.append(widget)
+        widget.destroyed.connect(
+            lambda _obj=None, w=widget: self._distance_widgets.remove(w)
+            if w in self._distance_widgets
             else None
         )
 
@@ -958,6 +1013,14 @@ class MainWindow(QMainWindow):
                 logger.info("Deselect All not supported by current figure")
         except Exception as e:
             logger.debug(f"Deselect All failed: {e}")
+
+    def on_open_in_neuroglancer(self):
+        """Generate a Neuroglancer scene from current viewer state."""
+        try:
+            scene = self.centralWidget().ngl_viewer.neuroglancer_scene()
+            scene.open()
+        except Exception as e:
+            logger.error(f"Open in Neuroglancer failed: {e}")
 
     def on_copy_ids_to_clipboard(self):
         fig = self.centralWidget().fig_scatter

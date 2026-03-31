@@ -479,6 +479,7 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._sort_cols_dropdown.addItem("By label")
         self._sort_cols_dropdown.addItem("By distance")
         self._sort_cols_dropdown.currentIndexChanged.connect(self.update_sort_cols)
+        self._sort_cols_dropdown.setCurrentIndex(1)  # default to sorting by synapse count
         cols_form.addRow("Sort:", self._sort_cols_dropdown)
 
         self._column_search = QtWidgets.QLineEdit()
@@ -516,11 +517,11 @@ class ConnectivityTable(QtWidgets.QWidget):
         display_form.addRow(self._normalize)
 
         self._always_on_top = QtWidgets.QCheckBox("Always on top")
-        self._always_on_top.setChecked(False)
         self._always_on_top.setToolTip(
             "Keep this window above other BigClust windows"
         )
         self._always_on_top.stateChanged.connect(self.update_always_on_top)
+        self._always_on_top.setChecked(True)
         display_form.addRow(self._always_on_top)
 
         display_controls_layout.addWidget(display_group)
@@ -588,6 +589,11 @@ class ConnectivityTable(QtWidgets.QWidget):
         # add toggles for:
         # - setting colors (perhaps based on dendrogram)
         # - toggle for normalized weight
+
+        # Now that we are done, we need to check if the figure has already
+        # something connected
+        if not isinstance(self._figure.selected_ids, type(None)) and len(self._figure.selected_ids) > 0:
+            self.select(self._figure.selected_ids)
 
     def update_row_labels(self, *args, **kwargs):
         self._model.set_row_labels(self._row_label_dropdown.currentText())

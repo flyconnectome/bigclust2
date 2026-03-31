@@ -13,7 +13,7 @@ from itertools import combinations
 from scipy.spatial import ConvexHull, Delaunay
 
 from .figure import BaseFigure, update_figure
-
+from .embeddings import neighborhood_fidelity
 from .selection import SelectionGizmo
 from .visuals import points2gfx, text2gfx, lines2gfx
 
@@ -45,6 +45,7 @@ class ScatterFigure(BaseFigure):
             False  # whether to deselect everything on double click
         )
         self._font_size = 0.01
+        self._points_scale = 1  # used for scaling points uniformly
         self.label_vis_limit = 200  # number of labels shown at once before hiding all
         self.label_refresh_rate = 30  # update labels every n frames
 
@@ -80,11 +81,11 @@ class ScatterFigure(BaseFigure):
         self.key_events["ArrowRight"] = lambda: setattr(
             self, "font_size", self.font_size + 1
         )
-        self.key_events["ArrowUp"] = lambda: setattr(
-            self, "point_size", max(self.point_size - 1, 1)
-        )
         self.key_events["ArrowDown"] = lambda: setattr(
-            self, "point_size", self.point_size + 1
+            self, "point_scale", max(self.point_scale * 0.9, 0.01)
+        )
+        self.key_events["ArrowUp"] = lambda: setattr(
+            self, "point_scale", self.point_scale * 1.1
         )
         self.key_events["Escape"] = lambda: self.deselect_all()
         self.key_events["l"] = lambda: self.toggle_labels()
@@ -132,7 +133,7 @@ class ScatterFigure(BaseFigure):
 
     def clear(self):
         """Clear contents of the scatter plot."""
-        for vis in ('label_group', 'scatter_group'):
+        for vis in ("label_group", "scatter_group"):
             vis = getattr(self, vis, None)
             if vis is not None:
                 vis.clear()
@@ -143,7 +144,6 @@ class ScatterFigure(BaseFigure):
         self.positions = None
         self.metadata = None
         self._selected = None
-
 
     @property
     def labels(self):
@@ -177,15 +177,51 @@ class ScatterFigure(BaseFigure):
 
     @property
     def point_size(self):
+        """Size for points."""
         return self._point_size
 
     @point_size.setter
     @update_figure
     def point_size(self, size):
-        self._point_size = size
-        for vis in self.point_visuals:
-            if isinstance(vis, gfx.Points):
-                vis.material.size = size
+        # For single sizes we can go via the material
+        if not isinstance(size, (list, np.ndarray)):
+            self._point_size = size
+            for vis in self.point_visuals:
+                if not isinstance(vis, gfx.Points):
+                    continue
+                vis.material.size = size * self._point_scale
+                vis.material.size_mode = "uniform"
+        # For variable sizes we need to go via the geometry
+        else:
+            self._point_size = np.array(size, dtype=np.float32)
+
+            for vis in self.point_visuals:
+                if not isinstance(vis, gfx.Points):
+                    continue
+
+                # Point sizes for this visual (in case we have multiple visuals for different markers)
+                this_point_size = self._point_size[vis._point_ix]
+
+                # Check if we have a size buffer
+                if not hasattr(vis.geometry, "sizes"):
+                    vis.geometry.sizes = gfx.resources._buffer.Buffer(
+                        this_point_size * self._point_scale
+                    )
+                else:
+                    vis.geometry.sizes.set_data(this_point_size * self._point_scale)
+
+                vis.material.size_mode = "vertex"
+
+    @property
+    def point_scale(self):
+        """Uniform scale factor for points."""
+        return self._point_scale
+
+    @point_scale.setter
+    @update_figure
+    def point_scale(self, scale):
+        self._point_scale = np.float32(scale)  # avoid dtype issues with buffers
+        self.point_size = self._point_size  # trigger a size update on the visuals
 
     @property
     def selected(self):
@@ -209,10 +245,14 @@ class ScatterFigure(BaseFigure):
 
         # Which points are newly selected
         # Update the selection counter and last selected time
-        newly_selected = set(x) - set(self._selected) if self._selected is not None else set(x)
+        newly_selected = (
+            set(x) - set(self._selected) if self._selected is not None else set(x)
+        )
         if newly_selected:
             self._selection_counter += 1
-            self.metadata.loc[list(newly_selected), '_last_selected'] = self._selection_counter
+            self.metadata.loc[list(newly_selected), "_last_selected"] = (
+                self._selection_counter
+            )
 
         # Set the selected points (make sure to sort them)
         self._selected = np.asarray(sorted(x), dtype=int)
@@ -255,6 +295,11 @@ class ScatterFigure(BaseFigure):
                         func(self.ids[self.selected])
                 except BaseException as e:
                     print(f"Failed to sync widget {w}:\n", e)
+
+        if self.show_knn_edges and self.show_knn_edges["mode"] == "selected":
+            self.show_knn_edges = (
+                self._show_knn_edges
+            )  # trigger an update of the KNN edges
 
     @property
     def selected_ids(self):
@@ -355,6 +400,87 @@ class ScatterFigure(BaseFigure):
 
         if getattr(self, "distance_edge_group", None):
             self.make_distance_edges()
+
+    @property
+    def show_knn_edges(self):
+        """Show or hide the KNN edges."""
+        if not hasattr(self, "_show_knn_edges"):
+            return False
+        return self._show_knn_edges
+
+    @show_knn_edges.setter
+    @update_figure
+    def show_knn_edges(self, x):
+        assert isinstance(
+            x, (bool, dict)
+        ), "`show_knn_edges` must be a boolean or dictionary."
+
+        if isinstance(x, bool):
+            x = {"mode": x}
+
+        # If mode is the same and not "selected", we don't need to do anything
+        if x == self.show_knn_edges and x.get("mode", None) != "selected":
+            return
+
+        if not x["mode"]:
+            self.neighbors_edge_group.visible = False
+        else:
+            if x["mode"] == "selected":
+                mask = np.zeros(len(self), dtype=bool)
+                mask[self.selected] = True
+            else:
+                mask = None
+
+            k = x.get("k", 15)
+            metric = x.get("metric", "auto")
+            color = x.get("color", (1, 1, 1, 0.1))
+            linewidth = x.get("linewidth", 1)
+            self.make_neighbour_edges(
+                k=k, metric=metric, mask=mask, color=color, linewidth=linewidth
+            )
+
+        self._show_knn_edges = x
+
+    @property
+    def fidelity_mode(self):
+        """Show or hide the neighborhood fidelity."""
+        if not hasattr(self, "_fidelity_mode"):
+            return False
+        return self._fidelity_mode
+
+    @fidelity_mode.setter
+    @update_figure
+    def fidelity_mode(self, x):
+        # No need to change anything
+        if x == self.fidelity_mode:
+            return
+
+        if not x:
+            self._fidelity_mode = False
+            self.point_size = 1  # reset to default point size
+            return
+
+        if not isinstance(x, dict):
+            x = {"mode": x}
+
+        # If dictionary, parse parameters
+        mode = x.get("mode", "point_size")
+        rank = x.get("rank", False)
+        distance = x.get("distance", "euclidean")
+        k = x.get("k", 15)
+
+        assert mode in ("point_size",), f"Unsupported fidelity mode: {mode}"
+
+        # Calculate fidelity scores
+        self.point_size = self.calculate_embedding_fidelity(
+            k=k, rank=rank, metric=distance
+        )
+
+        # Make sure no point vanishes entirely
+        if np.any(self.point_size == 0):
+            self.point_size += 1e-2
+
+        self._fidelity_mode = x
 
     def deselect_all(self):
         self.selected = None
@@ -457,6 +583,7 @@ class ScatterFigure(BaseFigure):
                     color = np.array(
                         [tuple(cmap.Color(c).rgba) for c in self.colors[markers == m]]
                     )
+                this_size = self.point_size
             else:
                 this_meta = self.metadata.iloc[mask & (markers == m)]
                 this_pos = self.positions[mask & (markers == m)]
@@ -468,6 +595,10 @@ class ScatterFigure(BaseFigure):
                             for c in self.colors[mask & (markers == m)]
                         ]
                     )
+                if isinstance(self.point_size, (int, float)):
+                    this_size = self.point_size
+                else:
+                    this_size = self.point_size[mask & (markers == m)]
             if this_meta.empty:
                 continue
 
@@ -478,7 +609,7 @@ class ScatterFigure(BaseFigure):
                     axis=1,
                 ),
                 color=color,
-                size=self.point_size,
+                size=this_size * self.point_scale,
                 marker=m,
                 pick_write=self.hover_info is not None,
             )
@@ -653,6 +784,97 @@ class ScatterFigure(BaseFigure):
 
             # Add the visual to the group
             self.distance_edge_group.add(vis)
+
+    def make_neighbour_edges(
+        self, k, metric="auto", mask=None, color=(1, 1, 1, 0.1), linewidth=1
+    ):
+        """Generate lines between nearest neighbours.
+
+        Important: existing edges will be cleared when calling this function!
+
+        Parameters
+        ----------
+        k : int
+            Number of nearest neighbours to show.
+        metric : str, optional
+            Distance metric to use for finding nearest neighbours.
+            Default ("auto") will use precomputed distances if
+            available and fall back to Euclidean distance on the
+            feature vector if not.
+        mask : array of bool, optional
+            Boolean mask to specify which points to which to mark the nearest
+            neighbour(s). Note that the nearest neighbor can still be outside
+            of the mask. If None, all points are included.
+
+        """
+        if self.dists is None:
+            raise ValueError("No distance matrix/feature vector provided.")
+
+        if metric == "auto":
+            if "distances" in self.dists:
+                metric = "precomputed"
+            else:
+                metric = "euclidean"
+
+        if metric == "precomputed" and "distances" not in self.dists:
+            raise ValueError("No precomputed distances available.")
+
+        if metric != "precomputed" and "features" not in self.dists:
+            raise ValueError("No feature vectors available for distance calculation.")
+
+        # Create a group and add to scene
+        if not getattr(self, "neighbors_edge_group", None):
+            self.neighbors_edge_group = gfx.Group()
+            self.scene.add(self.neighbors_edge_group)
+
+        # Clear the group (we might call this function to update the lines)
+        self.neighbors_edge_group.clear()
+
+        # If nothing to show, we can just return here
+        if mask is not None and mask.sum() == 0:
+            return
+
+        # At this point we should have completed all checks, so we can safely grab the required data
+        if metric == "precomputed":
+            knn = np.argsort(self.dists["distances"], axis=1)[:, 1 : (k + 1)]
+        else:
+            from sklearn.neighbors import NearestNeighbors
+
+            _, knn = (
+                NearestNeighbors(n_neighbors=k, metric=metric)
+                .fit(self.dists["features"])
+                .kneighbors()
+            )
+
+        ind = np.arange(len(knn))
+        if mask is not None:
+            knn = knn[mask]
+            ind = ind[mask]
+
+        # Convert to edges (i.e. pairs of points)
+        edges = []
+        for i in range(k):
+            edges.append(np.stack((ind, knn[:, i]), axis=1))
+        edges = np.concatenate(edges, axis=0)
+
+        # Find unique edges (since the same edge can be found from both directions)
+        edges = np.sort(edges, axis=1)  # sort each edge to make them comparable
+        edges = np.unique(edges, axis=0)
+
+        # Translate edge into coordiantes
+        lines = []
+        for i, j in edges:
+            lines.append(np.array([self.positions[i], self.positions[j], [None, None]]))
+
+        # Create a line between the two points
+        vis = lines2gfx(
+            lines,
+            color=color,
+            linewidth=linewidth,
+        )
+
+        # Add the visual to the group
+        self.neighbors_edge_group.add(vis)
 
     @update_figure
     def show_labels(self, which=None):
@@ -908,7 +1130,9 @@ class ScatterFigure(BaseFigure):
             If provided, these can be used to re-compute point positions based on dimensionality reduction techniques.
         """
         # Make sure metadata has RangeIndex
-        assert isinstance(metadata.index, pd.RangeIndex), "Metadata index must be a RangeIndex."
+        assert isinstance(
+            metadata.index, pd.RangeIndex
+        ), "Metadata index must be a RangeIndex."
 
         self.positions = points.astype(np.float32)
         self.metadata = metadata
@@ -938,7 +1162,8 @@ class ScatterFigure(BaseFigure):
 
         if distances is not None:
             self.dists["distances"] = distances.loc[self.ids, self.ids]
-        elif features is not None:
+
+        if features is not None:
             self.dists["features"] = features.loc[self.ids]
 
         # Datasets are used to avoid collisions when the same ID is used in different datasets
@@ -955,7 +1180,8 @@ class ScatterFigure(BaseFigure):
         # Update some internal state
         # (note that we're writing to the protected member variables here)
         self._selected = None
-        self._point_size = point_size
+        self._point_size = 1
+        self._point_scale = point_size
 
         # Generate the visuals
         self.make_visuals()
@@ -1216,6 +1442,10 @@ class ScatterFigure(BaseFigure):
         if hasattr(self, "distance_edge_group"):
             self.distance_edge_group.clear()
 
+        # Clear the distance edges if they exist
+        if hasattr(self, "neighbors_edge_group"):
+            self.neighbors_edge_group.clear()
+
         # Stack n_frame times in a new dimension
         self.to_move = np.repeat(steps.reshape(-1, 2, 1), n_frames, axis=2)
 
@@ -1244,6 +1474,14 @@ class ScatterFigure(BaseFigure):
                 self.make_label_lines()
             if self.show_distance_edges:
                 self.make_distance_edges()
+            if self.fidelity_mode:
+                fid_mode = self.fidelity_mode
+                self.fidelity_mode = None
+                self.fidelity_mode = fid_mode
+            if self.show_knn_edges:
+                knn_mode = self.show_knn_edges
+                self.show_knn_edges = False
+                self.show_knn_edges = knn_mode
             self._render_stale = True
 
     @update_figure
@@ -1276,6 +1514,45 @@ class ScatterFigure(BaseFigure):
             if self.label_visuals[ix] is not None:
                 self.label_visuals[ix].set_text(label)
                 self.label_visuals[ix]._text = label
+
+    def calculate_embedding_fidelity(self, k=10, metric="auto", rank=True):
+        """Calculate the neighborhood fidelity of the embedding."""
+        if not hasattr(self, "dists") or self.dists is None:
+            raise ValueError(
+                "No distance matrix or features provided. Cannot calculate embedding fidelity."
+            )
+
+        has_dist = "distances" in self.dists and self.dists["distances"] is not None
+        has_feat = "features" in self.dists and self.dists["features"] is not None
+        if not (has_dist) and not (has_feat):
+            raise ValueError(
+                "Must have either distance matrix or features to calculate embedding fidelity."
+            )
+
+        if metric == "auto":
+            metric = "procomputed" if has_dist else "euclidean"
+
+        if metric == "precomputed" and not has_dist:
+            raise ValueError("Precomputed metric requires a distance matrix.")
+        elif metric != "precomputed" and not has_feat:
+            raise ValueError(f"Metric '{metric}' requires features.")
+
+        # Use precomputed distance if requested or metric not specified
+        if metric == "precomputed":
+            dists = self.dists["distances"]
+            features = None
+        else:
+            dists = None
+            features = self.dists["features"]
+
+        return neighborhood_fidelity(
+            embedding=self.positions,
+            distances=dists,
+            features=features,
+            k=k,
+            metric=metric,
+            rank=rank,
+        )
 
 
 class LabelSearch:
@@ -1331,10 +1608,12 @@ class LabelSearch:
     def search_labels(self, query):
         """Search for a label in the scatter."""
         if not self.regex:
-            return np.where(self.scatter._labels == query)[0]
+            return np.where(
+                (self.scatter._labels == query) | (self.scatter._labels == str(query))
+            )[0]
         else:
             return np.where(
-                [re.search(query, str(l)) is not None for l in self.scatter.labels]
+                [re.search(str(query), str(l)) is not None for l in self.scatter.labels]
             )[0]
 
     def search_ids(self, id):

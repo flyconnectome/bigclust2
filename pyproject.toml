@@ -20,7 +20,7 @@ dependencies = [
     "octarine3d>=0.3.3",
     "octarine-navis-plugin>=0.1.5",
     "navis>=1.10.0",
-    "dvidtools>=0.5.1",
+    "dvidtools>=0.6.0",
     "pyperclip>=1.11.0",
     "nglscenes",
     "pyarrow>=23.0.0",

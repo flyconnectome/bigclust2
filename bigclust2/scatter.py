@@ -922,7 +922,9 @@ class ScatterFigure(BaseFigure):
                 )
 
                 def _highlight(event, text):
-                    self.find_label(text._text, go_to_first=False)
+                    ls = self.find_label(text._text, go_to_first=False)
+                    if "Shift" in event.modifiers:
+                        ls.select_all(add="Control" in event.modifiers)
 
                 t.add_event_handler(partial(_highlight, text=t), "double_click")
 
@@ -1656,9 +1658,12 @@ class LabelSearch:
         """Search for an ID in the scatter."""
         return np.where(self.scatter.ids == id)[0]
 
-    def select_all(self):
+    def select_all(self, add=False):
         """Select all labels found by the search."""
-        self.scatter.selected = self.indices
+        if add and self.scatter.selected is not None:
+            self.scatter.selected = np.union1d(self.scatter.selected, self.indices)
+        else:
+            self.scatter.selected = self.indices
 
     def next(self):
         """Go to the next label."""

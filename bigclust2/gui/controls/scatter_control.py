@@ -147,7 +147,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.prev_button.clicked.connect(self.find_previous)
         self.button_layout.addWidget(self.prev_button)
         self.find_sel_button = QtWidgets.QPushButton("Select")
-        self.find_sel_button.setToolTip("Select all objects matching the search term.")
+        self.find_sel_button.setToolTip("Select all objects matching the search term. Use Shift-Click to add to current selection.")
         self.find_sel_button.clicked.connect(self.find_select)
         self.button_layout.addWidget(self.find_sel_button)
         self.next_button = QtWidgets.QPushButton("Next")
@@ -2178,6 +2178,7 @@ class ScatterControls(QtWidgets.QWidget):
 
     def find_select(self):
         """Find and select all matches."""
+        mods = QtWidgets.QApplication.keyboardModifiers()
         text = self.searchbar.text()
         if text:
             regex = False
@@ -2194,7 +2195,10 @@ class ScatterControls(QtWidgets.QWidget):
 
             # LabelSearch can be `None` if no match found
             if self._label_search:
-                self._label_search.select_all()
+                if mods & QtCore.Qt.ShiftModifier:
+                    self._label_search.select_all(add=True)
+                else:
+                    self._label_search.select_all(add=False)
 
     def selected_to_clipboard(self, dataset=None):
         """Copy selected items to clipboard."""

@@ -5,6 +5,7 @@ import logging
 from html import escape
 
 import numpy as np
+import pandas as pd
 
 from pathlib import Path
 from PySide6.QtWidgets import (
@@ -23,7 +24,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
 )
 from PySide6.QtGui import QIcon, QAction, QKeySequence
-from PySide6.QtCore import Qt, QSize, QSettings
+from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
@@ -40,6 +41,10 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 
 
 logger = logging.getLogger(__name__)
+
+
+# Keep strong references to top-level windows so spawned windows stay alive.
+_OPEN_WINDOWS = []
 
 try:
     ASSETS_FILE_PATH = files("bigclust2") / "assets"
@@ -63,7 +68,33 @@ class MainWidget(QWidget):
 
     def __init__(self):
         super().__init__()
+        self._teardown_done = False
         self.init_ui()
+
+    def teardown_rendering(self):
+        """Stop render backends before Qt starts deleting child widgets."""
+        if self._teardown_done:
+            return
+        self._teardown_done = True
+
+        try:
+            fig = getattr(self, "fig_scatter", None)
+            canvas = getattr(fig, "canvas", None)
+            if canvas is not None:
+                canvas.close()
+        except Exception as e:
+            logger.debug(f"Failed to close scatter canvas cleanly: {e}")
+
+        try:
+            viewer = getattr(self, "ngl_viewer", None)
+            if viewer is not None:
+                viewer.close()
+        except Exception as e:
+            logger.debug(f"Failed to close neuroglancer viewer cleanly: {e}")
+
+    def closeEvent(self, event):
+        self.teardown_rendering()
+        super().closeEvent(event)
 
     def init_ui(self):
         """Initialize the user interface."""
@@ -140,6 +171,14 @@ class MainWidget(QWidget):
         height = max(1, self.splitter.size().height())
         self.splitter.setSizes([height // 2, height // 2])
 
+    def _set_sidebar_width(self, splitter, sidebar_width):
+        """Set a splitter sidebar to a fixed pixel width when possible."""
+        total_width = max(1, splitter.size().width())
+        if total_width > sidebar_width:
+            splitter.setSizes([sidebar_width, total_width - sidebar_width])
+        else:
+            splitter.setSizes([total_width // 2, total_width - (total_width // 2)])
+
     def configure_overlay_actions(self):
         """Connect overlay buttons to actions."""
         if hasattr(self.top_widget, "buttons") and self.top_widget.buttons:
@@ -179,6 +218,36 @@ class MainWidget(QWidget):
         y_offset = (host_widget.height() - button.height()) // 2
         button.move(x_offset, y_offset)
 
+    def toggle_figure_controls(self):
+        """Toggle visibility of the scatter figure controls sidebar."""
+        sidebar = getattr(self.top_widget, "sidebar", None)
+        if sidebar is None:
+            return
+
+        sidebar.setVisible(not sidebar.isVisible())
+        self.update_left_button_position(self.top_widget)
+
+        # Force an update to prevent transparency artifacts on sidebar toggles.
+        self.force_update()
+        self.resize_figures()
+        self.fig_scatter.force_single_render()
+        self.ngl_viewer.force_single_render()
+
+    def toggle_viewer_controls(self):
+        """Toggle visibility of the neuroglancer viewer controls sidebar."""
+        sidebar = getattr(self.bottom_widget, "sidebar", None)
+        if sidebar is None:
+            return
+
+        sidebar.setVisible(not sidebar.isVisible())
+        self.update_left_button_position(self.bottom_widget)
+
+        # Force an update to prevent transparency artifacts on sidebar toggles.
+        self.force_update()
+        self.resize_figures()
+        self.fig_scatter.force_single_render()
+        self.ngl_viewer.force_single_render()
+
     def setup_top_widget(self, top_widget):
         """Set up the top widget with overlay buttons and a left-positioned button."""
         # Initialize and connect the figure to the top widgets
@@ -197,7 +266,7 @@ class MainWidget(QWidget):
 
         # Create sidebar
         sidebar = QFrame()
-        sidebar.setMinimumWidth(80)
+        sidebar.setMinimumWidth(250)
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -223,13 +292,14 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([100, 600])  # Initial sizes
+        splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
 
         main_layout.addWidget(splitter)
         top_widget.setLayout(main_layout)
         top_widget.splitter = splitter
         top_widget.sidebar = sidebar
         top_widget.content = content
+        top_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
@@ -248,14 +318,7 @@ class MainWidget(QWidget):
         left_button.setToolTip("Toggle top sidebar")
 
         def toggle_sidebar():
-            sidebar.setVisible(not sidebar.isVisible())
-            self.update_left_button_position(top_widget)
-
-            # We need to force a repaint to avoid glitches in the button transparency
-            self.force_update()
-            self.resize_figures()
-            self.fig_scatter.force_single_render()
-            self.ngl_viewer.force_single_render()
+            self.toggle_figure_controls()
 
         left_button.clicked.connect(toggle_sidebar)
         self.fig_scatter.key_events["c"] = toggle_sidebar
@@ -324,6 +387,9 @@ class MainWidget(QWidget):
 
         def on_resize(event):
             original_resize(event)
+            if not top_widget._initial_sidebar_width_applied:
+                self._set_sidebar_width(splitter, 300)
+                top_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
                     top_widget.width()
@@ -365,7 +431,7 @@ class MainWidget(QWidget):
 
         # Create sidebar
         sidebar = QFrame()
-        sidebar.setMinimumWidth(80)
+        sidebar.setMinimumWidth(250)
         sidebar_layout = QVBoxLayout()
         sidebar_layout.setContentsMargins(10, 10, 10, 10)
 
@@ -392,13 +458,14 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([100, 600])  # Initial sizes
+        splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
 
         main_layout.addWidget(splitter)
         bottom_widget.setLayout(main_layout)
         bottom_widget.splitter = splitter
         bottom_widget.sidebar = sidebar
         bottom_widget.content = content
+        bottom_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
@@ -417,11 +484,7 @@ class MainWidget(QWidget):
         left_button.setToolTip("Toggle bottom sidebar")
 
         def toggle_sidebar():
-            sidebar.setVisible(not sidebar.isVisible())
-            self.update_left_button_position(bottom_widget)
-
-            # We need to force a repaint to avoid glitches in the button transparency
-            self.force_update()
+            self.toggle_viewer_controls()
 
         left_button.clicked.connect(toggle_sidebar)
 
@@ -434,9 +497,18 @@ class MainWidget(QWidget):
         buttons = []
 
         icon_defs = [
-            ("assets/button_fullscreen.png", "Show only bottom widget"),
-            ("assets/button_split_vertical.png", "Stack widgets vertically"),
-            ("assets/button_split_horizontal.png", "Place widgets side by side"),
+            (
+                str(ASSETS_FILE_PATH / "button_fullscreen.png"),
+                "Show only bottom widget",
+            ),
+            (
+                str(ASSETS_FILE_PATH / "button_split_vertical.png"),
+                "Stack widgets vertically",
+            ),
+            (
+                str(ASSETS_FILE_PATH / "button_split_horizontal.png"),
+                "Place widgets side by side",
+            ),
         ]
 
         for icon_path, tip in icon_defs:
@@ -483,6 +555,9 @@ class MainWidget(QWidget):
 
         def on_resize(event):
             original_resize(event)
+            if not bottom_widget._initial_sidebar_width_applied:
+                self._set_sidebar_width(splitter, 300)
+                bottom_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
                     bottom_widget.width()
@@ -491,6 +566,7 @@ class MainWidget(QWidget):
                 )
                 y = button_spacing
                 button.move(x, y)
+                button.raise_()
             # Reposition left button
             self.update_left_button_position(bottom_widget)
 
@@ -511,6 +587,26 @@ class MainWidget(QWidget):
             )
             y = button_spacing
             button.move(x, y)
+
+        def apply_initial_bottom_overlay_layout():
+            if not bottom_widget._initial_sidebar_width_applied:
+                self._set_sidebar_width(splitter, 300)
+                bottom_widget._initial_sidebar_width_applied = True
+
+            for i, button in enumerate(buttons):
+                x = (
+                    bottom_widget.width()
+                    - (button_size + button_spacing) * (3 - i)
+                    + button_spacing
+                )
+                y = button_spacing
+                button.move(x, y)
+                button.raise_()
+
+            self.update_left_button_position(bottom_widget)
+
+        # Ensure overlays are correctly placed after the first real layout pass.
+        QTimer.singleShot(0, apply_initial_bottom_overlay_layout)
 
     def resize_figures(self):
         """Resize figures to match their parent widgets."""
@@ -543,6 +639,7 @@ class MainWindow(QMainWindow):
 
     def __init__(self):
         super().__init__()
+        self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.settings = QSettings("BigClust", "BigClustGUI")
         self.open_recent_menu = None
         self.connectivity_table_action = None
@@ -550,6 +647,8 @@ class MainWindow(QMainWindow):
         self._current_project_loader = None
         self._connectivity_widgets = []
         self._distance_widgets = []
+        _OPEN_WINDOWS.append(self)
+        self.destroyed.connect(lambda _obj=None, w=self: _OPEN_WINDOWS.remove(w) if w in _OPEN_WINDOWS else None)
         self.init_ui()
 
     def init_ui(self):
@@ -586,6 +685,16 @@ class MainWindow(QMainWindow):
         open_project_action.triggered.connect(self.show_open_project_dialog)
         file_menu.addAction(open_project_action)
 
+        new_window_action = QAction("New Window", self)
+        new_window_action.setShortcut(QKeySequence("Shift+Meta+N"))
+        new_window_action.triggered.connect(self.open_new_window)
+        file_menu.addAction(new_window_action)
+
+        close_window_action = QAction("Close Window", self)
+        close_window_action.setShortcut(QKeySequence.Close)
+        close_window_action.triggered.connect(self.close)
+        file_menu.addAction(close_window_action)
+
         self.open_recent_menu = file_menu.addMenu("Open Recent")
         self.refresh_open_recent_menu()
 
@@ -603,6 +712,24 @@ class MainWindow(QMainWindow):
         self.distances_table_action.triggered.connect(self.show_distances_table)
         view_menu.addAction(self.distances_table_action)
 
+        view_menu.addSeparator()
+
+        toggle_figure_controls_action = QAction("Toggle Figure Controls", self)
+        toggle_figure_controls_action.triggered.connect(
+            lambda: self.centralWidget().toggle_figure_controls()
+        )
+        view_menu.addAction(toggle_figure_controls_action)
+
+        toggle_viewer_controls_action = QAction("Toggle Viewer Controls", self)
+        toggle_viewer_controls_action.triggered.connect(
+            lambda: self.centralWidget().toggle_viewer_controls()
+        )
+        view_menu.addAction(toggle_viewer_controls_action)
+
+        # The view menu automatically contains an item to toggle fullscreen mode
+        # This separator keeps it visually separate from the custom view actions we added above.
+        view_menu.addSeparator()
+
         # Selection menu
         selection_menu = menu_bar.addMenu("Selection")
 
@@ -615,6 +742,15 @@ class MainWindow(QMainWindow):
         selection_menu.addAction(deselect_all_action)
 
         selection_menu.addSeparator()
+        open_selection_in_new_window_action = QAction("Open in New Window", self)
+        open_selection_in_new_window_action.setShortcut(
+            QKeySequence("Shift+Ctrl+Meta+N")
+        )
+        open_selection_in_new_window_action.triggered.connect(
+            self.on_open_selection_in_new_window
+        )
+        selection_menu.addAction(open_selection_in_new_window_action)
+
         open_in_neuroglancer_action = QAction("Open in Neuroglancer", self)
         open_in_neuroglancer_action.triggered.connect(self.on_open_in_neuroglancer)
         selection_menu.addAction(open_in_neuroglancer_action)
@@ -684,6 +820,12 @@ class MainWindow(QMainWindow):
 
         about_action.triggered.connect(show_about_dialog)
         help_menu.addAction(about_action)
+
+    def open_new_window(self):
+        """Open a second top-level BigClust window."""
+        window = MainWindow()
+        window.move(self.pos() + QPoint(40, 40))
+        window.show()
 
     def _can_open_connectivity_table(self):
         """Whether the connectivity table can be opened for the current project."""
@@ -984,6 +1126,10 @@ class MainWindow(QMainWindow):
                 self._load_project_from_dialog(dialog)
 
     def closeEvent(self, event):
+        main_widget = self.centralWidget()
+        if main_widget is not None and hasattr(main_widget, "teardown_rendering"):
+            main_widget.teardown_rendering()
+
         # Persist geometry and maximized state
         try:
             self.settings.setValue("mainWindow/geometry", self.saveGeometry())
@@ -1021,6 +1167,134 @@ class MainWindow(QMainWindow):
             scene.open()
         except Exception as e:
             logger.error(f"Open in Neuroglancer failed: {e}")
+
+    def on_open_selection_in_new_window(self):
+        """Open currently selected scatter points in a new window."""
+        try:
+            source_main_widget = self.centralWidget()
+            source_fig = source_main_widget.fig_scatter
+            selected = source_fig.selected
+            selected_indices = (
+                np.asarray(selected, dtype=int)
+                if selected is not None
+                else np.array([], dtype=int)
+            )
+
+            if selected_indices.size == 0:
+                source_fig.show_message("No points selected", color="red", duration=2)
+                return
+
+            if source_fig.metadata is None or source_fig.positions is None:
+                logger.info("No figure data available for opening a selection window")
+                return
+
+            selected_meta = (
+                source_fig.metadata.iloc[selected_indices].copy().reset_index(drop=True)
+            )
+            selected_points = np.asarray(source_fig.positions)[selected_indices].copy()
+            selected_ids = selected_meta["id"].to_numpy()
+
+            selected_distances = None
+            selected_features = None
+            source_matrices = getattr(source_fig, "dists", None)
+
+            if isinstance(source_matrices, dict):
+                source_distances = source_matrices.get("distances")
+                source_features = source_matrices.get("features")
+
+                if source_distances is not None:
+                    if isinstance(source_distances, pd.DataFrame):
+                        selected_distances = source_distances.iloc[
+                            selected_indices, selected_indices
+                        ].copy()
+                    else:
+                        selected_distances = pd.DataFrame(
+                            np.asarray(source_distances)[
+                                np.ix_(selected_indices, selected_indices)
+                            ],
+                            index=selected_ids,
+                            columns=selected_ids,
+                        )
+
+                if source_features is not None:
+                    if isinstance(source_features, pd.DataFrame):
+                        selected_features = source_features.iloc[selected_indices].copy()
+                        selected_features.index = selected_ids
+                    else:
+                        selected_features = pd.DataFrame(
+                            np.asarray(source_features)[selected_indices],
+                            index=selected_ids,
+                        )
+
+            window = MainWindow()
+            window.move(self.pos() + QPoint(40, 40))
+            window.show()
+
+            main_widget = window.centralWidget()
+            fig = main_widget.fig_scatter
+            fig.clear()
+            fig.set_points(
+                points=selected_points,
+                metadata=selected_meta,
+                label_col="label",
+                id_col="id",
+                color_col="_color",
+                marker_col="dataset",
+                hover_col="\n".join(
+                    [
+                        f"{c}: {{{c}}}"
+                        for c in selected_meta.columns
+                        if not str(c).startswith("_")
+                    ]
+                ),
+                dataset_col="dataset",
+                point_size=10,
+                distances=selected_distances,
+                features=selected_features,
+            )
+            main_widget.scatter_controls.update_controls()
+
+            try:
+                src_viewer = getattr(source_main_widget, "ngl_viewer", None)
+                src_data = getattr(src_viewer, "data", None)
+                if src_data is not None and len(src_data):
+                    if (
+                        isinstance(src_data.index, pd.MultiIndex)
+                        and "dataset" in selected_meta.columns
+                    ):
+                        keys = list(
+                            zip(
+                                selected_meta["id"].tolist(),
+                                selected_meta["dataset"].tolist(),
+                            )
+                        )
+                        ngl_data = src_data.loc[keys].copy()
+                    else:
+                        ngl_data = src_data.loc[selected_meta["id"].tolist()].copy()
+
+                    main_widget.ngl_viewer.set_data(ngl_data)
+
+                    neuropil_mesh = getattr(src_viewer, "neuropil_mesh", None)
+                    if neuropil_mesh is not None:
+                        main_widget.ngl_viewer.set_neuropil_mesh(
+                            neuropil_mesh,
+                            neuropil_source=getattr(src_viewer, "neuropil_source", None),
+                        )
+            except Exception as e:
+                logger.debug(
+                    f"Failed to propagate Neuroglancer data to selection window: {e}"
+                )
+
+            window._data = {
+                "meta": selected_meta,
+                "embeddings": selected_points,
+                "distances": selected_distances,
+                "features": selected_features,
+            }
+            window._update_view_actions()
+            window.setWindowTitle(f"BigClust - selection ({len(selected_meta)})")
+        except Exception as e:
+            logger.error(f"Open selection in new window failed: {e}")
 
     def on_copy_ids_to_clipboard(self):
         fig = self.centralWidget().fig_scatter

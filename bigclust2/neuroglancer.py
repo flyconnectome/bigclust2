@@ -148,15 +148,27 @@ class NglViewer:
         else:
             self._colors = {}
 
-    def set_colors(self, colors):
+    def set_colors(self, colors, update_loaded_visuals=True):
         """Set the colors for the neurons."""
         assert isinstance(colors, dict)
         self._colors = {k: cmap.Color(v).hex for k, v in colors.items()}
+        if update_loaded_visuals:
+            self.sync_colors()
 
-    def update_colors(self, colors):
+    def update_colors(self, colors, update_loaded_visuals=True):
         """Update the colors for the neurons."""
         assert isinstance(colors, dict)
         self._colors.update({k: cmap.Color(v).hex for k, v in colors.items()})
+        if update_loaded_visuals:
+            self.sync_colors()
+
+    def sync_colors(self):
+        """Sync the colors of the loaded visuals with the colors in self._colors."""
+        for key, vis in self._segments.items():
+            if key in self._colors:
+                vis.material.color = gfx.Color(self._colors[key])
+        if getattr(self.viewer, "controls", None):
+            self.viewer.controls.update_legend()
 
     def make_volume(self, url, mip=0):
         """Make a volume from a URL."""

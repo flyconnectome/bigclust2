@@ -16,7 +16,6 @@ from ...embeddings import (
     is_precomputed_distance_matrix,
     make_embedding_estimator,
     prepare_embedding_input,
-    neighborhood_fidelity,
 )
 
 
@@ -27,6 +26,9 @@ FLYWIRE_ANN = None
 HB_ANN = None
 
 logger = logging.getLogger(__name__)
+
+
+CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
 
 
 def requires_selection(func):
@@ -67,24 +69,28 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab4 = QtWidgets.QWidget()
         self.tab5 = QtWidgets.QWidget()
         self.tab6 = QtWidgets.QWidget()
+        self.tab7 = QtWidgets.QWidget()
         self.tab1_layout = QtWidgets.QVBoxLayout()
         self.tab2_layout = QtWidgets.QVBoxLayout()
         self.tab3_layout = QtWidgets.QVBoxLayout()
         self.tab4_layout = QtWidgets.QVBoxLayout()
         self.tab5_layout = QtWidgets.QVBoxLayout()
         self.tab6_layout = QtWidgets.QVBoxLayout()
+        self.tab7_layout = QtWidgets.QVBoxLayout()
         self.tab1.setLayout(self.tab1_layout)
         self.tab2.setLayout(self.tab2_layout)
         self.tab3.setLayout(self.tab3_layout)
         self.tab4.setLayout(self.tab4_layout)
         self.tab5.setLayout(self.tab5_layout)
         self.tab6.setLayout(self.tab6_layout)
+        self.tab7.setLayout(self.tab7_layout)
         self.tabs.addTab(self.tab1, "General")
         self.tabs.addTab(self.tab2, "Annotation")
         # self.tabs.addTab(self.tab3, "Neuroglancer")
         self.tabs.addTab(self.tab4, "Settings")
         self.tabs.addTab(self.tab5, "Embeddings")
         self.tabs.addTab(self.tab6, "Fidelity")
+        self.tabs.addTab(self.tab7, "Clusters")
 
         self.build_control_gui()
         # self.build_annotation_gui()
@@ -92,7 +98,7 @@ class ScatterControls(QtWidgets.QWidget):
         # self.build_settings_gui()
         self.build_embeddings_gui()
         self.build_fidelity_gui()
-
+        self.build_clusters_gui()
         # Holds the futures for requested data
         self.futures = {}
         self.pool = ThreadPoolExecutor(4)
@@ -112,7 +118,10 @@ class ScatterControls(QtWidgets.QWidget):
     @property
     def selected_indices(self):
         """Get the selected IDs."""
-        raise NotImplementedError("This method should be implemented in a subclass.")
+        selected = getattr(self.figure, "selected", None)
+        if selected is None:
+            return np.array([], dtype=int)
+        return np.asarray(selected, dtype=int)
 
     def build_control_gui(self):
         """Build the GUI."""
@@ -300,8 +309,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Checkbox for whether to cache neurons
         self.ngl_cache_neurons = QtWidgets.QCheckBox("Cache neurons")
         self.ngl_cache_neurons.setToolTip("Whether cache neuron meshes.")
-        if hasattr(self.figure, "_ngl_viewer"):
-            self.ngl_cache_neurons.setChecked(self.figure._ngl_viewer.use_cache)
+        if hasattr(self.figure, "ngl_viewer"):
+            self.ngl_cache_neurons.setChecked(self.figure.ngl_viewer.use_cache)
         else:
             self.ngl_cache_neurons.setChecked(False)
         self.ngl_cache_neurons.stateChanged.connect(self.set_ngl_cache)
@@ -593,7 +602,8 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_button.clicked.connect(self.calculate_embeddings)
         actions_row.addWidget(self.umap_button)
 
-        actions_row.addStretch(1)
+        actions_row = QtWidgets.QHBoxLayout()
+        self.tab5_layout.addLayout(actions_row)
 
         self.umap_auto_run = QtWidgets.QCheckBox("Auto run")
         self.umap_auto_run.setToolTip(
@@ -921,6 +931,399 @@ class ScatterControls(QtWidgets.QWidget):
 
         self.update_fidelity_options()
 
+    def build_clusters_gui(self):
+        """Build the GUI for the Clusters tab."""
+        # Top action row
+        actions_row = QtWidgets.QHBoxLayout()
+        self.tab7_layout.addLayout(actions_row)
+
+        self.cluster_run_button = QtWidgets.QPushButton("Run clustering")
+        self.cluster_run_button.setToolTip(
+            "Partition the data into clusters using the selected algorithm."
+        )
+        self.cluster_run_button.clicked.connect(self._run_clustering)
+        actions_row.addWidget(self.cluster_run_button)
+
+        self.cluster_clear_button = QtWidgets.QPushButton("Clear")
+        self.cluster_clear_button.setToolTip("Reset point colours to their defaults.")
+        self.cluster_clear_button.clicked.connect(self._clear_cluster_colors)
+        actions_row.addWidget(self.cluster_clear_button)
+
+        # Input group
+        input_group = QtWidgets.QGroupBox("Input")
+        input_form = QtWidgets.QFormLayout()
+        input_form.setContentsMargins(8, 6, 8, 6)
+        input_group.setLayout(input_form)
+        self.tab7_layout.addWidget(input_group)
+
+        self.cluster_data_combo_box = QtWidgets.QComboBox()
+        self.cluster_data_combo_box.setToolTip("Select the data source for clustering.")
+        self.cluster_data_combo_box.currentIndexChanged.connect(
+            self._update_cluster_input_controls
+        )
+        input_form.addRow("Data:", self.cluster_data_combo_box)
+
+        self.cluster_metric_combo_box = QtWidgets.QComboBox()
+        self.cluster_metric_combo_box.setToolTip(
+            "Distance metric used when clustering from feature vectors."
+        )
+        self.cluster_metric_combo_box.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        input_form.addRow("Metric:", self.cluster_metric_combo_box)
+
+        # Algorithm group
+        algo_group = QtWidgets.QGroupBox("Algorithm")
+        algo_layout = QtWidgets.QVBoxLayout()
+        algo_layout.setContentsMargins(8, 6, 8, 6)
+        algo_group.setLayout(algo_layout)
+        self.tab7_layout.addWidget(algo_group)
+
+        algo_form = QtWidgets.QFormLayout()
+        algo_form.setContentsMargins(0, 0, 0, 0)
+        algo_layout.addLayout(algo_form)
+
+        self.cluster_method_combo_box = QtWidgets.QComboBox()
+        self.cluster_method_combo_box.addItems(["HDBSCAN", "Agglomerative", "K-Means"])
+        self.cluster_method_combo_box.setToolTip("Select the clustering algorithm.")
+        self.cluster_method_combo_box.currentIndexChanged.connect(
+            self._update_cluster_method_settings
+        )
+        algo_form.addRow("Method:", self.cluster_method_combo_box)
+
+        # --- HDBSCAN settings ---
+        self.cluster_hdbscan_widget = QtWidgets.QWidget()
+        hdbscan_form = QtWidgets.QFormLayout()
+        hdbscan_form.setContentsMargins(0, 0, 0, 0)
+        self.cluster_hdbscan_widget.setLayout(hdbscan_form)
+        algo_layout.addWidget(self.cluster_hdbscan_widget)
+
+        self.cluster_hdbscan_min_cluster_size = QtWidgets.QSpinBox()
+        self.cluster_hdbscan_min_cluster_size.setRange(2, 10000)
+        self.cluster_hdbscan_min_cluster_size.setValue(5)
+        self.cluster_hdbscan_min_cluster_size.setToolTip(
+            "Minimum number of points required to form a cluster."
+        )
+        hdbscan_form.addRow("Min cluster size:", self.cluster_hdbscan_min_cluster_size)
+
+        self.cluster_hdbscan_min_samples = QtWidgets.QSpinBox()
+        self.cluster_hdbscan_min_samples.setRange(0, 10000)
+        self.cluster_hdbscan_min_samples.setValue(0)
+        self.cluster_hdbscan_min_samples.setToolTip(
+            "Minimum samples for a core point. 0 defaults to min_cluster_size."
+        )
+        hdbscan_form.addRow("Min samples:", self.cluster_hdbscan_min_samples)
+
+        self.cluster_hdbscan_epsilon = QtWidgets.QDoubleSpinBox()
+        self.cluster_hdbscan_epsilon.setRange(0.0, 100.0)
+        self.cluster_hdbscan_epsilon.setSingleStep(0.01)
+        self.cluster_hdbscan_epsilon.setDecimals(3)
+        self.cluster_hdbscan_epsilon.setValue(0.0)
+        self.cluster_hdbscan_epsilon.setToolTip(
+            "Distance threshold below which clusters are merged."
+        )
+        hdbscan_form.addRow("Cluster epsilon:", self.cluster_hdbscan_epsilon)
+
+        self.cluster_hdbscan_method_combo = QtWidgets.QComboBox()
+        self.cluster_hdbscan_method_combo.addItems(["eom", "leaf"])
+        self.cluster_hdbscan_method_combo.setToolTip(
+            "'eom': excess of mass (larger clusters). "
+            "'leaf': smaller, more granular clusters."
+        )
+        hdbscan_form.addRow("Selection method:", self.cluster_hdbscan_method_combo)
+
+        # --- Agglomerative settings ---
+        self.cluster_agg_widget = QtWidgets.QWidget()
+        agg_form = QtWidgets.QFormLayout()
+        agg_form.setContentsMargins(0, 0, 0, 0)
+        self.cluster_agg_widget.setLayout(agg_form)
+        algo_layout.addWidget(self.cluster_agg_widget)
+
+        self.cluster_agg_n_clusters = QtWidgets.QSpinBox()
+        self.cluster_agg_n_clusters.setRange(2, 10000)
+        self.cluster_agg_n_clusters.setValue(10)
+        self.cluster_agg_n_clusters.setToolTip("Number of clusters to find.")
+        agg_form.addRow("N clusters:", self.cluster_agg_n_clusters)
+
+        self.cluster_agg_linkage_combo = QtWidgets.QComboBox()
+        self.cluster_agg_linkage_combo.addItems(["ward", "complete", "average", "single"])
+        self.cluster_agg_linkage_combo.setToolTip(
+            "Ward minimises within-cluster variance. complete/average/single use "
+            "max/mean/min inter-cluster distances. "
+            "Ward is replaced with 'average' when using a precomputed distance matrix."
+        )
+        agg_form.addRow("Linkage:", self.cluster_agg_linkage_combo)
+
+        # --- K-Means settings ---
+        self.cluster_kmeans_widget = QtWidgets.QWidget()
+        kmeans_form = QtWidgets.QFormLayout()
+        kmeans_form.setContentsMargins(0, 0, 0, 0)
+        self.cluster_kmeans_widget.setLayout(kmeans_form)
+        algo_layout.addWidget(self.cluster_kmeans_widget)
+
+        self.cluster_kmeans_n_clusters = QtWidgets.QSpinBox()
+        self.cluster_kmeans_n_clusters.setRange(2, 10000)
+        self.cluster_kmeans_n_clusters.setValue(10)
+        self.cluster_kmeans_n_clusters.setToolTip("Number of clusters.")
+        kmeans_form.addRow("N clusters:", self.cluster_kmeans_n_clusters)
+
+        self.cluster_kmeans_n_init = QtWidgets.QSpinBox()
+        self.cluster_kmeans_n_init.setRange(1, 100)
+        self.cluster_kmeans_n_init.setValue(10)
+        self.cluster_kmeans_n_init.setToolTip(
+            "Number of random initialisations to try."
+        )
+        kmeans_form.addRow("N init:", self.cluster_kmeans_n_init)
+
+        self.cluster_kmeans_max_iter = QtWidgets.QSpinBox()
+        self.cluster_kmeans_max_iter.setRange(10, 10000)
+        self.cluster_kmeans_max_iter.setValue(300)
+        self.cluster_kmeans_max_iter.setToolTip("Maximum iterations per run.")
+        kmeans_form.addRow("Max iterations:", self.cluster_kmeans_max_iter)
+
+        # Output group
+        output_group = QtWidgets.QGroupBox("Output")
+        output_form = QtWidgets.QFormLayout()
+        output_form.setContentsMargins(8, 6, 8, 6)
+        output_group.setLayout(output_form)
+        self.tab7_layout.addWidget(output_group)
+
+        self.cluster_result_label = QtWidgets.QLabel("N/A")
+        self.cluster_result_label.setToolTip("Result of the last clustering run.")
+        output_form.addRow("Result:", self.cluster_result_label)
+
+        self.cluster_apply_button = QtWidgets.QPushButton("Apply as labels")
+        self.cluster_apply_button.setToolTip(
+            "Write cluster assignments as a metadata column and switch the "
+            "label display to show cluster IDs."
+        )
+        self.cluster_apply_button.setEnabled(False)
+        self.cluster_apply_button.clicked.connect(self._apply_cluster_labels)
+        output_form.addRow(self.cluster_apply_button)
+
+        self.tab7_layout.addStretch(1)
+
+        # Sync initial visibility
+        self._update_cluster_method_settings()
+        self.update_cluster_options()
+
+    # ------------------------------------------------------------------
+    # Clusters tab helpers
+    # ------------------------------------------------------------------
+
+    def update_cluster_options(self):
+        """Enable/disable the Clusters tab and populate the data combo box."""
+        clusters_tab_index = self.tabs.indexOf(self.tab7)
+        dists = getattr(self.figure, "dists", None)
+        positions = getattr(self.figure, "positions", None)
+        has_embedding = positions is not None and len(np.asarray(positions)) > 0
+
+        if dists is None and not has_embedding:
+            self.tabs.setTabEnabled(clusters_tab_index, False)
+            return
+
+        self.tabs.setTabEnabled(clusters_tab_index, True)
+
+        current_text = self.cluster_data_combo_box.currentText()
+        self.cluster_data_combo_box.blockSignals(True)
+        self.cluster_data_combo_box.clear()
+        if has_embedding:
+            self.cluster_data_combo_box.addItem(CLUSTER_DATA_EMBEDDING_OPTION)
+        if isinstance(dists, dict):
+            for key in dists.keys():
+                self.cluster_data_combo_box.addItem(key)
+        self.cluster_data_combo_box.blockSignals(False)
+
+        if current_text and self.cluster_data_combo_box.findText(current_text) >= 0:
+            self.cluster_data_combo_box.setCurrentText(current_text)
+
+        self._update_cluster_input_controls()
+
+    def _selected_clustering_data(self):
+        """Return the currently selected distance/feature matrix for clustering."""
+        key = self.cluster_data_combo_box.currentText()
+        if key == CLUSTER_DATA_EMBEDDING_OPTION:
+            return getattr(self.figure, "positions", None)
+
+        dists = getattr(self.figure, "dists", None)
+        if dists is None:
+            return None
+        if isinstance(dists, dict):
+            if not key:
+                return None
+            return dists.get(key)
+        return dists
+
+    def _update_cluster_input_controls(self):
+        """Adjust metric availability based on the selected input type."""
+        arr = self._selected_clustering_data()
+        is_precomputed = arr is not None and is_precomputed_distance_matrix(arr)
+        self.cluster_metric_combo_box.setEnabled(not is_precomputed)
+
+    def _update_cluster_method_settings(self):
+        """Show/hide method-specific settings widgets."""
+        method = self.cluster_method_combo_box.currentText()
+        self.cluster_hdbscan_widget.setVisible(method == "HDBSCAN")
+        self.cluster_agg_widget.setVisible(method == "Agglomerative")
+        self.cluster_kmeans_widget.setVisible(method == "K-Means")
+
+    def _run_clustering(self):
+        """Run clustering with the current settings and colour points by cluster."""
+        from ...clusters import run_clustering, labels_to_colors
+
+        arr = self._selected_clustering_data()
+        if arr is None:
+            self.figure.show_message(
+                "No data available for clustering", color="red", duration=2
+            )
+            return
+
+        arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
+        is_precomputed = is_precomputed_distance_matrix(arr_np)
+        metric = self.cluster_metric_combo_box.currentText()
+        method = self.cluster_method_combo_box.currentText()
+
+        try:
+            labels = run_clustering(
+                arr_np,
+                method=method,
+                is_precomputed=is_precomputed,
+                metric=metric,
+                hdbscan_min_cluster_size=self.cluster_hdbscan_min_cluster_size.value(),
+                hdbscan_min_samples=(
+                    self.cluster_hdbscan_min_samples.value() or None
+                ),
+                hdbscan_cluster_selection_epsilon=self.cluster_hdbscan_epsilon.value(),
+                hdbscan_cluster_selection_method=self.cluster_hdbscan_method_combo.currentText(),
+                agg_n_clusters=self.cluster_agg_n_clusters.value(),
+                agg_linkage=self.cluster_agg_linkage_combo.currentText(),
+                kmeans_n_clusters=self.cluster_kmeans_n_clusters.value(),
+                kmeans_n_init=self.cluster_kmeans_n_init.value(),
+                kmeans_max_iter=self.cluster_kmeans_max_iter.value(),
+            )
+        except Exception as e:
+            logger.error(f"Clustering failed: {e}")
+            self.figure.show_message(
+                f"Clustering error: {e}", color="red", duration=4
+            )
+            return
+
+        self._cluster_labels = labels
+        colors = labels_to_colors(labels)
+        self.figure.set_colors(colors)
+        self._apply_cluster_viewer_colors(colors)
+
+        unique_clusters = np.unique(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
+        n_clusters = len(unique_clusters)
+        n_noise = int((labels == -1).sum())
+        if n_noise > 0:
+            self.cluster_result_label.setText(
+                f"{n_clusters} clusters, {n_noise} noise points"
+            )
+        else:
+            self.cluster_result_label.setText(f"{n_clusters} clusters")
+
+        self.cluster_apply_button.setEnabled(True)
+
+    def _clear_cluster_colors(self):
+        """Reset point colours to the defaults stored in figure metadata."""
+        self._cluster_labels = None
+        self.cluster_result_label.setText("N/A")
+        self.cluster_apply_button.setEnabled(False)
+        if self.figure.metadata is not None and "_color" in self.figure.metadata.columns:
+            self.figure.set_colors(self.figure.metadata["_color"].tolist())
+        self._restore_viewer_colors_after_clustering()
+        # Switch back to the label that was active before clustering
+        if hasattr(self, "_label_before_clustering"):
+            idx = self.label_combo_box.findText(self._label_before_clustering)
+            if idx >= 0:
+                self.label_combo_box.setCurrentIndex(idx)
+                # currentIndexChanged signal triggers set_labels
+
+    def _apply_cluster_viewer_colors(self, colors):
+        """Apply cluster colours to the connected 3D viewer if available."""
+        if not hasattr(self.figure, "ngl_viewer"):
+            return
+
+        # Remember current mode so `Clear` can restore the previous color behavior.
+        if not hasattr(self, "_viewer_color_mode_before_clustering"):
+            self._viewer_color_mode_before_clustering = (
+                self.color_combo_box.currentText().strip().lower()
+            )
+
+        ids = getattr(self.figure, "ids", None)
+        if ids is None:
+            return
+        datasets = getattr(self.figure, "datasets", None)
+
+        if datasets is None:
+            viewer_colors = {
+                int(i): tuple(np.asarray(c, dtype=float))
+                for i, c in zip(ids, colors)
+            }
+        else:
+            viewer_colors = {
+                (int(i), str(d)): tuple(np.asarray(c, dtype=float))
+                for i, d, c in zip(ids, datasets, colors)
+            }
+
+        self._viewer_colors_before_clustering = self.figure.ngl_viewer._colors.copy()
+
+        try:
+            self.figure.set_viewer_colors(viewer_colors)
+        except Exception as e:
+            logger.error(f"Failed to set cluster colors in 3D viewer: {e}")
+
+    def _restore_viewer_colors_after_clustering(self):
+        """Restore 3D viewer colors to the mode active before clustering."""
+        if not hasattr(self.figure, "ngl_viewer"):
+            return
+
+        mode = getattr(self, "_viewer_color_mode_before_clustering", "default")
+        try:
+            self.figure.set_viewer_color_mode(mode)
+        except Exception as e:
+            logger.error(f"Failed to restore 3D viewer colors after clear: {e}")
+        finally:
+            if hasattr(self, "_viewer_color_mode_before_clustering"):
+                del self._viewer_color_mode_before_clustering
+
+        if hasattr(self, "_viewer_colors_before_clustering"):
+            try:
+                self.figure.set_viewer_colors(self._viewer_colors_before_clustering)
+            except Exception as e:
+                logger.error(f"Failed to restore 3D viewer colors after clear: {e}")
+            finally:
+                del self._viewer_colors_before_clustering
+
+    def _apply_cluster_labels(self):
+        """Write cluster assignments to metadata and switch the label display."""
+        if not hasattr(self, "_cluster_labels") or self._cluster_labels is None:
+            return
+
+        # Save the current label so we can restore it when clearing
+        self._label_before_clustering = self.label_combo_box.currentText()
+
+        labels = self._cluster_labels
+        unique_clusters = np.unique(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
+
+        label_strings = np.empty(len(labels), dtype=object)
+        label_strings[labels == -1] = "noise"
+        for lbl in unique_clusters:
+            label_strings[labels == lbl] = f"cluster_{lbl}"
+
+        if self.figure.metadata is not None:
+            self.figure.metadata["cluster"] = label_strings
+
+        self.label_combo_box.blockSignals(True)
+        self.update_label_combo_box()
+        self.label_combo_box.blockSignals(False)
+
+        idx = self.label_combo_box.findText("cluster")
+        if idx >= 0:
+            self.label_combo_box.setCurrentIndex(idx)
+            # currentIndexChanged signal triggers set_labels
+
     def add_tooltip(self, widget, text, anchor="group_label"):
         """Add a reusable round help icon tooltip to a widget."""
         if not hasattr(self, "_tooltip_anchors"):
@@ -996,6 +1399,7 @@ class ScatterControls(QtWidgets.QWidget):
         # self.update_ann_combo_box()
         self.update_umap_options()
         self.update_fidelity_options()
+        self.update_cluster_options()
         self.update_label_combo_box()
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
@@ -1460,16 +1864,16 @@ class ScatterControls(QtWidgets.QWidget):
 
     def set_ngl_cache(self):
         """Set whether the ngl viewer should cache neurons."""
-        if hasattr(self.figure, "_ngl_viewer"):
-            self.figure._ngl_viewer.use_cache = self.ngl_cache_neurons.isChecked()
+        if hasattr(self.figure, "ngl_viewer"):
+            self.figure.ngl_viewer.use_cache = self.ngl_cache_neurons.isChecked()
 
             if not self.ngl_cache_neurons.isChecked():
-                self.figure._ngl_viewer.clear_cache()
+                self.figure.ngl_viewer.clear_cache()
 
     def set_ngl_debug(self):
         """Set debug mode for ngl viewer."""
-        if hasattr(self.figure, "_ngl_viewer"):
-            self.figure._ngl_viewer.debug = self.ngl_debug_mode.isChecked()
+        if hasattr(self.figure, "ngl_viewer"):
+            self.figure.ngl_viewer.debug = self.ngl_debug_mode.isChecked()
 
     def set_dclick_deselect(self):
         """Set whether to deselect on double-click."""
@@ -1655,18 +2059,18 @@ class ScatterControls(QtWidgets.QWidget):
         super().close()
 
     def ngl_open(self):
-        if not hasattr(self.figure, "_ngl_viewer"):
+        if not hasattr(self.figure, "ngl_viewer"):
             raise ValueError("Figure has no neuroglancer viewer")
-        scene = self.figure._ngl_viewer.neuroglancer_scene(
+        scene = self.figure.ngl_viewer.neuroglancer_scene(
             group_by=self.ngl_split_combo_box.currentText().lower(),
             use_colors=self.ngl_use_colors.isChecked(),
         )
         scene.open()
 
     def ngl_copy(self):
-        if not hasattr(self.figure, "_ngl_viewer"):
+        if not hasattr(self.figure, "ngl_viewer"):
             raise ValueError("Figure has no neuroglancer viewer")
-        scene = self.figure._ngl_viewer.neuroglancer_scene(
+        scene = self.figure.ngl_viewer.neuroglancer_scene(
             group_by=self.ngl_split_combo_box.currentText().lower(),
             use_colors=self.ngl_use_colors.isChecked(),
         )
@@ -1705,15 +2109,23 @@ class ScatterControls(QtWidgets.QWidget):
         )
 
         if self.umap_selection_only.isChecked():
-            assert isinstance(dists, pd.DataFrame)
             # Get the selected indices
             selected_indices = self.selected_indices
+            if selected_indices.size == 0:
+                self.figure.show_message("No points selected", color="red", duration=2)
+                return
 
             # Get the distances for the selected indices
             if dists.shape[0] == dists.shape[1]:
-                dists = dists.iloc[selected_indices, selected_indices].copy()
+                if isinstance(dists, pd.DataFrame):
+                    dists = dists.iloc[selected_indices, selected_indices].copy()
+                else:
+                    dists = dists[np.ix_(selected_indices, selected_indices)].copy()
             else:
-                dists = dists.iloc[selected_indices].copy()
+                if isinstance(dists, pd.DataFrame):
+                    dists = dists.iloc[selected_indices].copy()
+                else:
+                    dists = dists[selected_indices].copy()
 
             # Get the data for the selected indices
             data = self.meta_data.iloc[selected_indices].copy().reset_index(drop=True)
@@ -1745,19 +2157,123 @@ class ScatterControls(QtWidgets.QWidget):
             data["x"] = xy[:, 0]
             data["y"] = xy[:, 1]
 
-            # Create a new figure
-            new_fig = self.figure.__class__(
-                data, dists=dists, hover_info=self.figure._hover_info_org
-            )
+            selected_ids = data["id"].to_numpy()
 
-            # Add neuroglancer viewer (if it exists)
-            if hasattr(self.figure, "_ngl_viewer"):
-                ngl = self.figure._ngl_viewer.__class__(
-                    data,
-                    neuropil_mesh=self.figure._ngl_viewer._neuropil_mesh,
-                    title="Viewer Selection",
-                )
-                new_fig.sync_viewer(ngl)
+            selected_distances = None
+            selected_features = None
+
+            # Preserve both modalities when both are available in the source figure.
+            source_matrices = getattr(self.figure, "dists", None)
+            if isinstance(source_matrices, dict):
+                source_distances = source_matrices.get("distances")
+                source_features = source_matrices.get("features")
+
+                if source_distances is not None:
+                    if isinstance(source_distances, pd.DataFrame):
+                        selected_distances = source_distances.iloc[
+                            selected_indices, selected_indices
+                        ].copy()
+                    else:
+                        selected_distances = pd.DataFrame(
+                            source_distances[np.ix_(selected_indices, selected_indices)],
+                            index=selected_ids,
+                            columns=selected_ids,
+                        )
+
+                if source_features is not None:
+                    if isinstance(source_features, pd.DataFrame):
+                        selected_features = source_features.iloc[selected_indices].copy()
+                        selected_features.index = selected_ids
+                    else:
+                        selected_features = pd.DataFrame(
+                            np.asarray(source_features)[selected_indices],
+                            index=selected_ids,
+                        )
+
+            # Fallback for non-dict sources: preserve whichever modality was used.
+            if selected_distances is None and selected_features is None:
+                if is_precomputed:
+                    if isinstance(dists, pd.DataFrame):
+                        selected_distances = dists.copy()
+                    else:
+                        selected_distances = pd.DataFrame(
+                            dists,
+                            index=selected_ids,
+                            columns=selected_ids,
+                        )
+                else:
+                    if isinstance(dists, pd.DataFrame):
+                        selected_features = dists.copy()
+                        selected_features.index = selected_ids
+                    else:
+                        selected_features = pd.DataFrame(dists, index=selected_ids)
+
+            from ..core import MainWindow
+
+            window = MainWindow()
+            parent_window = self.window()
+            if parent_window is not None:
+                window.move(parent_window.pos() + QtCore.QPoint(40, 40))
+            window.show()
+
+            main_widget = window.centralWidget()
+            fig = main_widget.fig_scatter
+            fig.clear()
+
+            fig.set_points(
+                points=xy,
+                metadata=data,
+                label_col="label",
+                id_col="id",
+                color_col="_color",
+                marker_col="dataset",
+                hover_col="\n".join(
+                    [
+                        f"{c}: {{{c}}}"
+                        for c in data.columns
+                        if not str(c).startswith("_")
+                    ]
+                ),
+                dataset_col="dataset",
+                point_size=10,
+                distances=selected_distances,
+                features=selected_features,
+            )
+            main_widget.scatter_controls.update_controls()
+
+            # Try to propagate neuroglancer source data for the selected subset.
+            try:
+                src_viewer = getattr(self.figure, "ngl_viewer", None)
+                src_data = getattr(src_viewer, "data", None)
+                if src_data is not None and len(src_data):
+                    if (
+                        isinstance(src_data.index, pd.MultiIndex)
+                        and "dataset" in data.columns
+                    ):
+                        keys = list(zip(data["id"].tolist(), data["dataset"].tolist()))
+                        ngl_data = src_data.loc[keys].copy()
+                    else:
+                        ngl_data = src_data.loc[data["id"].tolist()].copy()
+
+                    main_widget.ngl_viewer.set_data(ngl_data)
+
+                    neuropil_mesh = getattr(src_viewer, "neuropil_mesh", None)
+                    if neuropil_mesh is not None:
+                        main_widget.ngl_viewer.set_neuropil_mesh(
+                            neuropil_mesh,
+                            neuropil_source=getattr(src_viewer, "neuropil_source", None),
+                        )
+            except Exception as e:
+                logger.debug(f"Failed to propagate Neuroglancer data to new window: {e}")
+
+            window._data = {
+                "meta": data,
+                "embeddings": xy,
+                "distances": selected_distances,
+                "features": selected_features,
+            }
+            window._update_view_actions()
+            window.setWindowTitle(f"BigClust - {method} selection ({len(data)})")
 
         else:
             pca_components = (

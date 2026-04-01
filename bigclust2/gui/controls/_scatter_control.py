@@ -517,10 +517,10 @@ class ScatterControls(BaseControls):
             )
 
             # Add neuroglancer viewer (if it exists)
-            if hasattr(self.figure, "_ngl_viewer"):
-                ngl = self.figure._ngl_viewer.__class__(
+            if hasattr(self.figure, "ngl_viewer"):
+                ngl = self.figure.ngl_viewer.__class__(
                     data,
-                    neuropil_mesh=self.figure._ngl_viewer._neuropil_mesh,
+                    neuropil_mesh=self.figure.ngl_viewer._neuropil_mesh,
                     title="Viewer Selection",
                 )
                 new_fig.sync_viewer(ngl)

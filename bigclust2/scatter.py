@@ -1272,6 +1272,38 @@ class ScatterFigure(BaseFigure):
 
         self.synced_widgets.append((widget, callback))
 
+    def set_colors(self, colors):
+        """Set the colors for the points in the scatterplot.
+
+        Parameters
+        ----------
+        colors : np.ndarray
+            Can be:
+                - (N, ) list of string colors
+                - (N, 3) array of RGB colors
+                - (N, 4) array of RGBA colors
+            N must match the number of points in the scatterplot.
+            Same order as the points provided in `set_points()`.
+
+        """
+        if not isinstance(colors, (list, np.ndarray)):
+            raise ValueError(f"Expected list or array, got {type(colors)}.")
+
+        if len(colors) != len(self):
+            raise ValueError(f"Expected {len(self)} colors, got {len(colors)}.")
+
+        if isinstance(colors, list) and isinstance(colors[0], str):
+            colors = np.array([tuple(cmap.Color(c).rgba) for c in colors])
+        elif isinstance(colors, np.ndarray) and colors.shape[1] == 3:
+            # Add an alpha channel if not provided
+            colors = np.hstack((colors, np.ones((len(colors), 1))))
+
+        self.colors = colors.astype(np.float32)
+
+        for vis in self.point_visuals:
+            vis.geometry.colors.set_data(self.colors[vis._point_ix])
+            vis.geometry.colors.update_full()
+
     def set_viewer_colors(self, colors):
         """Set the colors for the neuroglancer viewer.
 
@@ -1280,7 +1312,7 @@ class ScatterFigure(BaseFigure):
         colors :    dict
                     Dictionary of colors keyed by IDs: {id: color, ...}
         """
-        if not hasattr(self, "_ngl_viewer"):
+        if not hasattr(self, "ngl_viewer"):
             raise ValueError("No neuroglancer viewer is connected.")
 
         assert isinstance(colors, dict), "Colors must be a dictionary."

@@ -343,12 +343,16 @@ class ScatterFigure(BaseFigure):
         if x == self.show_label_lines:
             return
 
-        if x:
-            if not getattr(self, "label_line_group", None):
-                self.make_label_lines()
-            self.label_line_group.visible = True
-        elif not x and getattr(self, "label_line_group", None):
+        if not x and getattr(self, "label_line_group", None):
             self.label_line_group.visible = False
+        elif x:
+            # We're always remaking the label lines to make sure they
+            # are up-to-date with the current positions and labels.
+            # This is not super efficient but it is simpler than
+            # trying to keep track if the lines are stale or not.
+            self.make_label_lines()
+            self.label_line_group.visible = True
+
         self._show_label_lines = x
 
     @property

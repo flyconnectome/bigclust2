@@ -26,6 +26,7 @@ dependencies = [
     "pyarrow>=23.0.0",
     "pyqtgraph>=0.14.0",
     "scikit-learn>=1.7.2",
+    "networkx>=3.4.2",
 ]
 
 [project.scripts]

@@ -29,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 
 CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
+CLUSTER_HOMOGENEOUS_LABEL_CURRENT = "Current labels"
 
 
 def requires_selection(func):
@@ -90,7 +91,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.tabs.addTab(self.tab4, "Settings")
         self.tabs.addTab(self.tab5, "Embeddings")
         self.tabs.addTab(self.tab6, "Fidelity")
-        self.tabs.addTab(self.tab7, "Clusters")
+        self.tabs.addTab(self.tab7, "Cluster")
 
         self.build_control_gui()
         # self.build_annotation_gui()
@@ -1032,6 +1033,45 @@ class ScatterControls(QtWidgets.QWidget):
         )
         hdbscan_form.addRow("Selection method:", self.cluster_hdbscan_method_combo)
 
+        self.cluster_hdbscan_label_noise_check = QtWidgets.QCheckBox(
+            "Relabel noise points"
+        )
+        self.cluster_hdbscan_label_noise_check.setToolTip(
+            "Assign HDBSCAN noise points (-1) to the nearest non-noise cluster."
+        )
+        self.cluster_hdbscan_label_noise_check.setChecked(False)
+        self.cluster_hdbscan_label_noise_check.stateChanged.connect(
+            self._update_hdbscan_noise_controls
+        )
+        hdbscan_form.addRow(self.cluster_hdbscan_label_noise_check)
+
+        self.cluster_hdbscan_noise_threshold_row = QtWidgets.QWidget()
+        noise_threshold_layout = QtWidgets.QHBoxLayout()
+        noise_threshold_layout.setContentsMargins(0, 0, 0, 0)
+        self.cluster_hdbscan_noise_threshold_row.setLayout(noise_threshold_layout)
+
+        self.cluster_hdbscan_noise_threshold_check = QtWidgets.QCheckBox("Use threshold")
+        self.cluster_hdbscan_noise_threshold_check.setToolTip(
+            "Only relabel noise points if nearest-cluster distance is below threshold."
+        )
+        self.cluster_hdbscan_noise_threshold_check.setChecked(False)
+        self.cluster_hdbscan_noise_threshold_check.stateChanged.connect(
+            self._update_hdbscan_noise_controls
+        )
+        noise_threshold_layout.addWidget(self.cluster_hdbscan_noise_threshold_check)
+
+        self.cluster_hdbscan_noise_threshold = QtWidgets.QDoubleSpinBox()
+        self.cluster_hdbscan_noise_threshold.setRange(0.0, 1_000_000.0)
+        self.cluster_hdbscan_noise_threshold.setSingleStep(0.05)
+        self.cluster_hdbscan_noise_threshold.setDecimals(4)
+        self.cluster_hdbscan_noise_threshold.setValue(1.0)
+        self.cluster_hdbscan_noise_threshold.setToolTip(
+            "Maximum distance for relabeling a noise point."
+        )
+        noise_threshold_layout.addWidget(self.cluster_hdbscan_noise_threshold)
+
+        hdbscan_form.addRow("Noise threshold:", self.cluster_hdbscan_noise_threshold_row)
+
         # --- Agglomerative settings ---
         self.cluster_agg_widget = QtWidgets.QWidget()
         agg_form = QtWidgets.QFormLayout()
@@ -1039,11 +1079,89 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_agg_widget.setLayout(agg_form)
         algo_layout.addWidget(self.cluster_agg_widget)
 
+
+        self.cluster_agg_criterion_combo = QtWidgets.QComboBox()
+        self.cluster_agg_criterion_combo.addItems(
+            ["N clusters", "Distance threshold", "Homogeneous composition"]
+        )
+        self.cluster_agg_criterion_combo.setCurrentIndex(0)
+        self.cluster_agg_criterion_combo.setToolTip(
+            "Choose how to stop agglomerative merging: fixed number of "
+            "clusters or a linkage distance threshold."
+        )
+        self.cluster_agg_criterion_combo.currentIndexChanged.connect(
+            self._update_agg_controls
+        )
+        agg_form.addRow("Stop criterion:", self.cluster_agg_criterion_combo)
+
         self.cluster_agg_n_clusters = QtWidgets.QSpinBox()
         self.cluster_agg_n_clusters.setRange(2, 10000)
         self.cluster_agg_n_clusters.setValue(10)
         self.cluster_agg_n_clusters.setToolTip("Number of clusters to find.")
         agg_form.addRow("N clusters:", self.cluster_agg_n_clusters)
+
+        self.cluster_agg_distance_threshold = QtWidgets.QDoubleSpinBox()
+        self.cluster_agg_distance_threshold.setRange(0.0, 1_000_000.0)
+        self.cluster_agg_distance_threshold.setSingleStep(0.05)
+        self.cluster_agg_distance_threshold.setDecimals(4)
+        self.cluster_agg_distance_threshold.setValue(1.0)
+        self.cluster_agg_distance_threshold.setToolTip(
+            "Stop merging when linkage distance exceeds this threshold."
+        )
+        agg_form.addRow("Distance threshold:", self.cluster_agg_distance_threshold)
+
+        self.cluster_agg_homogeneous_widget = QtWidgets.QWidget()
+        homogeneous_form = QtWidgets.QFormLayout()
+        homogeneous_form.setContentsMargins(0, 0, 0, 0)
+        self.cluster_agg_homogeneous_widget.setLayout(homogeneous_form)
+        agg_form.addRow(self.cluster_agg_homogeneous_widget)
+
+        self.cluster_agg_homogeneous_labels_combo = QtWidgets.QComboBox()
+        self.cluster_agg_homogeneous_labels_combo.setToolTip(
+            "Label source used to evaluate composition balance per cluster."
+        )
+        homogeneous_form.addRow(
+            "Composition labels:", self.cluster_agg_homogeneous_labels_combo
+        )
+
+        self.cluster_agg_homogeneous_max_dist = QtWidgets.QDoubleSpinBox()
+        self.cluster_agg_homogeneous_max_dist.setRange(0.0, 1_000_000.0)
+        self.cluster_agg_homogeneous_max_dist.setDecimals(4)
+        self.cluster_agg_homogeneous_max_dist.setSingleStep(0.05)
+        self.cluster_agg_homogeneous_max_dist.setValue(0.0)
+        self.cluster_agg_homogeneous_max_dist.setSpecialValueText("None")
+        self.cluster_agg_homogeneous_max_dist.setToolTip(
+            "Upper split-distance bound. 0 means no upper bound."
+        )
+        homogeneous_form.addRow(
+            "Max split distance:", self.cluster_agg_homogeneous_max_dist
+        )
+
+        self.cluster_agg_homogeneous_min_dist = QtWidgets.QDoubleSpinBox()
+        self.cluster_agg_homogeneous_min_dist.setRange(0.0, 1_000_000.0)
+        self.cluster_agg_homogeneous_min_dist.setDecimals(4)
+        self.cluster_agg_homogeneous_min_dist.setSingleStep(0.05)
+        self.cluster_agg_homogeneous_min_dist.setValue(0.0)
+        self.cluster_agg_homogeneous_min_dist.setSpecialValueText("None")
+        self.cluster_agg_homogeneous_min_dist.setToolTip(
+            "Lower split-distance bound. 0 means no lower bound."
+        )
+        homogeneous_form.addRow(
+            "Min split distance:", self.cluster_agg_homogeneous_min_dist
+        )
+
+        self.cluster_agg_homogeneous_min_dist_diff = QtWidgets.QDoubleSpinBox()
+        self.cluster_agg_homogeneous_min_dist_diff.setRange(0.0, 1_000_000.0)
+        self.cluster_agg_homogeneous_min_dist_diff.setDecimals(4)
+        self.cluster_agg_homogeneous_min_dist_diff.setSingleStep(0.05)
+        self.cluster_agg_homogeneous_min_dist_diff.setValue(0.0)
+        self.cluster_agg_homogeneous_min_dist_diff.setSpecialValueText("None")
+        self.cluster_agg_homogeneous_min_dist_diff.setToolTip(
+            "Merge nearby clusters when split distances differ less than this value."
+        )
+        homogeneous_form.addRow(
+            "Merge distance diff:", self.cluster_agg_homogeneous_min_dist_diff
+        )
 
         self.cluster_agg_linkage_combo = QtWidgets.QComboBox()
         self.cluster_agg_linkage_combo.addItems(["ward", "complete", "average", "single"])
@@ -1105,6 +1223,7 @@ class ScatterControls(QtWidgets.QWidget):
 
         # Sync initial visibility
         self._update_cluster_method_settings()
+        self._update_hdbscan_noise_controls()
         self.update_cluster_options()
 
     # ------------------------------------------------------------------
@@ -1137,7 +1256,44 @@ class ScatterControls(QtWidgets.QWidget):
         if current_text and self.cluster_data_combo_box.findText(current_text) >= 0:
             self.cluster_data_combo_box.setCurrentText(current_text)
 
+        self._update_homogeneous_label_options()
         self._update_cluster_input_controls()
+
+    def _update_homogeneous_label_options(self):
+        """Populate homogeneous-composition label source choices."""
+        if not hasattr(self, "cluster_agg_homogeneous_labels_combo"):
+            return
+
+        current = self.cluster_agg_homogeneous_labels_combo.currentText()
+        self.cluster_agg_homogeneous_labels_combo.blockSignals(True)
+        self.cluster_agg_homogeneous_labels_combo.clear()
+        self.cluster_agg_homogeneous_labels_combo.addItem(CLUSTER_HOMOGENEOUS_LABEL_CURRENT)
+
+        meta = getattr(self.figure, "metadata", None)
+        if meta is not None:
+            for col in sorted(meta.columns):
+                if col.startswith("_"):
+                    continue
+                self.cluster_agg_homogeneous_labels_combo.addItem(col)
+
+        self.cluster_agg_homogeneous_labels_combo.blockSignals(False)
+
+        if current and self.cluster_agg_homogeneous_labels_combo.findText(current) >= 0:
+            self.cluster_agg_homogeneous_labels_combo.setCurrentText(current)
+        elif self.cluster_agg_homogeneous_labels_combo.findText("dataset") >= 0:
+            self.cluster_agg_homogeneous_labels_combo.setCurrentText("dataset")
+
+    def _selected_homogeneous_labels(self):
+        """Return labels used for homogeneous-composition clustering."""
+        key = self.cluster_agg_homogeneous_labels_combo.currentText()
+        if (not key) or (key == CLUSTER_HOMOGENEOUS_LABEL_CURRENT):
+            return np.asarray(self.figure.labels)
+
+        meta = getattr(self.figure, "metadata", None)
+        if meta is None or key not in meta.columns:
+            return None
+
+        return meta[key].astype(str).fillna("").to_numpy()
 
     def _selected_clustering_data(self):
         """Return the currently selected distance/feature matrix for clustering."""
@@ -1166,6 +1322,48 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_hdbscan_widget.setVisible(method == "HDBSCAN")
         self.cluster_agg_widget.setVisible(method == "Agglomerative")
         self.cluster_kmeans_widget.setVisible(method == "K-Means")
+        self._update_agg_controls()
+
+    def _update_agg_controls(self):
+        """Enable Agglomerative fields for the selected stop criterion."""
+        if not hasattr(self, "cluster_agg_criterion_combo"):
+            return
+
+        criterion = self.cluster_agg_criterion_combo.currentText()
+        use_threshold = criterion == "Distance threshold"
+        use_homogeneous = criterion == "Homogeneous composition"
+
+        show_n_clusters = not use_threshold and not use_homogeneous
+        show_distance_threshold = use_threshold
+
+        self.cluster_agg_n_clusters.setVisible(show_n_clusters)
+        self.cluster_agg_distance_threshold.setVisible(show_distance_threshold)
+
+        agg_form = self.cluster_agg_widget.layout()
+        if isinstance(agg_form, QtWidgets.QFormLayout):
+            n_label = agg_form.labelForField(self.cluster_agg_n_clusters)
+            if n_label is not None:
+                n_label.setVisible(show_n_clusters)
+
+            d_label = agg_form.labelForField(self.cluster_agg_distance_threshold)
+            if d_label is not None:
+                d_label.setVisible(show_distance_threshold)
+
+        self.cluster_agg_homogeneous_widget.setVisible(use_homogeneous)
+
+    def _update_hdbscan_noise_controls(self):
+        """Enable optional HDBSCAN noise-threshold controls."""
+        if not hasattr(self, "cluster_hdbscan_label_noise_check"):
+            return
+
+        relabel_noise = self.cluster_hdbscan_label_noise_check.isChecked()
+        use_threshold = (
+            relabel_noise and self.cluster_hdbscan_noise_threshold_check.isChecked()
+        )
+
+        self.cluster_hdbscan_noise_threshold_check.setEnabled(relabel_noise)
+        self.cluster_hdbscan_noise_threshold_row.setEnabled(relabel_noise)
+        self.cluster_hdbscan_noise_threshold.setEnabled(use_threshold)
 
     def _run_clustering(self):
         """Run clustering with the current settings and colour points by cluster."""
@@ -1195,8 +1393,56 @@ class ScatterControls(QtWidgets.QWidget):
                 ),
                 hdbscan_cluster_selection_epsilon=self.cluster_hdbscan_epsilon.value(),
                 hdbscan_cluster_selection_method=self.cluster_hdbscan_method_combo.currentText(),
-                agg_n_clusters=self.cluster_agg_n_clusters.value(),
+                hbdscan_label_noise=self.cluster_hdbscan_label_noise_check.isChecked(),
+                hbdscan_label_noise_threshold=(
+                    self.cluster_hdbscan_noise_threshold.value()
+                    if (
+                        self.cluster_hdbscan_label_noise_check.isChecked()
+                        and self.cluster_hdbscan_noise_threshold_check.isChecked()
+                    )
+                    else None
+                ),
+                agg_stop_criterion={
+                    "N clusters": "n_clusters",
+                    "Distance threshold": "distance_threshold",
+                    "Homogeneous composition": "homogeneous_composition",
+                }[self.cluster_agg_criterion_combo.currentText()],
+                agg_n_clusters=(
+                    self.cluster_agg_n_clusters.value()
+                    if self.cluster_agg_criterion_combo.currentText() == "N clusters"
+                    else None
+                ),
+                agg_distance_threshold=(
+                    self.cluster_agg_distance_threshold.value()
+                    if self.cluster_agg_criterion_combo.currentText()
+                    == "Distance threshold"
+                    else None
+                ),
                 agg_linkage=self.cluster_agg_linkage_combo.currentText(),
+                agg_homogeneous_labels=(
+                    self._selected_homogeneous_labels()
+                    if self.cluster_agg_criterion_combo.currentText()
+                    == "Homogeneous composition"
+                    else None
+                ),
+                agg_homogeneous_max_dist=(
+                    self.cluster_agg_homogeneous_max_dist.value() or None
+                    if self.cluster_agg_criterion_combo.currentText()
+                    == "Homogeneous composition"
+                    else None
+                ),
+                agg_homogeneous_min_dist=(
+                    self.cluster_agg_homogeneous_min_dist.value() or None
+                    if self.cluster_agg_criterion_combo.currentText()
+                    == "Homogeneous composition"
+                    else None
+                ),
+                agg_homogeneous_min_dist_diff=(
+                    self.cluster_agg_homogeneous_min_dist_diff.value() or None
+                    if self.cluster_agg_criterion_combo.currentText()
+                    == "Homogeneous composition"
+                    else None
+                ),
                 kmeans_n_clusters=self.cluster_kmeans_n_clusters.value(),
                 kmeans_n_init=self.cluster_kmeans_n_init.value(),
                 kmeans_max_iter=self.cluster_kmeans_max_iter.value(),
@@ -1323,6 +1569,9 @@ class ScatterControls(QtWidgets.QWidget):
         if idx >= 0:
             self.label_combo_box.setCurrentIndex(idx)
             # currentIndexChanged signal triggers set_labels
+
+        if self.figure.show_label_lines:
+            self.figure.make_label_lines()
 
     def add_tooltip(self, widget, text, anchor="group_label"):
         """Add a reusable round help icon tooltip to a widget."""
@@ -2041,8 +2290,7 @@ class ScatterControls(QtWidgets.QWidget):
         )
 
         # Update label lines
-        if hasattr(self.figure, "_label_line_group"):
-            # Re-trigger making label lines
+        if self.figure.show_label_lines:
             self.figure.make_label_lines()
 
     def switch_labels(self):

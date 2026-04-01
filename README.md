@@ -112,7 +112,7 @@ The top-level `info` file would look like this:
 - [ ] Allow users to change project settings (e.g. neuroglancer sources) before or after loading
 - [ ] Support loading up-to-date annotations when opening a project (e.g. from Clio or Neuprint)
 - [ ] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
-- [ ] Support sharing figure state (e.g. `uv run bigclust --state <state_id>`)
+- [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
 - [ ] Fine-control over hover info
 - [ ] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
 
@@ -136,6 +136,31 @@ uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
 
 > [!TIP]
 > Note the `@main` in above command? We're asking `uvx` to always use the latest version of `bigclust2` but we could also point it at a specific release using e.g. `@02ea911`.
+
+### Controls
+
+Most GUI elements are hopefully self-explanatory - when in doubt look for the tooltip.
+
+#### Scatterplot
+
+Use the left click + hold to move the view and shift + left click + hold to draw a
+selection box around points.
+
+- `ESC` to deselect all points
+- `C` to toggle the control panel
+- `L` to toggle labels
+- left/right arrows increase/decrease font size of labels
+- up/down arrows increase/decrease marker size
+- double-click on a label to highlight points with the same label
+- shift + double-click on a label to select points with the same label
+- CMD/control + shift + double-click on a label to add points with the same label to the current selection
+
+#### 3D Viewer
+
+Use the left click + hold to rotate the view, middle button + hold to pan and scroll to zoom in and out.
+
+- `C` to toggle the legend
+- to align the view: `1` (front), `2` (side), `3` (top)
 
 
 ## Troubleshooting

@@ -397,7 +397,7 @@ class ScatterFigure(BaseFigure):
             x, (int, float)
         ), "`distance_edges_threshold` must be a number."
 
-        if x == self._distance_edges_threshold:
+        if x == self.distance_edges_threshold:
             return
 
         self._distance_edges_threshold = x
@@ -998,7 +998,9 @@ class ScatterFigure(BaseFigure):
             self.highlight_labels(ls.indices)
 
         if verbose:
-            self.show_message(f"Found {len(ls)} occurrences of '{label}'", duration=3)
+            self.show_message(
+                f"Found {len(ls)} occurrences of '{label}'", duration=3, color="g"
+            )
 
         return ls
 
@@ -1152,6 +1154,7 @@ class ScatterFigure(BaseFigure):
         self._selection_counter = 0
 
         self.default_label_col = label_col
+        self.default_color_col = color_col
         self.label_visuals = [None] * len(metadata) if label_col else None
         self.labels = metadata[label_col].astype(str).values if label_col else None
         self.ids = metadata[id_col].values if id_col else None
@@ -1278,7 +1281,7 @@ class ScatterFigure(BaseFigure):
 
         self.synced_widgets.append((widget, callback))
 
-    def set_colors(self, colors):
+    def set_colors(self, colors, sync_to_viewer=True):
         """Set the colors for the points in the scatterplot.
 
         Parameters
@@ -1290,8 +1293,13 @@ class ScatterFigure(BaseFigure):
                 - (N, 4) array of RGBA colors
             N must match the number of points in the scatterplot.
             Same order as the points provided in `set_points()`.
+        sync_to_viewer : bool
+            Whether to also update the colors in the synced neuroglancer viewer (if any).
 
         """
+        if isinstance(colors, pd.arrays.ArrowStringArray):
+            colors = np.array(colors)
+
         if not isinstance(colors, (list, np.ndarray)):
             raise ValueError(f"Expected list or array, got {type(colors)}.")
 
@@ -1300,9 +1308,12 @@ class ScatterFigure(BaseFigure):
 
         if isinstance(colors, list) and isinstance(colors[0], str):
             colors = np.array([tuple(cmap.Color(c).rgba) for c in colors])
-        elif isinstance(colors, np.ndarray) and colors.shape[1] == 3:
-            # Add an alpha channel if not provided
-            colors = np.hstack((colors, np.ones((len(colors), 1))))
+        elif isinstance(colors, np.ndarray):
+            if colors.ndim == 1:
+                colors = np.array([tuple(cmap.Color(c).rgba) for c in colors])
+            elif colors.ndim == 2 and colors.shape[1] == 3:
+                # Add an alpha channel if not provided
+                colors = np.hstack((colors, np.ones((len(colors), 1))))
 
         self.colors = colors.astype(np.float32)
 
@@ -1310,100 +1321,123 @@ class ScatterFigure(BaseFigure):
             vis.geometry.colors.set_data(self.colors[vis._point_ix])
             vis.geometry.colors.update_full()
 
+        if sync_to_viewer and hasattr(self, "ngl_viewer"):
+            self.set_viewer_colors(colors)
+
     def set_viewer_colors(self, colors):
         """Set the colors for the neuroglancer viewer.
 
         Parameters
         ----------
-        colors :    dict
-                    Dictionary of colors keyed by IDs: {id: color, ...}
+        colors :    dict | array-like
+                    Dictionary of colors keyed by IDs ({id: color, ...}
+                    or{(id, dataset): color, ...}) or array-like of colors
         """
         if not hasattr(self, "ngl_viewer"):
             raise ValueError("No neuroglancer viewer is connected.")
 
-        assert isinstance(colors, dict), "Colors must be a dictionary."
+        if isinstance(colors, pd.arrays.ArrowStringArray):
+            colors = np.array(colors)
+
+        if isinstance(colors, (np.ndarray, list)):
+            if self.ids is None:
+                colors = {i: c for i, c in enumerate(colors)}
+            elif self.datasets is None:
+                colors = {i: c for i, c in zip(self.ids, colors)}
+            else:
+                colors = {(i, d): c for i, d, c in zip(self.ids, self.datasets, colors)}
+        elif not isinstance(colors, dict):
+            raise ValueError("Colors must be a dictionary.")
+
         self.ngl_viewer.set_colors(colors)
 
-    def set_viewer_color_mode(self, mode, palette="vispy:husl"):
-        """Set the color mode for the neuroglancer viewer.
+    # def set_viewer_color_mode(self, mode, palette="vispy:husl"):
+    #     """Set the color mode for the neuroglancer viewer.
 
-        Parameters
-        ----------
-        mode :  "dataset" | "cluster" | "label" | "default"
-                The color mode to use.
+    #     Parameters
+    #     ----------
+    #     mode :  "dataset" | "cluster" | "label" | "default"
+    #             The color mode to use.
 
-        """
-        if not hasattr(self, "ngl_viewer"):
-            raise ValueError("No neuroglancer viewer connected to this figure.")
+    #     """
+    #     if not hasattr(self, "ngl_viewer"):
+    #         raise ValueError("No neuroglancer viewer connected to this figure.")
 
-        if mode == "cluster":
-            # Collect colors for each leaf
-            colors = {}
-            for vis in self.point_visuals:
-                this_ids = self.ids[vis._point_ix]
+    #     assert mode in (
+    #         "dataset",
+    #         "cluster",
+    #         "label",
+    #         "default",
+    #     ), f"Unknown mode '{mode}'."
 
-                if self.datasets is None:
-                    colors.update(zip(this_ids, vis.geometry.colors.data))
-                else:
-                    this_datasets = self.datasets[vis._point_ix]
-                    colors.update(
-                        zip(
-                            zip(this_ids, this_datasets),
-                            vis.geometry.colors.data,
-                        )
-                    )
-        elif mode == "label":
-            labels_unique = np.unique(self.labels.astype(str))
+    #     if mode == "cluster":
+    #         # Collect colors for each leaf from the visual
+    #         colors = {}
+    #         for vis in self.point_visuals:
+    #             this_ids = self.ids[vis._point_ix]
 
-            # To avoid similar labels getting a similar color we will jumble the labels
-            rng = np.random.default_rng(seed=42)
-            rng.shuffle(labels_unique)
+    #             if self.datasets is None:
+    #                 colors.update(zip(this_ids, vis.geometry.colors.data))
+    #             else:
+    #                 this_datasets = self.datasets[vis._point_ix]
+    #                 colors.update(
+    #                     zip(
+    #                         zip(this_ids, this_datasets),
+    #                         vis.geometry.colors.data,
+    #                     )
+    #                 )
+    #     elif mode == "label":
+    #         labels_unique = np.unique(self.labels.astype(str))
 
-            palette = cmap.Colormap(palette)
-            colormap = {
-                l: c.hex
-                for l, c in zip(labels_unique, palette.iter_colors(len(labels_unique)))
-            }
-            if self.datasets is None:
-                colors = {i: colormap[str(l)] for i, l in zip(self.ids, self.labels)}
-            else:
-                colors = {
-                    (i, d): colormap[str(l)]
-                    for i, l, d in zip(self.ids, self.labels, self.datasets)
-                }
-        elif mode == "dataset":
-            palette = cmap.Colormap(palette)
-            colormap = {
-                i: c.hex
-                for i, c in zip(
-                    range(len(self.point_visuals)),
-                    palette.iter_colors(len(self.point_visuals)),
-                )
-            }
-            colors = {}
-            for i, vis in enumerate(self.point_visuals):
-                this_ids = self.ids[vis._point_ix]
-                this_c = colormap[i]
-                if self.datasets is None:
-                    colors.update({i: this_c for this_id in this_ids})
-                else:
-                    this_datasets = self.datasets[vis._point_ix]
-                    colors.update(
-                        {
-                            (this_id, this_dataset): this_c
-                            for this_id, this_dataset in zip(this_ids, this_datasets)
-                        }
-                    )
-        elif mode == "default":
-            self.ngl_viewer.set_default_colors()
-            return
-        else:
-            raise ValueError(
-                f"Unknown color mode '{mode}'. "
-                f"Expected 'dataset', 'cluster', 'label' or 'default'."
-            )
+    #         # To avoid similar labels getting a similar color we will jumble the labels
+    #         rng = np.random.default_rng(seed=42)
+    #         rng.shuffle(labels_unique)
 
-        self.set_viewer_colors(colors)
+    #         palette = cmap.Colormap(palette)
+    #         colormap = {
+    #             l: c.hex
+    #             for l, c in zip(labels_unique, palette.iter_colors(len(labels_unique)))
+    #         }
+    #         if self.datasets is None:
+    #             colors = {i: colormap[str(l)] for i, l in zip(self.ids, self.labels)}
+    #         else:
+    #             colors = {
+    #                 (i, d): colormap[str(l)]
+    #                 for i, l, d in zip(self.ids, self.labels, self.datasets)
+    #             }
+    #     elif mode == "dataset":
+    #         palette = cmap.Colormap(palette)
+    #         colormap = {
+    #             i: c.hex
+    #             for i, c in zip(
+    #                 range(len(self.point_visuals)),
+    #                 palette.iter_colors(len(self.point_visuals)),
+    #             )
+    #         }
+    #         colors = {}
+    #         for i, vis in enumerate(self.point_visuals):
+    #             this_ids = self.ids[vis._point_ix]
+    #             this_c = colormap[i]
+    #             if self.datasets is None:
+    #                 colors.update({i: this_c for this_id in this_ids})
+    #             else:
+    #                 this_datasets = self.datasets[vis._point_ix]
+    #                 colors.update(
+    #                     {
+    #                         (this_id, this_dataset): this_c
+    #                         for this_id, this_dataset in zip(this_ids, this_datasets)
+    #                     }
+    #                 )
+    #     elif mode == "default":
+    #         self.ngl_viewer.set_default_colors()
+    #         return
+    #     else:
+    #         raise ValueError(
+    #             f"Unknown color mode '{mode}'. "
+    #             f"Expected 'dataset', 'cluster', 'label' or 'default'."
+    #         )
+
+    #     self.set_viewer_colors(colors)
 
     @update_figure
     def update_point_labels(self):
@@ -1630,6 +1664,10 @@ class LabelSearch:
         if len(self.indices) == 0:
             if isinstance(query, Number) or query.isdigit():
                 self.indices = self.search_ids(int(query))
+            elif "," in query and all([q.strip().isdigit() for q in query.split(",")]):
+                self.indices = self.search_ids(
+                    [int(q.strip()) for q in query.split(",")]
+                )
 
         # If still no labels found, return
         if len(self.indices) == 0:
@@ -1656,7 +1694,10 @@ class LabelSearch:
 
     def search_ids(self, id):
         """Search for an ID in the scatter."""
-        return np.where(self.scatter.ids == id)[0]
+        if isinstance(id, (int, np.integer)):
+            return np.where(self.scatter.ids == id)[0]
+        else:
+            return np.where(np.isin(self.scatter.ids, id))[0]
 
     def select_all(self, add=False):
         """Select all labels found by the search."""

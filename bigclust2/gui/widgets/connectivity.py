@@ -378,6 +378,19 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._table.setModel(self._model)
         self._tab_table_layout.addWidget(self._table)
 
+        self._base_table_font = QtGui.QFont(self._table.font())
+        self._base_horizontal_header_font = QtGui.QFont(
+            self._table.horizontalHeader().font()
+        )
+        self._base_vertical_header_font = QtGui.QFont(
+            self._table.verticalHeader().font()
+        )
+
+        self._table_scale = 100
+        self._table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self._table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self._model.layoutChanged.connect(self.update_cell_size)
+
         # Add a double click event for header and rows
         self._table.horizontalHeader().sectionDoubleClicked.connect(self.find_header)
         self._table.verticalHeader().sectionDoubleClicked.connect(self.find_index)
@@ -516,6 +529,15 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._normalize.stateChanged.connect(self.update_normalize)
         display_form.addRow(self._normalize)
 
+        self._cell_size = QtWidgets.QSpinBox()
+        self._cell_size.setRange(25, 200)
+        self._cell_size.setSingleStep(5)
+        self._cell_size.setValue(self._table_scale)
+        self._cell_size.setSuffix("%")
+        self._cell_size.setToolTip("Scale table cells relative to content size")
+        self._cell_size.valueChanged.connect(self.update_cell_size)
+        display_form.addRow("Scale:", self._cell_size)
+
         self._always_on_top = QtWidgets.QCheckBox("Always on top")
         self._always_on_top.setToolTip(
             "Keep this window above other BigClust windows"
@@ -595,6 +617,8 @@ class ConnectivityTable(QtWidgets.QWidget):
         if not isinstance(self._figure.selected_ids, type(None)) and len(self._figure.selected_ids) > 0:
             self.select(self._figure.selected_ids)
 
+        self.update_cell_size()
+
     def update_row_labels(self, *args, **kwargs):
         self._model.set_row_labels(self._row_label_dropdown.currentText())
 
@@ -633,6 +657,44 @@ class ConnectivityTable(QtWidgets.QWidget):
     def update_collapse_rows(self, *args, **kwargs):
         """Collapse rows by the currently selected row label."""
         self._model.set_collapse_rows(self._collapse_rows.isChecked())
+
+    def update_cell_size(self, *args, **kwargs):
+        if hasattr(self, "_cell_size"):
+            self._table_scale = self._cell_size.value()
+
+        scale = self._table_scale / 100.0
+
+        # Scale table/header fonts and then let Qt recompute geometry from content.
+        table_font = QtGui.QFont(self._base_table_font)
+        table_font.setPointSizeF(max(6.0, self._base_table_font.pointSizeF() * scale))
+        self._table.setFont(table_font)
+
+        h_header_font = QtGui.QFont(self._base_horizontal_header_font)
+        h_header_font.setPointSizeF(
+            max(6.0, self._base_horizontal_header_font.pointSizeF() * scale)
+        )
+        self._table.horizontalHeader().setFont(h_header_font)
+
+        v_header_font = QtGui.QFont(self._base_vertical_header_font)
+        v_header_font.setPointSizeF(
+            max(6.0, self._base_vertical_header_font.pointSizeF() * scale)
+        )
+        self._table.verticalHeader().setFont(v_header_font)
+
+        self._table.resizeColumnsToContents()
+        self._table.resizeRowsToContents()
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+                self._cell_size.setValue(self._cell_size.value() + self._cell_size.singleStep())
+                event.accept()
+                return
+            if event.key() == Qt.Key_Minus:
+                self._cell_size.setValue(self._cell_size.value() - self._cell_size.singleStep())
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def update_always_on_top(self, *args, **kwargs):
         """Toggle whether this widget should float above other BigClust windows."""

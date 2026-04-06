@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
     QWidget,
+    QScrollArea,
     QVBoxLayout,
     QHBoxLayout,
     QSplitter,
@@ -22,6 +23,7 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QProgressDialog,
     QWidgetAction,
+    QFileDialog,
 )
 from PySide6.QtGui import QIcon, QAction, QKeySequence
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer
@@ -272,10 +274,29 @@ class MainWidget(QWidget):
 
         # Add scatter controls to sidebar
         self.scatter_controls = ScatterControls(self.fig_scatter)
+        # Keep controls usable in short panes by scrolling instead of enforcing
+        # a large minimum height on the top widget.
+        scatter_controls_scroll = QScrollArea()
+        scatter_controls_scroll.setWidgetResizable(True)
+        scatter_controls_scroll.setFrameShape(QFrame.NoFrame)
+        scatter_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        scatter_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.scatter_controls.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
-        sidebar_layout.addWidget(self.scatter_controls, 1)
+        scatter_controls_scroll.setWidget(self.scatter_controls)
+
+        original_scroll_resize = scatter_controls_scroll.resizeEvent
+
+        def on_scatter_controls_scroll_resize(event):
+            original_scroll_resize(event)
+            # Keep controls width locked to the viewport to avoid horizontal
+            # clipping/overflow while still allowing vertical scrolling.
+            viewport_width = max(1, scatter_controls_scroll.viewport().width())
+            self.scatter_controls.setFixedWidth(viewport_width)
+
+        scatter_controls_scroll.resizeEvent = on_scatter_controls_scroll_resize
+        sidebar_layout.addWidget(scatter_controls_scroll, 1)
 
         sidebar_layout.addStretch()
         sidebar.setLayout(sidebar_layout)
@@ -438,10 +459,27 @@ class MainWidget(QWidget):
         # Add viewer controls to sidebar
         self.ngl_viewer.viewer.show_controls()
         self.viewer_controls = self.ngl_viewer.viewer._controls
+        viewer_controls_scroll = QScrollArea()
+        viewer_controls_scroll.setWidgetResizable(True)
+        viewer_controls_scroll.setFrameShape(QFrame.NoFrame)
+        viewer_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        viewer_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.viewer_controls.setSizePolicy(
             QSizePolicy.Expanding, QSizePolicy.Preferred
         )
-        sidebar_layout.addWidget(self.viewer_controls, 1)
+        viewer_controls_scroll.setWidget(self.viewer_controls)
+
+        original_viewer_scroll_resize = viewer_controls_scroll.resizeEvent
+
+        def on_viewer_controls_scroll_resize(event):
+            original_viewer_scroll_resize(event)
+            # Keep controls width locked to the viewport to avoid horizontal
+            # clipping/overflow while still allowing vertical scrolling.
+            viewport_width = max(1, viewer_controls_scroll.viewport().width())
+            self.viewer_controls.setFixedWidth(viewport_width)
+
+        viewer_controls_scroll.resizeEvent = on_viewer_controls_scroll_resize
+        sidebar_layout.addWidget(viewer_controls_scroll, 1)
 
         sidebar_layout.addStretch()
         sidebar.setLayout(sidebar_layout)
@@ -764,12 +802,17 @@ class MainWindow(QMainWindow):
         copy_meta_action.triggered.connect(self.on_copy_meta_to_clipboard)
         copy_menu.addAction(copy_meta_action)
 
-        # Export menu (to be populated later)
+        # Export menu
         export_menu = menu_bar.addMenu("Export")
+        export_meta_menu = export_menu.addMenu("Meta Data")
 
-        # Placeholder for future export actions
-        export_placeholder = QAction("Placeholder", self)
-        export_menu.addAction(export_placeholder)
+        export_meta_clipboard_action = QAction("To Clipboard", self)
+        export_meta_clipboard_action.triggered.connect(self.on_export_meta_to_clipboard)
+        export_meta_menu.addAction(export_meta_clipboard_action)
+
+        export_meta_csv_action = QAction("To CSV", self)
+        export_meta_csv_action.triggered.connect(self.on_export_meta_to_csv)
+        export_meta_menu.addAction(export_meta_csv_action)
 
         # Window menu with Zoom and Minimize
         window_menu = menu_bar.addMenu("Window")
@@ -1321,6 +1364,56 @@ class MainWindow(QMainWindow):
             logger.info("Copied selected metadata to clipboard")
         else:
             logger.info("No selection to copy metadata from")
+
+    def _project_meta_data(self):
+        """Return project-level metadata if available."""
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
+            return None
+
+        meta = self._data.get("meta")
+        if isinstance(meta, pd.DataFrame):
+            return meta
+        return None
+
+    def on_export_meta_to_clipboard(self):
+        """Copy full project metadata to clipboard as TSV."""
+        meta_data = self._project_meta_data()
+        if meta_data is None:
+            logger.info("No project metadata available to export")
+            return
+
+        QApplication.clipboard().setText(meta_data.to_csv(sep="\t", index=False))
+        logger.info("Copied full project metadata to clipboard")
+
+    def on_export_meta_to_csv(self):
+        """Export full project metadata to a CSV file."""
+        meta_data = self._project_meta_data()
+        if meta_data is None:
+            logger.info("No project metadata available to export")
+            return
+
+        default_name = "meta_data.csv"
+        project = getattr(self, "_current_project_loader", None)
+        if project is not None and getattr(project, "name", None):
+            default_name = f"{project.name}_meta_data.csv"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Meta Data to CSV",
+            default_name,
+            "CSV Files (*.csv);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".csv"):
+            file_path = f"{file_path}.csv"
+
+        try:
+            meta_data.to_csv(file_path, index=False)
+            logger.info(f"Exported full project metadata to {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to export project metadata to CSV: {e}")
 
     def show_open_project_dialog(self):
         """Show the open project dialog and load the selected project."""

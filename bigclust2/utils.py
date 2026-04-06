@@ -1,6 +1,10 @@
+import re
 import colorsys
 
+import numpy as np
+import pandas as pd
 import polars as pl
+import matplotlib.colors as mcl
 
 from pathlib import Path
 from urllib.parse import urlparse, urlunparse, urljoin
@@ -429,3 +433,76 @@ def rgb_from_segment_id(color_seed, segment_id):
     s = 0.5 + 0.5 * c1
     v = 1.0
     return tuple([v * 255 for v in colorsys.hsv_to_rgb(h, s, v)])
+
+
+def labels_to_colors(labels, palette="vispy:husl", nan_color=(0.5, 0.5, 0.5, 1.0)):
+    """Map integer cluster labels to RGBA colours.
+
+    Parameters
+    ----------
+    labels : array-like of int
+        Cluster assignment per point.  ``-1`` is treated as noise/unassigned.
+    palette : str
+        A ``cmap``-compatible colormap name used for distinct cluster colours.
+    nan_color : tuple of 4 floats
+        RGBA colour for NaN points.
+
+    Returns
+    -------
+    colors : np.ndarray of shape (N, 4), dtype float32
+        Per-point RGBA colours in ``[0, 1]`` range.
+    """
+    import cmap as _cmap
+
+    labels = np.asarray(labels)
+    colormap_obj = _cmap.Colormap(palette)
+
+    if labels.dtype.kind == "f":
+        # If labels are floats, treat them as continuous values and map to colors directly
+        normed = (labels - np.nanmin(labels)) / (np.nanmax(labels) - np.nanmin(labels))
+        colors = np.empty((len(labels), 4), dtype=np.float32)
+        for i, val in enumerate(normed):
+            if np.isnan(val):
+                colors[i] = np.array(nan_color, dtype=np.float32)
+            else:
+                c = colormap_obj(val)
+                colors[i] = np.array(c.rgba, dtype=np.float32)
+    else:
+        unique_labels = sorted(set(labels[~pd.isnull(labels)].tolist()))
+        n = max(len(unique_labels), 1)
+
+        palette_colors = list(colormap_obj.iter_colors(n))
+        cluster_to_color = {
+            lbl: np.array(palette_colors[i].rgba, dtype=np.float32)
+            for i, lbl in enumerate(unique_labels)
+        }
+
+        ignore = np.array(nan_color, dtype=np.float32)
+        colors = np.empty((len(labels), 4), dtype=np.float32)
+        for i, lbl in enumerate(labels):
+            colors[i] = cluster_to_color.get(lbl, ignore)
+
+    return colors
+
+
+def is_color_column(series: pd.Series) -> bool:
+    """Check if a pandas Series is a color column (contains valid color strings).
+
+    Args:
+        series: The pandas Series to check
+
+    Returns:
+        bool: True if the series is a color column, False otherwise.
+    """
+    if series.dtype.kind != "O":
+        return False
+
+    for val in series.dropna().unique():
+        if not isinstance(val, str):
+            return False
+        try:
+            mcl.to_rgb(val)
+        except (ValueError, TypeError):
+            return False
+
+    return True

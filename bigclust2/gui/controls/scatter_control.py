@@ -17,6 +17,7 @@ from ...embeddings import (
     make_embedding_estimator,
     prepare_embedding_input,
 )
+from ...utils import labels_to_colors, is_color_column
 
 
 CLIO_CLIENT = None
@@ -29,6 +30,8 @@ logger = logging.getLogger(__name__)
 
 
 CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
+CLUSTER_DATA_OPTION = "cluster (bigclust)"
+CLUSTER_DATA_COLUMN = "bigclust_cluster"
 CLUSTER_HOMOGENEOUS_LABEL_CURRENT = "Current labels"
 
 
@@ -88,15 +91,18 @@ class ScatterControls(QtWidgets.QWidget):
         self.tabs.addTab(self.tab1, "General")
         self.tabs.addTab(self.tab2, "Annotation")
         # self.tabs.addTab(self.tab3, "Neuroglancer")
-        self.tabs.addTab(self.tab4, "Settings")
         self.tabs.addTab(self.tab5, "Embeddings")
         self.tabs.addTab(self.tab6, "Fidelity")
         self.tabs.addTab(self.tab7, "Cluster")
+        self.tabs.addTab(self.tab4, "Settings")
+
+        # Hide the annotation tab
+        self.tabs.setTabVisible(self.tabs.indexOf(self.tab2), False)
 
         self.build_control_gui()
         # self.build_annotation_gui()
         # self.build_neuroglancer_gui()
-        # self.build_settings_gui()
+        self.build_settings_gui()
         self.build_embeddings_gui()
         self.build_fidelity_gui()
         self.build_clusters_gui()
@@ -147,7 +153,9 @@ class ScatterControls(QtWidgets.QWidget):
         self.prev_button.clicked.connect(self.find_previous)
         self.button_layout.addWidget(self.prev_button)
         self.find_sel_button = QtWidgets.QPushButton("Select")
-        self.find_sel_button.setToolTip("Select all objects matching the search term. Use Shift-Click to add to current selection.")
+        self.find_sel_button.setToolTip(
+            "Select all objects matching the search term. Use Shift-Click to add to current selection."
+        )
         self.find_sel_button.clicked.connect(self.find_select)
         self.button_layout.addWidget(self.find_sel_button)
         self.next_button = QtWidgets.QPushButton("Next")
@@ -186,38 +194,39 @@ class ScatterControls(QtWidgets.QWidget):
         # Add horizontal divider
         self.add_split(self.tab1_layout)
 
-        # Add dropdown to choose color mode
-        self.tab1_layout.addWidget(QtWidgets.QLabel("Color neurons by:"))
+        # Add dropdowns to choose color mode
+        layout = QtWidgets.QHBoxLayout()
+        self.tab1_layout.addLayout(layout)
+        layout.addWidget(QtWidgets.QLabel("Color by:"))
         self.color_combo_box = QtWidgets.QComboBox()
-        self.color_combo_box.addItem("Default")
-        self.color_combo_box.addItem("Dataset")
-        self.color_combo_box.addItem("Cluster")
-        self.color_combo_box.addItem("Label")
-        self.color_combo_box.addItem("Random")
-        self.color_combo_box.setItemData(
-            0, "Color neurons by viewer default", QtCore.Qt.ToolTipRole
+        layout.addWidget(self.color_combo_box)
+
+        layout = QtWidgets.QHBoxLayout()
+        self.tab1_layout.addLayout(layout)
+        layout.addWidget(QtWidgets.QLabel("Palette:"))
+        self.palette_combo_box = QtWidgets.QComboBox()
+        layout.addWidget(self.palette_combo_box)
+        self.palette_combo_box.setToolTip(
+            "The color palette to use when coloring by labels. Ignored if column contains colors."
         )
-        self.color_combo_box.setItemData(
-            1, "Color neurons by dataset", QtCore.Qt.ToolTipRole
+        self.palette_combo_box.addItems(
+            [
+                "seaborn:tab20",
+                "vispy:husl",
+                "matplotlib:coolwarm",
+                "matplotlib:viridis",
+                "glasbey:glasbey",
+            ]
         )
-        self.color_combo_box.setItemData(
-            2, "Color neurons by cluster", QtCore.Qt.ToolTipRole
-        )
-        self.color_combo_box.setItemData(
-            3, "Color neurons by label", QtCore.Qt.ToolTipRole
-        )
-        self.color_combo_box.setItemData(
-            4, "Randomly color neurons", QtCore.Qt.ToolTipRole
-        )
-        self.tab1_layout.addWidget(self.color_combo_box)
 
         # Set the action for the color combo box
-        self.color_combo_box.currentIndexChanged.connect(self.set_color_mode)
+        self.color_combo_box.currentIndexChanged.connect(self.set_colors)
+        self.palette_combo_box.currentIndexChanged.connect(self.set_colors)
 
         self.add_group_check = QtWidgets.QCheckBox("Add as group")
         self.add_group_check.setToolTip("Whether to add neurons as group when selected")
-        self.add_group_check.setChecked(False)
         self.add_group_check.stateChanged.connect(self.set_add_group)
+        self.add_group_check.setChecked(True)
         self.tab1_layout.addWidget(self.add_group_check)
 
         self.dclick_deselect = QtWidgets.QCheckBox("Deselect on double-click")
@@ -234,39 +243,6 @@ class ScatterControls(QtWidgets.QWidget):
 
         # Add horizontal divider
         self.add_split(self.tab1_layout)
-
-        # Add a checkbox + spinbox to show distances as edges
-        self.show_distance_edges_check = QtWidgets.QCheckBox("Show distances as edges")
-        self.show_distance_edges_check.setToolTip(
-            "Whether to show actual distances as edges between points."
-        )
-        self.show_distance_edges_check.setChecked(False)
-        self.tab1_layout.addWidget(self.show_distance_edges_check)
-
-        hlayout = QtWidgets.QHBoxLayout()
-        self.tab1_layout.addLayout(hlayout)
-        self.distance_edges_threshold = QtWidgets.QLabel("Edge threshold:")
-        self.distance_edges_threshold.setToolTip(
-            "Set the threshold for showing edges between points."
-        )
-        hlayout.addWidget(self.distance_edges_threshold)
-        self.distance_edges_slider = QtWidgets.QDoubleSpinBox()
-        self.distance_edges_slider.setRange(0.0, 1.0)
-        self.distance_edges_slider.setSingleStep(0.05)
-        self.distance_edges_slider.setValue(self.figure.distance_edges_threshold)
-        self.distance_edges_slider.setDecimals(2)
-        self.distance_edges_slider.valueChanged.connect(
-            lambda x: setattr(self.figure, "distance_edges_threshold", float(x))
-        )
-        hlayout.addWidget(self.distance_edges_slider)
-        self.show_distance_edges_check.stateChanged.connect(
-            lambda x: setattr(self.figure, "show_distance_edges", bool(x))
-        )
-        self.show_distance_edges_check.stateChanged.connect(
-            lambda x: self.distance_edges_slider.setEnabled(
-                self.show_distance_edges_check.isChecked()
-            )
-        )
 
         # This would make it so the legend does not stretch when
         # we resize the window vertically
@@ -350,16 +326,16 @@ class ScatterControls(QtWidgets.QWidget):
             2, "Render only when the window is active.", QtCore.Qt.ToolTipRole
         )
         render_trigger_vals = ["continuous", "reactive", "active_window"]
+        # Set default item to whatever the currently set render trigger is
+        self.render_mode_dropdown.setCurrentIndex(
+            render_trigger_vals.index(self.figure.render_trigger)
+        )
         self.render_mode_dropdown.currentIndexChanged.connect(
             lambda x: setattr(
                 self.figure,
                 "render_trigger",
                 render_trigger_vals[self.render_mode_dropdown.currentIndex()],
             )
-        )
-        # Set default item to whatever the currently set render trigger is
-        self.render_mode_dropdown.setCurrentIndex(
-            render_trigger_vals.index(self.figure.render_trigger)
         )
         self.tab4_layout.addWidget(self.render_mode_dropdown)
 
@@ -901,9 +877,7 @@ class ScatterControls(QtWidgets.QWidget):
             "Show lines connecting each point to its k nearest neighbors in the original feature space."
         )
         self.fidelity_knn_combo_box.addItems(["Off", "Selected only", "All points"])
-        self.fidelity_knn_combo_box.currentIndexChanged.connect(
-            self.set_knn_edges
-        )
+        self.fidelity_knn_combo_box.currentIndexChanged.connect(self.set_knn_edges)
         settings_form.addRow("Show:", self.fidelity_knn_combo_box)
 
         self.fidelity_knn_k_slider = QtWidgets.QSpinBox()
@@ -928,6 +902,47 @@ class ScatterControls(QtWidgets.QWidget):
         )
         settings_form.addRow("Distance:", self.fidelity_knn_distance_combo_box)
 
+        # Distances edges
+        settings_group = QtWidgets.QGroupBox("Distances")
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_group.setLayout(settings_form)
+        self.tab6_layout.addWidget(settings_group)
+
+        self.add_tooltip(
+            settings_group,
+            "Show lines connecting points closer than a given distance in the original feature space. "
+            "This can help visualize how well local relationships are preserved in the embedding.",
+            anchor="group_label",
+        )
+
+        # Add a checkbox + spinbox to show distances as edges
+        self.show_distance_edges_check = QtWidgets.QCheckBox()
+        self.show_distance_edges_check.setToolTip(
+            "Whether to show actual distances as edges between points."
+        )
+        self.show_distance_edges_check.setChecked(False)
+        settings_form.addRow("Show:", self.show_distance_edges_check)
+
+        self.distance_edges_slider = QtWidgets.QDoubleSpinBox()
+        self.distance_edges_slider.setRange(0.0, 1.0)
+        self.distance_edges_slider.setSingleStep(0.05)
+        self.distance_edges_slider.setValue(self.figure.distance_edges_threshold)
+        self.distance_edges_slider.setDecimals(2)
+        settings_form.addRow("Threshold:", self.distance_edges_slider)
+
+        self.distance_edges_slider.valueChanged.connect(
+            lambda x: setattr(self.figure, "distance_edges_threshold", float(x))
+        )
+        self.show_distance_edges_check.stateChanged.connect(
+            lambda x: setattr(self.figure, "show_distance_edges", bool(x))
+        )
+        self.show_distance_edges_check.stateChanged.connect(
+            lambda x: self.distance_edges_slider.setEnabled(
+                self.show_distance_edges_check.isChecked()
+            )
+        )
+
         self.tab6_layout.addStretch(1)
 
         self.update_fidelity_options()
@@ -946,8 +961,8 @@ class ScatterControls(QtWidgets.QWidget):
         actions_row.addWidget(self.cluster_run_button)
 
         self.cluster_clear_button = QtWidgets.QPushButton("Clear")
-        self.cluster_clear_button.setToolTip("Reset point colours to their defaults.")
-        self.cluster_clear_button.clicked.connect(self._clear_cluster_colors)
+        self.cluster_clear_button.setToolTip("Reset points to their defaults.")
+        self.cluster_clear_button.clicked.connect(self._clear_cluster)
         actions_row.addWidget(self.cluster_clear_button)
 
         # Input group
@@ -1050,7 +1065,9 @@ class ScatterControls(QtWidgets.QWidget):
         noise_threshold_layout.setContentsMargins(0, 0, 0, 0)
         self.cluster_hdbscan_noise_threshold_row.setLayout(noise_threshold_layout)
 
-        self.cluster_hdbscan_noise_threshold_check = QtWidgets.QCheckBox("Use threshold")
+        self.cluster_hdbscan_noise_threshold_check = QtWidgets.QCheckBox(
+            "Use threshold"
+        )
         self.cluster_hdbscan_noise_threshold_check.setToolTip(
             "Only relabel noise points if nearest-cluster distance is below threshold."
         )
@@ -1070,7 +1087,9 @@ class ScatterControls(QtWidgets.QWidget):
         )
         noise_threshold_layout.addWidget(self.cluster_hdbscan_noise_threshold)
 
-        hdbscan_form.addRow("Noise threshold:", self.cluster_hdbscan_noise_threshold_row)
+        hdbscan_form.addRow(
+            "Noise threshold:", self.cluster_hdbscan_noise_threshold_row
+        )
 
         # --- Agglomerative settings ---
         self.cluster_agg_widget = QtWidgets.QWidget()
@@ -1078,7 +1097,6 @@ class ScatterControls(QtWidgets.QWidget):
         agg_form.setContentsMargins(0, 0, 0, 0)
         self.cluster_agg_widget.setLayout(agg_form)
         algo_layout.addWidget(self.cluster_agg_widget)
-
 
         self.cluster_agg_criterion_combo = QtWidgets.QComboBox()
         self.cluster_agg_criterion_combo.addItems(
@@ -1164,7 +1182,9 @@ class ScatterControls(QtWidgets.QWidget):
         )
 
         self.cluster_agg_linkage_combo = QtWidgets.QComboBox()
-        self.cluster_agg_linkage_combo.addItems(["ward", "complete", "average", "single"])
+        self.cluster_agg_linkage_combo.addItems(
+            ["ward", "complete", "average", "single"]
+        )
         self.cluster_agg_linkage_combo.setToolTip(
             "Ward minimises within-cluster variance. complete/average/single use "
             "max/mean/min inter-cluster distances. "
@@ -1219,12 +1239,61 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_apply_button.clicked.connect(self._apply_cluster_labels)
         output_form.addRow(self.cluster_apply_button)
 
+        # Manual refinement group (hidden until cluster labels are available)
+        self.cluster_manual_group = QtWidgets.QGroupBox("Manual Refinement")
+        manual_form = QtWidgets.QFormLayout()
+        manual_form.setContentsMargins(8, 6, 8, 6)
+        self.cluster_manual_group.setLayout(manual_form)
+        self.tab7_layout.addWidget(self.cluster_manual_group)
+
+        cluster_set_row = QtWidgets.QWidget()
+        cluster_set_layout = QtWidgets.QHBoxLayout()
+        cluster_set_layout.setContentsMargins(0, 0, 0, 0)
+        cluster_set_row.setLayout(cluster_set_layout)
+
+        self.cluster_manual_set_combo = QtWidgets.QComboBox()
+        self.cluster_manual_set_combo.setToolTip(
+            "Select target cluster ID for the current selection."
+        )
+        self.cluster_manual_set_combo.setEditable(True)
+        self.cluster_manual_set_combo.setInsertPolicy(
+            QtWidgets.QComboBox.InsertPolicy.NoInsert
+        )
+        combo_completer = self.cluster_manual_set_combo.completer()
+        if combo_completer is not None:
+            combo_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
+        cluster_set_layout.addWidget(self.cluster_manual_set_combo)
+
+        self.cluster_manual_set_button = QtWidgets.QPushButton("Set Cluster")
+        self.cluster_manual_set_button.setToolTip(
+            "Assign current selection to the selected cluster ID."
+        )
+        self.cluster_manual_set_button.clicked.connect(self._manual_refine_set_cluster)
+        cluster_set_layout.addWidget(self.cluster_manual_set_button)
+
+        manual_form.addRow("Target cluster:", cluster_set_row)
+
+        self.cluster_manual_new_button = QtWidgets.QPushButton("New Cluster")
+        self.cluster_manual_new_button.setToolTip(
+            "Assign current selection to a newly created cluster ID."
+        )
+        self.cluster_manual_new_button.clicked.connect(self._manual_refine_new_cluster)
+        manual_form.addRow(self.cluster_manual_new_button)
+
+        self.cluster_manual_reset_button = QtWidgets.QPushButton("Reset")
+        self.cluster_manual_reset_button.setToolTip(
+            "Reset current selection to the original cluster assignment."
+        )
+        self.cluster_manual_reset_button.clicked.connect(self._manual_refine_reset)
+        manual_form.addRow(self.cluster_manual_reset_button)
+
         self.tab7_layout.addStretch(1)
 
         # Sync initial visibility
         self._update_cluster_method_settings()
         self._update_hdbscan_noise_controls()
         self.update_cluster_options()
+        self._refresh_manual_refinement_controls()
 
     # ------------------------------------------------------------------
     # Clusters tab helpers
@@ -1239,6 +1308,7 @@ class ScatterControls(QtWidgets.QWidget):
 
         if dists is None and not has_embedding:
             self.tabs.setTabEnabled(clusters_tab_index, False)
+            self._refresh_manual_refinement_controls()
             return
 
         self.tabs.setTabEnabled(clusters_tab_index, True)
@@ -1258,6 +1328,7 @@ class ScatterControls(QtWidgets.QWidget):
 
         self._update_homogeneous_label_options()
         self._update_cluster_input_controls()
+        self._refresh_manual_refinement_controls()
 
     def _update_homogeneous_label_options(self):
         """Populate homogeneous-composition label source choices."""
@@ -1267,7 +1338,9 @@ class ScatterControls(QtWidgets.QWidget):
         current = self.cluster_agg_homogeneous_labels_combo.currentText()
         self.cluster_agg_homogeneous_labels_combo.blockSignals(True)
         self.cluster_agg_homogeneous_labels_combo.clear()
-        self.cluster_agg_homogeneous_labels_combo.addItem(CLUSTER_HOMOGENEOUS_LABEL_CURRENT)
+        self.cluster_agg_homogeneous_labels_combo.addItem(
+            CLUSTER_HOMOGENEOUS_LABEL_CURRENT
+        )
 
         meta = getattr(self.figure, "metadata", None)
         if meta is not None:
@@ -1367,7 +1440,7 @@ class ScatterControls(QtWidgets.QWidget):
 
     def _run_clustering(self):
         """Run clustering with the current settings and colour points by cluster."""
-        from ...clusters import run_clustering, labels_to_colors
+        from ...clusters import run_clustering
 
         arr = self._selected_clustering_data()
         if arr is None:
@@ -1381,6 +1454,20 @@ class ScatterControls(QtWidgets.QWidget):
         metric = self.cluster_metric_combo_box.currentText()
         method = self.cluster_method_combo_box.currentText()
 
+        if (
+            method == "Agglomerative"
+            and self.cluster_agg_linkage_combo.currentText() == "ward"
+            and (is_precomputed or metric != "euclidean")
+        ):
+            if self.figure is not None:
+                self.figure.show_message(
+                    "Ward linkage should not be used with non-euclidean distances.\n"
+                    "Please use a different linkage method (e.g. 'average') or provide\n"
+                    "feature vectors + Euclidean metric instead of a distance matrix.",
+                    duration=5,
+                    color="orange",
+                )
+
         try:
             labels = run_clustering(
                 arr_np,
@@ -1388,9 +1475,7 @@ class ScatterControls(QtWidgets.QWidget):
                 is_precomputed=is_precomputed,
                 metric=metric,
                 hdbscan_min_cluster_size=self.cluster_hdbscan_min_cluster_size.value(),
-                hdbscan_min_samples=(
-                    self.cluster_hdbscan_min_samples.value() or None
-                ),
+                hdbscan_min_samples=(self.cluster_hdbscan_min_samples.value() or None),
                 hdbscan_cluster_selection_epsilon=self.cluster_hdbscan_epsilon.value(),
                 hdbscan_cluster_selection_method=self.cluster_hdbscan_method_combo.currentText(),
                 hbdscan_label_noise=self.cluster_hdbscan_label_noise_check.isChecked(),
@@ -1449,98 +1534,50 @@ class ScatterControls(QtWidgets.QWidget):
             )
         except Exception as e:
             logger.error(f"Clustering failed: {e}")
-            self.figure.show_message(
-                f"Clustering error: {e}", color="red", duration=4
-            )
+            self.figure.show_message(f"Clustering error: {e}", color="red", duration=4)
             return
+
+        if self.figure.metadata is not None:
+            self.figure.metadata[CLUSTER_DATA_COLUMN] = labels.copy()
 
         self._cluster_labels = labels
-        colors = labels_to_colors(labels)
-        self.figure.set_colors(colors)
-        self._apply_cluster_viewer_colors(colors)
+        self._cluster_labels_original = labels.copy()
+        self._cluster_colors = labels_to_colors(labels, palette="vispy:husl")
+        self._cluster_colors[labels < 0] = (
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        )  # grey for noise/unassigned
+        self._color_col_before_clustering = self.color_combo_box.currentText()
 
-        unique_clusters = np.unique(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
-        n_clusters = len(unique_clusters)
-        n_noise = int((labels == -1).sum())
-        if n_noise > 0:
-            self.cluster_result_label.setText(
-                f"{n_clusters} clusters, {n_noise} noise points"
-            )
-        else:
-            self.cluster_result_label.setText(f"{n_clusters} clusters")
+        # Apply cluster colors
+        self.update_label_combo_boxes()
+        self.color_combo_box.setCurrentText(CLUSTER_DATA_OPTION)
+        # self._apply_cluster_viewer_colors(colors)
+
+        self.update_label_combo_boxes()
+        self._update_cluster_result_label(labels)
 
         self.cluster_apply_button.setEnabled(True)
+        self._refresh_manual_refinement_controls()
+        self._update_cluster_labels_maybe()
 
-    def _clear_cluster_colors(self):
-        """Reset point colours to the defaults stored in figure metadata."""
+        # Show the colors in the 3D viewer
+        self.color_combo_box.setCurrentText(CLUSTER_DATA_OPTION)
+
+    def _clear_cluster(self):
+        """Reset viewer to the defaults stored in figure metadata."""
         self._cluster_labels = None
+        self._cluster_labels_original = None
+        self._cluster_colors = None
         self.cluster_result_label.setText("N/A")
         self.cluster_apply_button.setEnabled(False)
-        if self.figure.metadata is not None and "_color" in self.figure.metadata.columns:
-            self.figure.set_colors(self.figure.metadata["_color"].tolist())
-        self._restore_viewer_colors_after_clustering()
-        # Switch back to the label that was active before clustering
-        if hasattr(self, "_label_before_clustering"):
-            idx = self.label_combo_box.findText(self._label_before_clustering)
-            if idx >= 0:
-                self.label_combo_box.setCurrentIndex(idx)
-                # currentIndexChanged signal triggers set_labels
-
-    def _apply_cluster_viewer_colors(self, colors):
-        """Apply cluster colours to the connected 3D viewer if available."""
-        if not hasattr(self.figure, "ngl_viewer"):
-            return
-
-        # Remember current mode so `Clear` can restore the previous color behavior.
-        if not hasattr(self, "_viewer_color_mode_before_clustering"):
-            self._viewer_color_mode_before_clustering = (
-                self.color_combo_box.currentText().strip().lower()
-            )
-
-        ids = getattr(self.figure, "ids", None)
-        if ids is None:
-            return
-        datasets = getattr(self.figure, "datasets", None)
-
-        if datasets is None:
-            viewer_colors = {
-                int(i): tuple(np.asarray(c, dtype=float))
-                for i, c in zip(ids, colors)
-            }
-        else:
-            viewer_colors = {
-                (int(i), str(d)): tuple(np.asarray(c, dtype=float))
-                for i, d, c in zip(ids, datasets, colors)
-            }
-
-        self._viewer_colors_before_clustering = self.figure.ngl_viewer._colors.copy()
-
-        try:
-            self.figure.set_viewer_colors(viewer_colors)
-        except Exception as e:
-            logger.error(f"Failed to set cluster colors in 3D viewer: {e}")
-
-    def _restore_viewer_colors_after_clustering(self):
-        """Restore 3D viewer colors to the mode active before clustering."""
-        if not hasattr(self.figure, "ngl_viewer"):
-            return
-
-        mode = getattr(self, "_viewer_color_mode_before_clustering", "default")
-        try:
-            self.figure.set_viewer_color_mode(mode)
-        except Exception as e:
-            logger.error(f"Failed to restore 3D viewer colors after clear: {e}")
-        finally:
-            if hasattr(self, "_viewer_color_mode_before_clustering"):
-                del self._viewer_color_mode_before_clustering
-
-        if hasattr(self, "_viewer_colors_before_clustering"):
-            try:
-                self.figure.set_viewer_colors(self._viewer_colors_before_clustering)
-            except Exception as e:
-                logger.error(f"Failed to restore 3D viewer colors after clear: {e}")
-            finally:
-                del self._viewer_colors_before_clustering
+        self.color_combo_box.setCurrentText(self._color_col_before_clustering)
+        if getattr(self, "_label_before_clustering", None):
+            self.label_combo_box.setCurrentText(self._label_before_clustering)
+        self._refresh_manual_refinement_controls()
+        self.update_label_combo_boxes()
 
     def _apply_cluster_labels(self):
         """Write cluster assignments to metadata and switch the label display."""
@@ -1551,27 +1588,228 @@ class ScatterControls(QtWidgets.QWidget):
         self._label_before_clustering = self.label_combo_box.currentText()
 
         labels = self._cluster_labels
-        unique_clusters = np.unique(labels[labels >= 0]) if (labels >= 0).any() else np.array([], dtype=int)
+        unique_clusters = (
+            np.unique(labels[labels >= 0])
+            if (labels >= 0).any()
+            else np.array([], dtype=int)
+        )
 
         label_strings = np.empty(len(labels), dtype=object)
         label_strings[labels == -1] = "noise"
         for lbl in unique_clusters:
             label_strings[labels == lbl] = f"cluster_{lbl}"
 
-        if self.figure.metadata is not None:
-            self.figure.metadata["cluster"] = label_strings
-
         self.label_combo_box.blockSignals(True)
-        self.update_label_combo_box()
+        self.update_label_combo_boxes()
         self.label_combo_box.blockSignals(False)
 
-        idx = self.label_combo_box.findText("cluster")
+        idx = self.label_combo_box.findText(CLUSTER_DATA_OPTION)
         if idx >= 0:
             self.label_combo_box.setCurrentIndex(idx)
             # currentIndexChanged signal triggers set_labels
 
         if self.figure.show_label_lines:
             self.figure.make_label_lines()
+
+        self._refresh_manual_refinement_controls()
+
+    def _update_cluster_result_label(self, labels):
+        """Update clustering summary label from integer cluster assignments."""
+        unique_clusters = (
+            np.unique(labels[labels >= 0])
+            if (labels >= 0).any()
+            else np.array([], dtype=int)
+        )
+        n_clusters = len(unique_clusters)
+        n_noise = int((labels == -1).sum())
+        if n_noise > 0:
+            self.cluster_result_label.setText(
+                f"{n_clusters} clusters, {n_noise} noise points"
+            )
+        else:
+            self.cluster_result_label.setText(f"{n_clusters} clusters")
+
+    def _parse_cluster_series(self, values):
+        """Parse a metadata cluster column into integer cluster IDs."""
+        parsed = np.empty(len(values), dtype=int)
+        for i, value in enumerate(values):
+            if pd.isna(value):
+                return None
+
+            if isinstance(value, (int, np.integer)):
+                parsed[i] = int(value)
+                continue
+
+            text = str(value).strip().lower()
+            if text == "noise":
+                parsed[i] = -1
+                continue
+
+            match = re.fullmatch(r"cluster_(-?\d+)", text)
+            if match:
+                parsed[i] = int(match.group(1))
+                continue
+
+            if re.fullmatch(r"-?\d+", text):
+                parsed[i] = int(text)
+                continue
+
+            return None
+
+        return parsed
+
+    def _ensure_cluster_labels_loaded(self):
+        """Ensure editable cluster labels exist, loading from metadata when possible."""
+        labels = getattr(self, "_cluster_labels", None)
+        if labels is not None:
+            return np.asarray(labels, dtype=int)
+
+        meta = getattr(self.figure, "metadata", None)
+        if meta is None or CLUSTER_DATA_COLUMN not in meta.columns:
+            return None
+
+        parsed = self._parse_cluster_series(meta[CLUSTER_DATA_COLUMN].values)
+        if parsed is None:
+            return None
+
+        self._cluster_labels = parsed.copy()
+        self._cluster_labels_original = parsed.copy()
+        return self._cluster_labels
+
+    def _manual_cluster_target_id(self):
+        """Return selected target cluster ID from manual refinement combo."""
+        text = self.cluster_manual_set_combo.currentText().strip().lower()
+        if text in ("noise", "noise (-1)"):
+            return -1
+
+        match = re.fullmatch(r"cluster_(-?\d+)", text)
+        if match:
+            return int(match.group(1))
+
+        if re.fullmatch(r"-?\d+", text):
+            return int(text)
+
+        value = self.cluster_manual_set_combo.currentData()
+        if value is not None:
+            return int(value)
+
+        return None
+
+    def _apply_cluster_labels_to_view(self):
+        """Apply current cluster labels to 2D/3D colors and update status text."""
+        labels = self._ensure_cluster_labels_loaded()
+        if labels is None:
+            return
+
+        colors = labels_to_colors(labels, palette="vispy:husl")
+        self.figure.set_colors(colors, sync_to_viewer=True)
+        # self._apply_cluster_viewer_colors(colors)
+        self._update_cluster_result_label(labels)
+        self.cluster_apply_button.setEnabled(True)
+
+        self._update_cluster_labels_maybe()
+
+    def _update_cluster_labels_maybe(self):
+        """Trigger an update to the labels shown in the 3D viewer, if "cluster" is the active label."""
+        if self.label_combo_box.currentText() == CLUSTER_DATA_OPTION:
+            self._apply_cluster_labels()  # Triggers an update
+
+    def _refresh_manual_refinement_controls(self):
+        """Show/hide and repopulate manual refinement controls."""
+        if not hasattr(self, "cluster_manual_group"):
+            return
+
+        labels = self._ensure_cluster_labels_loaded()
+        has_clusters = labels is not None and len(labels) > 0
+        self.cluster_manual_group.setVisible(has_clusters)
+        if not has_clusters:
+            return
+
+        current_target = self._manual_cluster_target_id()
+        unique_labels = np.unique(labels)
+        non_noise = np.sort(unique_labels[unique_labels >= 0])
+
+        self.cluster_manual_set_combo.blockSignals(True)
+        self.cluster_manual_set_combo.clear()
+        self.cluster_manual_set_combo.addItem("noise (-1)", -1)
+        for cluster_id in non_noise:
+            self.cluster_manual_set_combo.addItem(str(int(cluster_id)), int(cluster_id))
+
+        if current_target is None:
+            self.cluster_manual_set_combo.setCurrentIndex(0)
+        else:
+            idx = self.cluster_manual_set_combo.findData(int(current_target))
+            if idx >= 0:
+                self.cluster_manual_set_combo.setCurrentIndex(idx)
+            else:
+                self.cluster_manual_set_combo.setEditText(str(int(current_target)))
+        self.cluster_manual_set_combo.blockSignals(False)
+
+    @requires_selection
+    def _manual_refine_set_cluster(self):
+        """Set current selection to an existing cluster ID."""
+        labels = self._ensure_cluster_labels_loaded()
+        if labels is None:
+            self.figure.show_message("No clusters loaded", color="red", duration=2)
+            return
+
+        cluster_id = self._manual_cluster_target_id()
+        if cluster_id is None:
+            self.figure.show_message("Invalid cluster ID", color="red", duration=2)
+            return
+
+        indices = self.selected_indices
+        if indices.size == 0:
+            self.figure.show_message("No points selected", color="red", duration=2)
+            return
+
+        labels = labels.copy()
+        labels[indices] = int(cluster_id)
+        self._cluster_labels = labels
+        self._apply_cluster_labels_to_view()
+        self._refresh_manual_refinement_controls()
+
+    @requires_selection
+    def _manual_refine_new_cluster(self):
+        """Assign current selection to a new cluster ID."""
+        labels = self._ensure_cluster_labels_loaded()
+        if labels is None:
+            self.figure.show_message("No clusters loaded", color="red", duration=2)
+            return
+
+        existing = labels[labels >= 0]
+        next_cluster_id = int(existing.max() + 1) if existing.size else 0
+
+        indices = self.selected_indices
+        if indices.size == 0:
+            self.figure.show_message("No points selected", color="red", duration=2)
+            return
+
+        labels = labels.copy()
+        labels[indices] = next_cluster_id
+        self._cluster_labels = labels
+        self._apply_cluster_labels_to_view()
+        self._refresh_manual_refinement_controls()
+
+    @requires_selection
+    def _manual_refine_reset(self):
+        """Reset current selection to original automatic cluster assignments."""
+        labels = self._ensure_cluster_labels_loaded()
+        original = getattr(self, "_cluster_labels_original", None)
+        if labels is None or original is None:
+            self.figure.show_message("No clusters loaded", color="red", duration=2)
+            return
+
+        indices = self.selected_indices
+        if indices.size == 0:
+            self.figure.show_message("No points selected", color="red", duration=2)
+            return
+
+        labels = labels.copy()
+        labels[indices] = np.asarray(original, dtype=int)[indices]
+        self._cluster_labels = labels
+        self._apply_cluster_labels_to_view()
+        self._refresh_manual_refinement_controls()
 
     def add_tooltip(self, widget, text, anchor="group_label"):
         """Add a reusable round help icon tooltip to a widget."""
@@ -1649,27 +1887,41 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_umap_options()
         self.update_fidelity_options()
         self.update_cluster_options()
-        self.update_label_combo_box()
+        self.update_label_combo_boxes()
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
 
-    def update_label_combo_box(self):
-        """Update the items in the label combo box."""
-        # First clear all existing items
-        self.label_combo_box.clear()
+    def update_label_combo_boxes(self):
+        """Update the items in the label and color by combo boxes."""
+        # First, collect the items we want to have:
+        items = {"Default"}
+        if self.figure.metadata is not None:
+            items.update(
+                col for col in self.figure.metadata.columns if not col.startswith("_")
+            )
+        if getattr(self, "_cluster_labels", None) is not None:
+            items.add(CLUSTER_DATA_OPTION)
 
-        self.label_combo_box.addItem("Default")
-        if self.meta_data is not None:
-            for col in sorted(self.meta_data.columns):
-                if col.startswith("_"):
+        # Now edit the combo boxes to match these items, trying to preserve the current selection if possible
+        for combo_box in (self.label_combo_box, self.color_combo_box):
+            # First clear all items that no longer exist
+            for i in reversed(range(combo_box.count())):
+                text = combo_box.itemText(i)
+                if text in ("Default", CLUSTER_DATA_OPTION):
                     continue
-                self.label_combo_box.addItem(col)
+                if self.figure.metadata is None or text not in self.figure.metadata.columns:
+                    combo_box.removeItem(i)
+
+            # Now add missing items
+            for item in sorted(items):
+                if combo_box.findText(item) < 0:
+                    combo_box.addItem(item)
 
     def update_distance_edges_controls(self):
         """Update the distance edges controls."""
         dists = getattr(self.figure, "dists", None)
         self.show_distance_edges_check.setEnabled(False)
-        self.distance_edges_threshold.setEnabled(False)
+        self.show_distance_edges_check.setEnabled(False)
         self.distance_edges_slider.setEnabled(False)
 
         if dists is None:
@@ -1687,7 +1939,6 @@ class ScatterControls(QtWidgets.QWidget):
             return
 
         self.show_distance_edges_check.setEnabled(True)
-        self.distance_edges_threshold.setEnabled(True)
         self.distance_edges_slider.setEnabled(True)
 
     def update_umap_options(self):
@@ -1795,30 +2046,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.pca_n_components_slider.setEnabled(
             is_feature_input and self.pca_check.isChecked()
         )
-
-    # def update_ann_combo_box(self):
-    #     """Update the items in the annotation combo box."""
-    #     # First clear all existing items
-    #     self.ann_combo_box.clear()
-
-    #     if self.figure.selected_labels is None:
-    #         return
-
-    #     # Now add the new items currently selected
-    #     for label in sorted(list(set(self.figure.selected_labels))):
-    #         # Skip if this label is NaN or None (i.e. not a string)
-    #         if not isinstance(label, str):
-    #             continue
-
-    #         if re.match(".*?\([0-9]+\)", label):
-    #             label = label.split("(")[0]
-
-    #         # Replace the "*"
-    #         label = label.replace("*", "")
-
-    #         if label in ("untyped",):
-    #             continue
-    #         self.ann_combo_box.addItem(label)
 
     @requires_selection
     def selected_set_dimorphism(self, dimorphism):
@@ -2213,10 +2440,30 @@ class ScatterControls(QtWidgets.QWidget):
             ids = self.figure._ids[indices]
             pyperclip.copy(",".join(np.array(ids).astype(str)))
 
-    def set_color_mode(self):
+    def set_colors(self, sync_to_viewer=True):
         """Set the color mode."""
-        mode = self.color_combo_box.currentText()
-        self.figure.set_viewer_color_mode(mode.lower())
+        # mode = self.color_combo_box.currentText()
+        # self.figure.set_viewer_color_mode(mode.lower())
+
+        color_col = self.color_combo_box.currentText()
+
+        if not color_col:
+            return
+
+        if color_col == "Default":
+            color_col = self.figure.default_color_col
+
+        if color_col == CLUSTER_DATA_OPTION:
+            colors = self._cluster_colors
+        elif is_color_column(self.meta_data[color_col]):
+            colors = self.meta_data[color_col].values
+        else:
+            colors = labels_to_colors(
+                self.meta_data[color_col].values,
+                palette=self.palette_combo_box.currentText(),
+            )
+
+        self.figure.set_colors(colors, sync_to_viewer=sync_to_viewer)
 
     def set_label_outlines(self):
         """Draw polygons around neurons with the same label."""
@@ -2264,7 +2511,14 @@ class ScatterControls(QtWidgets.QWidget):
                 label,
             )
 
-        labels = self.meta_data[label].astype(str).fillna("").values
+        if label == CLUSTER_DATA_OPTION:
+            labels = (
+                "cluster_"
+                + self.meta_data[CLUSTER_DATA_COLUMN].astype(str).fillna("-1").values
+            )
+            labels[labels == "cluster_-1"] = "noise"
+        else:
+            labels = self.meta_data[label].astype(str).fillna("").values
 
         # For labels that were set manually by the user (via pushing annotations)
         for i, label in self.label_overrides.items():
@@ -2427,14 +2681,18 @@ class ScatterControls(QtWidgets.QWidget):
                         ].copy()
                     else:
                         selected_distances = pd.DataFrame(
-                            source_distances[np.ix_(selected_indices, selected_indices)],
+                            source_distances[
+                                np.ix_(selected_indices, selected_indices)
+                            ],
                             index=selected_ids,
                             columns=selected_ids,
                         )
 
                 if source_features is not None:
                     if isinstance(source_features, pd.DataFrame):
-                        selected_features = source_features.iloc[selected_indices].copy()
+                        selected_features = source_features.iloc[
+                            selected_indices
+                        ].copy()
                         selected_features.index = selected_ids
                     else:
                         selected_features = pd.DataFrame(
@@ -2513,10 +2771,14 @@ class ScatterControls(QtWidgets.QWidget):
                     if neuropil_mesh is not None:
                         main_widget.ngl_viewer.set_neuropil_mesh(
                             neuropil_mesh,
-                            neuropil_source=getattr(src_viewer, "neuropil_source", None),
+                            neuropil_source=getattr(
+                                src_viewer, "neuropil_source", None
+                            ),
                         )
             except Exception as e:
-                logger.debug(f"Failed to propagate Neuroglancer data to new window: {e}")
+                logger.debug(
+                    f"Failed to propagate Neuroglancer data to new window: {e}"
+                )
 
             window._data = {
                 "meta": data,

@@ -94,7 +94,7 @@ class BaseFigure:
 
         # Finally, setting some variables
         self._animations = []
-        self.render_trigger = "continuous"  # "active_window", "reactive"
+        self.render_trigger = "active_window" # "continuous", "reactive"
 
         # Set up the scene
         self.setup_scene()

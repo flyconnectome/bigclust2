@@ -1,6 +1,7 @@
 import cmap
 import navis
 import inspect
+import logging
 import requests
 import octarine_navis_plugin
 
@@ -16,6 +17,11 @@ from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor
 
 from .utils import is_url
+
+logger = logging.getLogger(__name__)
+
+# Restart the thread pool after this many tasks to prevent issues with requests sessions (too many open files/sockets).
+POOL_RESTART_INTERVAL = 10_000
 
 
 class NglViewer:
@@ -41,12 +47,14 @@ class NglViewer:
         self.debug = debug
 
         self.viewer = oc.Viewer(**viewer_kwargs)
+        self.viewer.render_trigger = "reactive"
         self._centered = False
 
         # Holds the futures for requested data
         self.futures = {}
         self.n_failed = 0  # track the number of failed requests
         self.pool = ThreadPoolExecutor(max_threads)
+        self.pool._task_counter = 0  # track the number of tasks the pool has processed
 
         # Tracks which neurons we've already loaded
         self._segments = {}
@@ -198,7 +206,7 @@ class NglViewer:
         self.viewer.close()
 
     def register(self):
-        self.viewer.add_animation(self.check_futures, run_every=20, req_render=False)
+        self.viewer.add_animation(self.check_futures, run_every=20, req_render=False, on_error="log")
 
     def unregister(self):
         self.viewer.remove_animation(self.check_futures)
@@ -599,6 +607,7 @@ class NglViewer:
             if not future.done():
                 continue
             visual = future.result()
+            self.pool._task_counter += 1  # Increment the number of tasks processed
 
             # If there is no mesh, skip
             if isinstance(visual, BaseException):
@@ -652,6 +661,14 @@ class NglViewer:
                 )
                 # Reset the number of failed requests
                 self.n_failed = 0
+
+        if not len(self.futures) and self.pool._task_counter >= POOL_RESTART_INTERVAL:
+            logger.info(
+                f"Restarting thread pool after {self.pool._task_counter} tasks to prevent issues with requests sessions."
+            )
+            self.pool.shutdown(cancel_futures=True, wait=True)
+            self.pool = ThreadPoolExecutor(self.pool._max_workers)
+            self.pool._task_counter = 0
 
 
 class DVIDVolume:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import warnings
 
 import numpy as np
@@ -9,6 +10,8 @@ import networkx as nx
 import scipy.cluster.hierarchy as sch
 
 from scipy.spatial.distance import squareform, pdist
+
+logger = logging.getLogger(__name__)
 
 
 def run_clustering(
@@ -37,6 +40,7 @@ def run_clustering(
     kmeans_n_init: int = 10,
     kmeans_max_iter: int = 300,
     random_state: int | None = 42,
+    allow_singletons: bool = False,
 ):
     """Partition ``data`` into clusters and return an integer label array.
 
@@ -102,6 +106,9 @@ def run_clustering(
         Maximum iterations per run (K-Means).
     random_state : int or None
         Random seed for reproducible K-Means results.
+    allow_singletons : bool
+        If False, treat single-observation clusters as noise (i.e. assign
+        label ``-1``).
 
     Returns
     -------
@@ -197,9 +204,13 @@ def run_clustering(
         _metric = "precomputed" if is_precomputed else metric
         linkage = str(agg_linkage)
         criterion = str(agg_stop_criterion).strip().lower().replace(" ", "_")
-        # Ward linkage requires Euclidean distances; fall back gracefully.
-        if is_precomputed and linkage == "ward":
-            linkage = "average"
+        # Ward linkage requires Euclidean distances
+        if linkage == "ward" and (is_precomputed or _metric != "euclidean"):
+            raise ValueError(
+                "Ward linkage should not be used with non-euclidean distances.\n"
+                "Please use a different linkage method (e.g. 'average') or provide\n"
+                "feature vectors + Euclidean metric instead of a distance matrix."
+            )
 
         if criterion in ("homogeneous_composition", "homogenous_composition"):
             if not is_precomputed:
@@ -230,13 +241,6 @@ def run_clustering(
                 link_method=linkage,
                 verbose=agg_homogeneous_verbose,
             )
-
-            # Treat single-observation clusters as noise.
-            unique_labels, counts = np.unique(labels, return_counts=True)
-            singleton_labels = unique_labels[counts == 1]
-            if singleton_labels.size:
-                labels = labels.copy()
-                labels[np.isin(labels, singleton_labels)] = -1
         else:
             if criterion not in ("n_clusters", "distance_threshold"):
                 raise ValueError(
@@ -303,45 +307,15 @@ def run_clustering(
             "Expected 'HDBSCAN', 'Agglomerative', or 'K-Means'."
         )
 
+    if not allow_singletons:
+        # Treat single-observation clusters as noise
+        unique_labels, counts = np.unique(labels, return_counts=True)
+        singleton_labels = unique_labels[counts == 1]
+        if singleton_labels.size:
+            labels = labels.copy()
+            labels[np.isin(labels, singleton_labels)] = -1
+
     return labels.astype(int)
-
-
-def labels_to_colors(labels, palette="vispy:husl", noise_color=(0.5, 0.5, 0.5, 1.0)):
-    """Map integer cluster labels to RGBA colours.
-
-    Parameters
-    ----------
-    labels : array-like of int
-        Cluster assignment per point.  ``-1`` is treated as noise/unassigned.
-    palette : str
-        A ``cmap``-compatible colormap name used for distinct cluster colours.
-    noise_color : tuple of 4 floats
-        RGBA colour for noise points (label == -1).
-
-    Returns
-    -------
-    colors : np.ndarray of shape (N, 4), dtype float32
-        Per-point RGBA colours in ``[0, 1]`` range.
-    """
-    import cmap as _cmap
-
-    labels = np.asarray(labels, dtype=int)
-    unique_cluster_ids = sorted(set(labels[labels >= 0].tolist()))
-    n = max(len(unique_cluster_ids), 1)
-
-    colormap_obj = _cmap.Colormap(palette)
-    palette_colors = list(colormap_obj.iter_colors(n))
-    cluster_to_color = {
-        lbl: np.array(palette_colors[i].rgba, dtype=np.float32)
-        for i, lbl in enumerate(unique_cluster_ids)
-    }
-
-    noise = np.array(noise_color, dtype=np.float32)
-    colors = np.empty((len(labels), 4), dtype=np.float32)
-    for i, lbl in enumerate(labels):
-        colors[i] = cluster_to_color.get(lbl, noise)
-
-    return colors
 
 
 def is_good(v, n_unique_ds):

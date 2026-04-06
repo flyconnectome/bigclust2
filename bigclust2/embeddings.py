@@ -6,10 +6,14 @@ from sklearn.neighbors import NearestNeighbors
 
 
 def is_precomputed_distance_matrix(arr):
-    """Heuristic: a square 2D matrix is treated as precomputed pairwise distances."""
+    """Heuristic: a square 2D matrix with zero diagonal is treated as precomputed pairwise distances."""
     if arr is None or not hasattr(arr, "shape") or len(arr.shape) != 2:
         return False
-    return arr.shape[0] == arr.shape[1]
+    if arr.shape[0] != arr.shape[1]:
+        return False
+    if np.diag(arr).min() != 0:
+        return False
+    return True
 
 
 def rebalance_feature_matrix(arr, mode="none"):

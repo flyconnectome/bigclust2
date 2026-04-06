@@ -51,6 +51,16 @@ class RotatedHeaderView(QtWidgets.QHeaderView):
         )
         painter.restore()
 
+    def sectionSizeFromContents(self, logical_index):
+        """Return a size hint that accounts for the 90-degree label rotation."""
+        size = super().sectionSizeFromContents(logical_index)
+
+        # For rotated horizontal headers, text length should contribute to height,
+        # while width can stay compact and driven mostly by cell content.
+        if self.orientation() == Qt.Horizontal:
+            return QtCore.QSize(size.height(), size.width())
+        return size
+
 
 class TableModel(QtCore.QAbstractTableModel):
     def __init__(self, data, meta_data):
@@ -120,6 +130,25 @@ class TableModel(QtCore.QAbstractTableModel):
 
         elif role == Qt.ItemDataRole.BackgroundRole and self._color_cells:
             return self._background_color_for_index(index)
+
+        elif role == Qt.ToolTipRole:
+            if self._is_hidden_upper_triangle(index):
+                return None
+
+            row_key = self._view.index[index.row()]
+            col_key = self._view.columns[index.column()]
+            if self._hide_diagonal and row_key == col_key:
+                return None
+
+            value = self._view.values[index.row(), index.column()]
+            if pd.isna(value):
+                return None
+
+            row_label = str(self._indices[index.row()])
+            col_label = str(self._columns[index.column()])
+            if isinstance(value, Number):
+                return f"{row_label} × {col_label}: {float(value):.6g}"
+            return f"{row_label} × {col_label}: {value}"
 
         return None
 
@@ -321,12 +350,18 @@ class DistancesTable(QtWidgets.QWidget):
         self._model = TableModel(self._data, self._meta_data)
         self._table.setModel(self._model)
 
-        # Keep heatmap cells close to square and compact.
-        cell_size = 40
-        self._table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self._table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Fixed)
-        self._table.horizontalHeader().setDefaultSectionSize(cell_size)
-        self._table.verticalHeader().setDefaultSectionSize(cell_size)
+        self._base_table_font = QtGui.QFont(self._table.font())
+        self._base_horizontal_header_font = QtGui.QFont(
+            self._table.horizontalHeader().font()
+        )
+        self._base_vertical_header_font = QtGui.QFont(
+            self._table.verticalHeader().font()
+        )
+        self._base_rotated_header_min_height = self._table.horizontalHeader().minimumHeight()
+
+        self._table_scale = 100
+        self._table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self._table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
 
         self._layout.addWidget(self._table, 1)
 
@@ -375,6 +410,17 @@ class DistancesTable(QtWidgets.QWidget):
         self._decimals.valueChanged.connect(self.update_decimals)
         controls_form.addRow("Decimals:", self._decimals)
 
+        self._cell_size = QtWidgets.QSpinBox()
+        self._cell_size.setRange(25, 200)
+        self._cell_size.setSingleStep(5)
+        self._cell_size.setValue(self._table_scale)
+        self._cell_size.setSuffix("%")
+        self._cell_size.setToolTip("Scale table fonts and cell size relative to content")
+        self._cell_size.valueChanged.connect(self.update_cell_size)
+        controls_form.addRow("Scale:", self._cell_size)
+
+        self._model.layoutChanged.connect(self.update_cell_size)
+
         self._always_on_top = QtWidgets.QCheckBox("Always on top")
         self._always_on_top.setToolTip("Keep this window above other BigClust windows")
         self._always_on_top.stateChanged.connect(self.update_always_on_top)
@@ -391,6 +437,8 @@ class DistancesTable(QtWidgets.QWidget):
         if self._figure is not None and self._figure.selected_ids is not None:
             if len(self._figure.selected_ids) > 0:
                 self.select(self._figure.selected_ids)
+
+        self.update_cell_size()
 
     @staticmethod
     def _prepare_distances(distances, meta_data):
@@ -429,6 +477,48 @@ class DistancesTable(QtWidgets.QWidget):
 
     def update_decimals(self, *args, **kwargs):
         self._model.set_decimals(self._decimals.value())
+
+    def update_cell_size(self, *args, **kwargs):
+        if hasattr(self, "_cell_size"):
+            self._table_scale = self._cell_size.value()
+
+        scale = self._table_scale / 100.0
+
+        table_font = QtGui.QFont(self._base_table_font)
+        table_font.setPointSizeF(max(6.0, self._base_table_font.pointSizeF() * scale))
+        self._table.setFont(table_font)
+
+        h_header_font = QtGui.QFont(self._base_horizontal_header_font)
+        h_header_font.setPointSizeF(
+            max(6.0, self._base_horizontal_header_font.pointSizeF() * scale)
+        )
+        self._table.horizontalHeader().setFont(h_header_font)
+
+        v_header_font = QtGui.QFont(self._base_vertical_header_font)
+        v_header_font.setPointSizeF(
+            max(6.0, self._base_vertical_header_font.pointSizeF() * scale)
+        )
+        self._table.verticalHeader().setFont(v_header_font)
+
+        rotated_header_min_height = max(
+            60, int(round(self._base_rotated_header_min_height * scale))
+        )
+        self._table.horizontalHeader().setMinimumHeight(rotated_header_min_height)
+
+        self._table.resizeColumnsToContents()
+        self._table.resizeRowsToContents()
+
+    def keyPressEvent(self, event):
+        if event.modifiers() & Qt.ControlModifier:
+            if event.key() in (Qt.Key_Plus, Qt.Key_Equal):
+                self._cell_size.setValue(self._cell_size.value() + self._cell_size.singleStep())
+                event.accept()
+                return
+            if event.key() == Qt.Key_Minus:
+                self._cell_size.setValue(self._cell_size.value() - self._cell_size.singleStep())
+                event.accept()
+                return
+        super().keyPressEvent(event)
 
     def update_always_on_top(self, *args, **kwargs):
         self.setWindowFlag(Qt.Tool, self._always_on_top.isChecked())

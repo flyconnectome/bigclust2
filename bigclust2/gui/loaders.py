@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtCore import QSettings, Qt
 
-from ..data import parse_directory, MultiProjectLoader, SingleProjectLoader
+from ..data import parse_directory, SingleProjectLoader
 from ..utils import string_to_polars_filter, is_list_of_ids
 
 logger = logging.getLogger(__name__)
@@ -49,14 +49,30 @@ class OpenProjectDialog(QDialog):
 
         # Path entry with browse button
         path_row = QHBoxLayout()
-        self.path_edit = QLineEdit()
-        self.path_edit.setPlaceholderText("Enter path or URL")
-        # Load last saved path
-        last_path = self.settings.value("last_project_path", "")
+        self.path_edit = QComboBox()
+        self.path_edit.setEditable(True)
+        self.path_edit.lineEdit().setPlaceholderText("Enter path or URL")
+        self.path_edit.setInsertPolicy(QComboBox.NoInsert)
+        # Load path history and keep the last path selected by default
+        raw_history = self.settings.value("last_project_paths", [])
+        if isinstance(raw_history, str):
+            path_history = [raw_history] if raw_history else []
+        elif isinstance(raw_history, (list, tuple)):
+            path_history = [str(p) for p in raw_history if str(p).strip()]
+        else:
+            path_history = []
+
+        last_path = str(self.settings.value("last_project_path", "")).strip()
         if last_path:
-            self.path_edit.setText(last_path)
-        # Connect textChanged signal to validation
-        self.path_edit.textChanged.connect(self.scan_path)
+            path_history = [p for p in path_history if p != last_path]
+            path_history.insert(0, last_path)
+        path_history = path_history[:10]
+        if path_history:
+            self.path_edit.addItems(path_history)
+            self.path_edit.setCurrentText(path_history[0])
+
+        # Connect text change signal to validation
+        self.path_edit.currentTextChanged.connect(self.scan_path)
         browse_btn = QPushButton("Browse…")
         browse_btn.setToolTip("Select a local folder")
         browse_btn.clicked.connect(self.open_file_dialog)
@@ -147,7 +163,7 @@ class OpenProjectDialog(QDialog):
     def open_file_dialog(self):
         directory = QFileDialog.getExistingDirectory(self, "Select Project Directory")
         if directory:
-            self.path_edit.setText(directory)
+            self.path_edit.setCurrentText(directory)
 
     def on_project_selected(self, index):
         """Handle project selection and display details."""
@@ -189,7 +205,7 @@ class OpenProjectDialog(QDialog):
 
     def scan_path(self):
         """Validate the path by parsing it. Show red outline on error."""
-        path = self.path_edit.text().strip()
+        path = self.path_edit.currentText().strip()
         logger.info("Scanning path: %s", path)
         if not path:
             # Clear styling if field is empty
@@ -217,7 +233,7 @@ class OpenProjectDialog(QDialog):
             # Invalid path - add red outline and print error
             logger.debug(f"Error validating path: {e}")
             self.path_edit.setStyleSheet(
-                "QLineEdit { border: 2px solid red; border-radius: 3px; }"
+                "QComboBox { border: 2px solid red; border-radius: 3px; }"
             )
             self.project_combo.clear()
             self.embedding_combo.clear()
@@ -251,9 +267,22 @@ class OpenProjectDialog(QDialog):
 
     def on_accept(self):
         """Save the path before accepting the dialog."""
-        path = self.path_edit.text().strip()
+        path = self.path_edit.currentText().strip()
         if path:
             self.settings.setValue("last_project_path", path)
+
+            existing_paths = self.settings.value("last_project_paths", [])
+            if isinstance(existing_paths, str):
+                history = [existing_paths] if existing_paths else []
+            elif isinstance(existing_paths, (list, tuple)):
+                history = [str(p).strip() for p in existing_paths if str(p).strip()]
+            else:
+                history = []
+
+            history = [p for p in history if p != path]
+            history.insert(0, path)
+            self.settings.setValue("last_project_paths", history[:10])
+
         project = self.project_combo.currentIndex()
         if project >= 0:
             self.settings.setValue("last_project_index", project)
@@ -268,7 +297,7 @@ class OpenProjectDialog(QDialog):
 
         path = str(state.get("path", "")).strip()
         if path:
-            self.path_edit.setText(path)
+            self.path_edit.setCurrentText(path)
         else:
             self.scan_path()
 
@@ -307,7 +336,7 @@ class OpenProjectDialog(QDialog):
         }
 
     def selected_path(self):
-        return self.path_edit.text().strip()
+        return self.path_edit.currentText().strip()
 
     def selected_filter(self):
         """Get the filter expression."""

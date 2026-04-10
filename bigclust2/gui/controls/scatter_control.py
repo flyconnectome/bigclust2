@@ -493,6 +493,22 @@ class ScatterControls(QtWidgets.QWidget):
         )
         input_form.addRow("Data:", self.umap_dist_combo_box)
 
+        # Optional sub-selection of top-level feature groups for MultiIndex columns.
+        self.umap_feature_subset_group = QtWidgets.QGroupBox("Feature Subset")
+        feature_subset_layout = QtWidgets.QVBoxLayout()
+        feature_subset_layout.setContentsMargins(8, 6, 8, 6)
+        feature_subset_layout.setSpacing(2)
+        self.umap_feature_subset_group.setLayout(feature_subset_layout)
+        input_form.addRow(self.umap_feature_subset_group)
+
+        self.umap_feature_partition_widget = QtWidgets.QWidget()
+        partition_layout = QtWidgets.QVBoxLayout()
+        partition_layout.setContentsMargins(0, 0, 0, 0)
+        partition_layout.setSpacing(2)
+        self.umap_feature_partition_widget.setLayout(partition_layout)
+        feature_subset_layout.addWidget(self.umap_feature_partition_widget)
+        self._embedding_partition_checks = {}
+
         # Feature-dependent options are grouped together and enabled only for feature vectors.
         self.feature_options_group = QtWidgets.QGroupBox("Feature Options")
         prep_form = QtWidgets.QFormLayout()
@@ -2056,6 +2072,80 @@ class ScatterControls(QtWidgets.QWidget):
 
         return dists
 
+    def _embedding_feature_partition_names(self, arr):
+        """Return ordered top-level partition names for MultiIndex feature columns."""
+        if not isinstance(arr, pd.DataFrame):
+            return []
+        if not isinstance(arr.columns, pd.MultiIndex):
+            return []
+
+        names = []
+        seen = set()
+        for value in arr.columns.get_level_values(0):
+            label = str(value)
+            if label in seen:
+                continue
+            seen.add(label)
+            names.append(label)
+        return names
+
+    def _apply_embedding_feature_partition_filter(self, arr):
+        """Filter feature columns by selected top-level partition checkboxes."""
+        if not isinstance(arr, pd.DataFrame):
+            return arr
+        if not isinstance(arr.columns, pd.MultiIndex):
+            return arr
+        if not hasattr(self, "_embedding_partition_checks"):
+            return arr
+
+        selected = {
+            name
+            for name, checkbox in self._embedding_partition_checks.items()
+            if checkbox.isChecked()
+        }
+        if not selected:
+            return arr.iloc[:, 0:0].copy()
+
+        top_level = arr.columns.get_level_values(0).astype(str)
+        mask = np.asarray([name in selected for name in top_level], dtype=bool)
+        if not mask.any():
+            return arr.iloc[:, 0:0].copy()
+        return arr.loc[:, mask].copy()
+
+    def _update_embedding_feature_partition_controls(self, arr, is_feature_input):
+        """Show/update partition checkboxes for MultiIndex feature inputs."""
+        if not hasattr(self, "umap_feature_partition_widget"):
+            return
+
+        names = (
+            self._embedding_feature_partition_names(arr)
+            if is_feature_input
+            else []
+        )
+        has_partitions = len(names) > 0
+
+        if hasattr(self, "umap_feature_subset_group"):
+            self.umap_feature_subset_group.setVisible(has_partitions)
+            self.umap_feature_subset_group.setEnabled(is_feature_input)
+
+        old_checks = getattr(self, "_embedding_partition_checks", {})
+        old_state = {name: check.isChecked() for name, check in old_checks.items()}
+
+        layout = self.umap_feature_partition_widget.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self._embedding_partition_checks = {}
+        for name in names:
+            check = QtWidgets.QCheckBox(name)
+            check.setChecked(old_state.get(name, True))
+            check.stateChanged.connect(self.calculate_embeddings_maybe)
+            layout.addWidget(check)
+            self._embedding_partition_checks[name] = check
+
     def _update_embedding_input_controls(self):
         """Toggle embedding controls based on selected input type."""
         if not hasattr(self, "pca_check"):
@@ -2065,21 +2155,48 @@ class ScatterControls(QtWidgets.QWidget):
         is_feature_input = (arr is not None) and (
             not is_precomputed_distance_matrix(arr)
         )
+        self._update_embedding_feature_partition_controls(arr, is_feature_input)
+        arr_filtered = self._apply_embedding_feature_partition_filter(arr)
+
+        has_selected_features = True
+        if (
+            is_feature_input
+            and arr_filtered is not None
+            and hasattr(arr_filtered, "shape")
+            and len(arr_filtered.shape) > 1
+            and arr_filtered.shape[1] == 0
+        ):
+            has_selected_features = False
 
         if hasattr(self, "feature_options_group"):
             self.feature_options_group.setEnabled(is_feature_input)
 
+        if hasattr(self, "umap_button"):
+            self.umap_button.setEnabled((arr is not None) and (not is_feature_input or has_selected_features))
+
         # PCA pre-reduction is only meaningful for feature vectors.
         if not is_feature_input:
             self.pca_check.setChecked(False)
-        self.pca_check.setEnabled(is_feature_input)
+        self.pca_check.setEnabled(is_feature_input and has_selected_features)
         self.pca_n_components_slider.setEnabled(
-            is_feature_input and self.pca_check.isChecked()
+            is_feature_input and has_selected_features and self.pca_check.isChecked()
         )
 
     def set_add_group(self):
         """Set whether to add neurons as group when selected."""
         self.figure._add_as_group = self.add_group_check.isChecked()
+
+    def set_selection_restrict(self):
+        """Set optional dataset restriction for point selection."""
+        if not hasattr(self, "selection_restrict_checks"):
+            return
+
+        selected_datasets = [
+            name
+            for name, check in self.selection_restrict_checks.items()
+            if check.isChecked()
+        ]
+        self.figure._restrict_selection = selected_datasets
 
     def set_ngl_cache(self):
         """Set whether the ngl viewer should cache neurons."""
@@ -2331,6 +2448,19 @@ class ScatterControls(QtWidgets.QWidget):
         if dists is None:
             return
 
+        dists = self._apply_embedding_feature_partition_filter(dists)
+        if (
+            hasattr(dists, "shape")
+            and len(dists.shape) > 1
+            and dists.shape[1] == 0
+        ):
+            self.figure.show_message(
+                "Select at least one parcellation to compute embeddings.",
+                color="red",
+                duration=3,
+            )
+            return
+
         is_precomputed = is_precomputed_distance_matrix(dists)
         metric = (
             "precomputed"
@@ -2434,6 +2564,9 @@ class ScatterControls(QtWidgets.QWidget):
                             selected_indices
                         ].copy()
                         selected_features.index = selected_ids
+                        selected_features = self._apply_embedding_feature_partition_filter(
+                            selected_features
+                        )
                     else:
                         selected_features = pd.DataFrame(
                             np.asarray(source_features)[selected_indices],

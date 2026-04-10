@@ -27,6 +27,8 @@ dependencies = [
     "pyqtgraph>=0.14.0",
     "scikit-learn>=1.7.2",
     "networkx>=3.4.2",
+    "clio-py",
+    "sea-serpent>=0.4.4",
 ]
 
 [project.scripts]
@@ -43,3 +45,4 @@ bigclust2 = ["assets/*.png"]
 
 [tool.uv.sources]
 nglscenes = { git = "https://github.com/schlegelp/nglscenes", rev = "main" }
+clio-py = { git = "https://github.com/schlegelp/clio-py", rev = "main" }

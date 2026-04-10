@@ -196,6 +196,7 @@ class TableModel(QtCore.QAbstractTableModel):
         self.update_indices()
 
         # Emit signal to trigger update
+        # This is where 99.999% of time is spent
         self.layoutChanged.emit()
 
     def set_synapse_threshold(self, threshold):
@@ -387,6 +388,7 @@ class ConnectivityTable(QtWidgets.QWidget):
         )
 
         self._table_scale = 100
+        self._last_applied_font_sizes = None
         self._table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         self._table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
         self._model.layoutChanged.connect(self.update_cell_size)
@@ -663,24 +665,34 @@ class ConnectivityTable(QtWidgets.QWidget):
             self._table_scale = self._cell_size.value()
 
         scale = self._table_scale / 100.0
+        table_font_size = max(6.0, self._base_table_font.pointSizeF() * scale)
+        h_header_font_size = max(
+            6.0, self._base_horizontal_header_font.pointSizeF() * scale
+        )
+        v_header_font_size = max(
+            6.0, self._base_vertical_header_font.pointSizeF() * scale
+        )
+        font_sizes = (table_font_size, h_header_font_size, v_header_font_size)
+
+        if font_sizes == self._last_applied_font_sizes:
+            return
 
         # Scale table/header fonts and then let Qt recompute geometry from content.
         table_font = QtGui.QFont(self._base_table_font)
-        table_font.setPointSizeF(max(6.0, self._base_table_font.pointSizeF() * scale))
+        table_font.setPointSizeF(table_font_size)
         self._table.setFont(table_font)
 
         h_header_font = QtGui.QFont(self._base_horizontal_header_font)
-        h_header_font.setPointSizeF(
-            max(6.0, self._base_horizontal_header_font.pointSizeF() * scale)
-        )
+        h_header_font.setPointSizeF(h_header_font_size)
         self._table.horizontalHeader().setFont(h_header_font)
 
         v_header_font = QtGui.QFont(self._base_vertical_header_font)
-        v_header_font.setPointSizeF(
-            max(6.0, self._base_vertical_header_font.pointSizeF() * scale)
-        )
+        v_header_font.setPointSizeF(v_header_font_size)
         self._table.verticalHeader().setFont(v_header_font)
 
+        self._last_applied_font_sizes = font_sizes
+
+        # These are the expensive calls
         self._table.resizeColumnsToContents()
         self._table.resizeRowsToContents()
 

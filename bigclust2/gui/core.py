@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
 )
 from PySide6.QtGui import QIcon, QAction, QKeySequence
-from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer
+from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
@@ -34,6 +34,7 @@ from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
+from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
 from ..__version__ import __version__
@@ -674,6 +675,7 @@ class MainWindow(QMainWindow):
 
     RECENT_PROJECTS_KEY = "openRecentProjects/v1"
     MAX_RECENT_PROJECTS = 10
+    annotation_submit_result_received = Signal(str)
 
     def __init__(self):
         super().__init__()
@@ -683,11 +685,24 @@ class MainWindow(QMainWindow):
         self.connectivity_table_action = None
         self.distances_table_action = None
         self._current_project_loader = None
-        self._connectivity_widgets = []
+        self._connectivity_widget = None
+        self._connectivity_widget_synced = False
+        self._annotation_dialog = None
         self._distance_widgets = []
+        self.annotation_submit_result_received.connect(
+            self._handle_annotation_submit_result
+        )
         _OPEN_WINDOWS.append(self)
         self.destroyed.connect(lambda _obj=None, w=self: _OPEN_WINDOWS.remove(w) if w in _OPEN_WINDOWS else None)
         self.init_ui()
+
+    def eventFilter(self, obj, event):
+        if (
+            obj is self._connectivity_widget
+            and event.type() == QEvent.Close
+        ):
+            self._unsync_connectivity_widget(obj)
+        return super().eventFilter(obj, event)
 
     def init_ui(self):
         """Initialize the main window."""
@@ -778,6 +793,13 @@ class MainWindow(QMainWindow):
         deselect_all_action = QAction("Deselect All", self)
         deselect_all_action.triggered.connect(self.on_deselect_all)
         selection_menu.addAction(deselect_all_action)
+
+        set_annotations_action = QAction("Set Annotations", self)
+        set_annotations_action.setShortcut(
+            QKeySequence("Meta+A") if sys.platform == "darwin" else QKeySequence("Ctrl+A")
+        )
+        set_annotations_action.triggered.connect(self.show_annotation_dialog)
+        selection_menu.addAction(set_annotations_action)
 
         selection_menu.addSeparator()
         open_selection_in_new_window_action = QAction("Open in New Window", self)
@@ -901,6 +923,20 @@ class MainWindow(QMainWindow):
         if not self._can_open_connectivity_table():
             return
 
+        existing = self._connectivity_widget
+        if existing is not None:
+            try:
+                self._sync_connectivity_widget(existing)
+                # Reuse the existing widget for this project and bring it to front.
+                existing.showNormal()
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:
+                # Underlying Qt object was deleted elsewhere; rebuild on demand.
+                self._connectivity_widget = None
+
         features = self._data.get("features") if hasattr(self, "_data") else None
         meta_data = self._data.get("meta") if hasattr(self, "_data") else None
         fig = self.centralWidget().fig_scatter
@@ -914,16 +950,164 @@ class MainWindow(QMainWindow):
             meta_data=meta_data,
             parent=self,
         )
-        fig.sync_widget(widget)
+        widget.installEventFilter(self)
+        self._sync_connectivity_widget(widget)
         widget.show()
 
-        # Keep a strong reference so the window is not garbage collected.
-        self._connectivity_widgets.append(widget)
+        # Keep a strong reference so the window can be reopened instead of recreated.
+        self._connectivity_widget = widget
         widget.destroyed.connect(
-            lambda _obj=None, w=widget: self._connectivity_widgets.remove(w)
-            if w in self._connectivity_widgets
-            else None
+            lambda _obj=None: setattr(self, "_connectivity_widget", None)
         )
+        widget.destroyed.connect(
+            lambda _obj=None: setattr(self, "_connectivity_widget_synced", False)
+        )
+        widget.destroyed.connect(
+            lambda _obj=None, w=widget: fig.unsync_widget(w)
+        )
+
+    def _sync_connectivity_widget(self, widget):
+        """Ensure the cached connectivity widget is synced to figure selection."""
+        if widget is None or self._connectivity_widget_synced:
+            return
+
+        fig = self.centralWidget().fig_scatter
+        fig.sync_widget(widget)
+        self._connectivity_widget_synced = True
+
+    def _unsync_connectivity_widget(self, widget=None):
+        """Unsync the cached connectivity widget to avoid heavy updates while hidden."""
+        if not self._connectivity_widget_synced:
+            return
+
+        if widget is None:
+            widget = self._connectivity_widget
+        if widget is None:
+            self._connectivity_widget_synced = False
+            return
+
+        try:
+            fig = self.centralWidget().fig_scatter
+            fig.unsync_widget(widget)
+        finally:
+            self._connectivity_widget_synced = False
+
+    def _dispose_connectivity_widget(self):
+        """Dispose the cached connectivity widget when project context changes."""
+        widget = self._connectivity_widget
+        if widget is None:
+            return
+
+        self._connectivity_widget = None
+        self._unsync_connectivity_widget(widget)
+
+        try:
+            widget.removeEventFilter(self)
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
+
+    def _selected_annotation_records(self):
+        """Build annotation dialog selection records from scatter selection."""
+        fig = self.centralWidget().fig_scatter
+        selected_meta = getattr(fig, "selected_meta", None)
+        if selected_meta is None or selected_meta.empty:
+            return []
+
+        if "id" not in selected_meta.columns or "dataset" not in selected_meta.columns:
+            return []
+
+        records = []
+        for neuron_id, dataset in zip(
+            selected_meta["id"].tolist(),
+            selected_meta["dataset"].tolist(),
+        ):
+            records.append(SelectionRecord(neuron_id=int(neuron_id), dataset=str(dataset)))
+        return records
+
+    def _project_annotation_datasets(self):
+        """Return all dataset names available in the currently loaded project."""
+        meta = self._project_meta_data()
+        if meta is None or "dataset" not in meta.columns:
+            return []
+
+        values = []
+        for dataset in meta["dataset"].dropna().tolist():
+            text = str(dataset).strip()
+            if text:
+                values.append(text)
+        return sorted(set(values))
+
+    def show_annotation_dialog(self):
+        """Show a single reusable annotation dialog for the current selection."""
+        selection = self._selected_annotation_records()
+        project_datasets = self._project_annotation_datasets()
+        if not selection:
+            fig = self.centralWidget().fig_scatter
+            fig.show_message("No points selected", color="red", duration=2)
+            return
+
+        existing = self._annotation_dialog
+        if existing is not None:
+            try:
+                existing.set_selection(selection, project_datasets=project_datasets)
+                existing.showNormal()
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:
+                # Underlying Qt object was deleted elsewhere; rebuild on demand.
+                self._annotation_dialog = None
+
+        dialog = AnnotationDialog(
+            selection=selection,
+            parent=self,
+            project_datasets=project_datasets,
+        )
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        self._annotation_dialog = dialog
+        dialog.destroyed.connect(
+            lambda _obj=None: setattr(self, "_annotation_dialog", None)
+        )
+
+    def on_annotation_submit_result(self, message):
+        """Receive async submit result message and forward to UI + console."""
+        text = str(message)
+        print(text)
+        self.annotation_submit_result_received.emit(text)
+
+    def _handle_annotation_submit_result(self, message):
+        """Show user-facing submit result status on the scatter figure."""
+        text = str(message)
+        lowered = text.lower()
+        is_error = ("error" in lowered) or ("failed" in lowered)
+        color = "red" if is_error else "green"
+
+        try:
+            fig = self.centralWidget().fig_scatter
+            fig.show_message(text, color=color, duration=3)
+        except Exception as e:
+            logger.debug(f"Failed to show annotation submit status message: {e}")
+
+    def _dispose_annotation_dialog(self):
+        """Dispose the cached annotation dialog when project context changes."""
+        dialog = self._annotation_dialog
+        if dialog is None:
+            return
+
+        self._annotation_dialog = None
+        try:
+            dialog.close()
+            dialog.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
 
     def show_distances_table(self):
         """Open the pairwise distance heatmap widget for the current project."""
@@ -1443,6 +1627,10 @@ class MainWindow(QMainWindow):
     def _load_project(self, project, embedding_mode=""):
         """Load a resolved project loader into the current visualization."""
         embedding_mode = (embedding_mode or "").strip()
+
+        # Connectivity table is project-specific; reset cached instance on reload.
+        self._dispose_connectivity_widget()
+        self._dispose_annotation_dialog()
 
         # Create progress dialog with range
         progress = QProgressDialog("Loading project data...", None, 0, 100, self)

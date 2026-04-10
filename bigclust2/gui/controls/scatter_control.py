@@ -68,40 +68,28 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab_layout.addWidget(self.tabs)
 
         self.tab1 = QtWidgets.QWidget()
-        self.tab2 = QtWidgets.QWidget()
         self.tab3 = QtWidgets.QWidget()
         self.tab4 = QtWidgets.QWidget()
         self.tab5 = QtWidgets.QWidget()
         self.tab6 = QtWidgets.QWidget()
         self.tab7 = QtWidgets.QWidget()
         self.tab1_layout = QtWidgets.QVBoxLayout()
-        self.tab2_layout = QtWidgets.QVBoxLayout()
-        self.tab3_layout = QtWidgets.QVBoxLayout()
         self.tab4_layout = QtWidgets.QVBoxLayout()
         self.tab5_layout = QtWidgets.QVBoxLayout()
         self.tab6_layout = QtWidgets.QVBoxLayout()
         self.tab7_layout = QtWidgets.QVBoxLayout()
         self.tab1.setLayout(self.tab1_layout)
-        self.tab2.setLayout(self.tab2_layout)
-        self.tab3.setLayout(self.tab3_layout)
         self.tab4.setLayout(self.tab4_layout)
         self.tab5.setLayout(self.tab5_layout)
         self.tab6.setLayout(self.tab6_layout)
         self.tab7.setLayout(self.tab7_layout)
         self.tabs.addTab(self.tab1, "General")
-        self.tabs.addTab(self.tab2, "Annotation")
-        # self.tabs.addTab(self.tab3, "Neuroglancer")
         self.tabs.addTab(self.tab5, "Embeddings")
         self.tabs.addTab(self.tab6, "Fidelity")
         self.tabs.addTab(self.tab7, "Cluster")
         self.tabs.addTab(self.tab4, "Settings")
 
-        # Hide the annotation tab
-        self.tabs.setTabVisible(self.tabs.indexOf(self.tab2), False)
-
         self.build_control_gui()
-        # self.build_annotation_gui()
-        # self.build_neuroglancer_gui()
         self.build_settings_gui()
         self.build_embeddings_gui()
         self.build_fidelity_gui()
@@ -132,18 +120,37 @@ class ScatterControls(QtWidgets.QWidget):
 
     def build_control_gui(self):
         """Build the GUI."""
-        # Search bar
-        self.tab1_layout.addWidget(QtWidgets.QLabel("Search"))
+        ########
+        # Search
+        ########
+        search_group = QtWidgets.QGroupBox("Search")
+        search_form = QtWidgets.QFormLayout()
+        search_form.setContentsMargins(2, 2, 2, 2)
+        search_form.setVerticalSpacing(2)
+        search_form.setFieldGrowthPolicy(
+            QtWidgets.QFormLayout.FieldGrowthPolicy.AllNonFixedFieldsGrow
+        )
+        search_group.setLayout(search_form)
+        self.tab1_layout.addWidget(search_group)
+
         self.searchbar = QtWidgets.QLineEdit()
         self.searchbar.setToolTip(
-            "Search for a label in the scene. Use a leading '/' to search for a regex."
+            "Search for label(s) in the project. Search syntax:\n"
+            " - by default will search for exact match among the labels\n"
+            " - use a leading '/' to search for a regex\n"
+            " - you can also search for IDs; multiple IDs must be comma-separated, e.g. '1,2,3'"
+        )
+        self.searchbar.setPlaceholderText("Hover for search syntax")
+        self.searchbar.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
         )
         self.searchbar.returnPressed.connect(self.find_next)
         # self.searchbar.textChanged.connect(self.figure.highlight_cluster)
         self.searchbar_completer = QtWidgets.QCompleter(self.labels)
         self.searchbar_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
         self.searchbar.setCompleter(self.searchbar_completer)
-        self.tab1_layout.addWidget(self.searchbar)
+        search_form.addRow(self.searchbar)
 
         # Add buttons for previous/next
         self.button_layout = QtWidgets.QHBoxLayout()
@@ -161,17 +168,22 @@ class ScatterControls(QtWidgets.QWidget):
         self.next_button = QtWidgets.QPushButton("Next")
         self.next_button.clicked.connect(self.find_next)
         self.button_layout.addWidget(self.next_button)
-        self.tab1_layout.addLayout(self.button_layout)
+        search_form.addRow(self.button_layout)
 
-        # Add horizontal divider
-        self.add_split(self.tab1_layout)
+        ########
+        # Labels
+        ########
+
+        label_group = QtWidgets.QGroupBox("Labels")
+        label_form = QtWidgets.QFormLayout()
+        label_form.setContentsMargins(2, 2, 2, 2)
+        label_form.setVerticalSpacing(2)
+        label_group.setLayout(label_form)
+        self.tab1_layout.addWidget(label_group)
 
         # Add dropdown to choose leaf labels
-        self.label_layout = QtWidgets.QHBoxLayout()
-        self.tab1_layout.addLayout(self.label_layout)
-        self.label_layout.addWidget(QtWidgets.QLabel("Labels:"))
         self.label_combo_box = QtWidgets.QComboBox()
-        self.label_layout.addWidget(self.label_combo_box)
+        label_form.addRow(QtWidgets.QLabel("Labels:"), self.label_combo_box)
         self.label_combo_box.currentIndexChanged.connect(self.set_labels)
         self._current_leaf_labels = self.label_combo_box.currentText()
 
@@ -180,7 +192,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.label_count_check.setToolTip("Whether to add counts to the labels.")
         self.label_count_check.setChecked(False)
         self.label_count_check.stateChanged.connect(self.set_label_counts)
-        self.tab1_layout.addWidget(self.label_count_check)
+        label_form.addRow(self.label_count_check)
 
         # Checkbox for whether to show label outlines
         self.label_outlines_check = QtWidgets.QCheckBox("Show label outlines")
@@ -189,25 +201,27 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.label_outlines_check.setChecked(False)
         self.label_outlines_check.stateChanged.connect(self.set_label_outlines)
-        self.tab1_layout.addWidget(self.label_outlines_check)
+        label_form.addRow(self.label_outlines_check)
 
-        # Add horizontal divider
-        self.add_split(self.tab1_layout)
+        ########
+        # Colors
+        ########
+
+        color_group = QtWidgets.QGroupBox("Colors")
+        color_form = QtWidgets.QFormLayout()
+        color_form.setContentsMargins(2, 2, 2, 2)
+        color_form.setVerticalSpacing(2)
+        color_group.setLayout(color_form)
+        self.tab1_layout.addWidget(color_group)
 
         # Add dropdowns to choose color mode
-        layout = QtWidgets.QHBoxLayout()
-        self.tab1_layout.addLayout(layout)
-        layout.addWidget(QtWidgets.QLabel("Color by:"))
-        self.color_combo_box = QtWidgets.QComboBox()
-        layout.addWidget(self.color_combo_box)
 
-        layout = QtWidgets.QHBoxLayout()
-        self.tab1_layout.addLayout(layout)
-        layout.addWidget(QtWidgets.QLabel("Palette:"))
+        self.color_combo_box = QtWidgets.QComboBox()
+        color_form.addRow("Color by:", self.color_combo_box)
         self.palette_combo_box = QtWidgets.QComboBox()
-        layout.addWidget(self.palette_combo_box)
+        color_form.addRow("Palette:", self.palette_combo_box)
         self.palette_combo_box.setToolTip(
-            "The color palette to use when coloring by labels. Ignored if column contains colors."
+            "The color palette to use when coloring by labels. Ignored if column contains colors or if coloring by clusters."
         )
         self.palette_combo_box.addItems(
             [
@@ -224,7 +238,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.palette_combo_box.currentIndexChanged.connect(self.set_colors)
 
         self.add_group_check = QtWidgets.QCheckBox("Add as group")
-        self.add_group_check.setToolTip("Whether to add neurons as group when selected")
+        self.add_group_check.setToolTip("Whether to add neurons as group to the viewer when selected")
         self.add_group_check.stateChanged.connect(self.set_add_group)
         self.add_group_check.setChecked(True)
         self.tab1_layout.addWidget(self.add_group_check)
@@ -241,69 +255,11 @@ class ScatterControls(QtWidgets.QWidget):
         self.empty_deselect.stateChanged.connect(self.set_empty_deselect)
         self.tab1_layout.addWidget(self.empty_deselect)
 
-        # Add horizontal divider
-        self.add_split(self.tab1_layout)
-
         # This would make it so the legend does not stretch when
         # we resize the window vertically
         self.tab1_layout.addStretch(1)
 
         return
-
-    def build_neuroglancer_gui(self):
-        # Add buttons to generate neuroglancer scene
-        self.ngl_open_button = QtWidgets.QPushButton("Open in browser")
-        self.ngl_open_button.setToolTip(
-            "Open the current scene in a new browser window"
-        )
-        self.ngl_open_button.clicked.connect(self.ngl_open)
-        self.tab3_layout.addWidget(self.ngl_open_button)
-
-        self.ngl_copy_button = QtWidgets.QPushButton("Copy to clipboard")
-        self.ngl_copy_button.setToolTip("Copy the current scene to the clipboard")
-        self.ngl_copy_button.clicked.connect(self.ngl_copy)
-        self.tab3_layout.addWidget(self.ngl_copy_button)
-
-        # Add checkbox to determine whether to use colours
-        self.ngl_use_colors = QtWidgets.QCheckBox("Use colors")
-        self.ngl_use_colors.setToolTip(
-            "Whether to use re-use colors from bigclust for the neuroglancer scene. If False, colours will be determined by neuroglancer."
-        )
-        self.ngl_use_colors.setChecked(True)
-        self.tab3_layout.addWidget(self.ngl_use_colors)
-
-        # Dropdown to choose whether to split neurons into layers other than source
-        self.tab3_layout.addWidget(QtWidgets.QLabel("Group neurons into layers by:"))
-        self.ngl_split_combo_box = QtWidgets.QComboBox()
-        self.ngl_split_combo_box.addItem("Source")
-        self.ngl_split_combo_box.addItem("Color")
-        self.ngl_split_combo_box.addItem("Label")
-        self.ngl_split_combo_box.setToolTip(
-            "Determine how neurons are grouped into layers."
-        )
-        self.tab3_layout.addWidget(self.ngl_split_combo_box)
-
-        # Checkbox for whether to cache neurons
-        self.ngl_cache_neurons = QtWidgets.QCheckBox("Cache neurons")
-        self.ngl_cache_neurons.setToolTip("Whether cache neuron meshes.")
-        if hasattr(self.figure, "ngl_viewer"):
-            self.ngl_cache_neurons.setChecked(self.figure.ngl_viewer.use_cache)
-        else:
-            self.ngl_cache_neurons.setChecked(False)
-        self.ngl_cache_neurons.stateChanged.connect(self.set_ngl_cache)
-        self.tab3_layout.addWidget(self.ngl_cache_neurons)
-
-        # Checkbox for debug mode
-        self.ngl_debug_mode = QtWidgets.QCheckBox("Debug mode")
-        self.ngl_debug_mode.setToolTip(
-            "Whether to show debug information for the neuroglancer view"
-        )
-        self.ngl_debug_mode.setChecked(False)
-        self.ngl_debug_mode.stateChanged.connect(self.set_ngl_debug)
-        self.tab3_layout.addWidget(self.ngl_debug_mode)
-
-        # This makes it so the legend does not stretch
-        self.tab3_layout.addStretch(1)
 
     def build_settings_gui(self):
         # Add dropdown to determine render mode
@@ -407,164 +363,6 @@ class ScatterControls(QtWidgets.QWidget):
 
         # This makes it so the legend does not stretch
         self.tab4_layout.addStretch(1)
-
-    def build_annotation_gui(self):
-        # Add buttons to push annotations
-        self.push_ann_button = QtWidgets.QPushButton("Push annotations")
-        self.push_ann_button.setToolTip(
-            "Push the current annotation to selected fields"
-        )
-        self.push_ann_button.clicked.connect(self.push_annotation)
-        self.tab2_layout.addWidget(self.push_ann_button)
-
-        self.ann_combo_box = QtWidgets.QComboBox()
-        self.ann_combo_box.setEditable(True)
-        self.tab2_layout.addWidget(self.ann_combo_box)
-
-        self.clear_ann_button = QtWidgets.QPushButton("Clear annotations")
-        self.clear_ann_button.setToolTip("Clear the current annotations")
-        self.clear_ann_button.clicked.connect(self.clear_annotation)
-        self.tab2_layout.addWidget(self.clear_ann_button)
-
-        self.tab2_layout.addWidget(QtWidgets.QLabel("Which fields to set/clear:"))
-
-        # Create a horizontal layout to hold the two vertical layouts:
-        # one for Clio and one for FlyTable
-        horizontal_layout = QtWidgets.QHBoxLayout()
-        self.tab2_layout.addLayout(horizontal_layout)
-
-        # Create the first vertical layout
-        left_vertical_layout = QtWidgets.QVBoxLayout()
-        horizontal_layout.addLayout(left_vertical_layout)
-
-        left_vertical_layout.addWidget(QtWidgets.QLabel("Clio:"))
-        self.set_clio_type = QtWidgets.QCheckBox("type")
-        self.set_clio_type.setTristate(True)
-        self.set_clio_type.setToolTip(
-            "If fully checked, will edit both type and instance. Set to partially checked leave instance unchanged."
-        )
-        left_vertical_layout.addWidget(self.set_clio_type)
-        self.set_clio_flywire_type = QtWidgets.QCheckBox("flywire_type")
-        left_vertical_layout.addWidget(self.set_clio_flywire_type)
-        self.set_clio_hemibrain_type = QtWidgets.QCheckBox("hemibrain_type")
-        left_vertical_layout.addWidget(self.set_clio_hemibrain_type)
-        self.set_clio_manc_type = QtWidgets.QCheckBox("manc_type")
-        left_vertical_layout.addWidget(self.set_clio_manc_type)
-
-        # Add a vertical line to separate the layouts
-        vertical_line = QVLine()
-        horizontal_layout.addWidget(vertical_line)
-
-        # Create the second vertical layout
-        right_vertical_layout = QtWidgets.QVBoxLayout()
-        horizontal_layout.addLayout(right_vertical_layout)
-
-        right_vertical_layout.addWidget(QtWidgets.QLabel("FlyTable:"))
-        self.set_flytable_type = QtWidgets.QCheckBox("cell_type")
-        right_vertical_layout.addWidget(self.set_flytable_type)
-        self.set_flytable_mcns_type = QtWidgets.QCheckBox("malecns_type")
-        right_vertical_layout.addWidget(self.set_flytable_mcns_type)
-        self.set_flytable_hemibrain_type = QtWidgets.QCheckBox("hemibrain_type")
-        right_vertical_layout.addWidget(self.set_flytable_hemibrain_type)
-
-        self.tab2_layout.addWidget(QtWidgets.QLabel("Settings:"))
-
-        self.set_sanity_check = QtWidgets.QCheckBox("Sanity checks")
-        self.set_sanity_check.setToolTip("Whether to perform sanity checks")
-        self.set_sanity_check.setChecked(True)
-        self.tab2_layout.addWidget(self.set_sanity_check)
-
-        # Add dropdown to set dimorphism status
-        self.sel_dimorphism_action = QtWidgets.QPushButton(text="Set dimorphism")
-        self.tab2_layout.addWidget(self.sel_dimorphism_action)
-        self.sel_dimorphism_action_menu = QtWidgets.QMenu(self)
-        self.sel_dimorphism_action.setMenu(self.sel_dimorphism_action_menu)
-
-        # Set actions for the dropdown
-        self.sel_dimorphism_action_menu.addAction("Sex-specific")
-        self.sel_dimorphism_action_menu.actions()[-1].triggered.connect(
-            lambda x: self.selected_set_dimorphism("sex-specific")
-        )
-        self.sel_dimorphism_action_menu.addAction("Sexually dimorphic")
-        self.sel_dimorphism_action_menu.actions()[-1].triggered.connect(
-            lambda x: self.selected_set_dimorphism("sexually dimorphic")
-        )
-        self.sel_dimorphism_action_menu.addAction("Pot. sex-specific")
-        self.sel_dimorphism_action_menu.actions()[-1].triggered.connect(
-            lambda x: self.selected_set_dimorphism("potentially sex-specific")
-        )
-        self.sel_dimorphism_action_menu.addAction("Pot. sexually dimorphic")
-        self.sel_dimorphism_action_menu.actions()[-1].triggered.connect(
-            lambda x: self.selected_set_dimorphism("potentially sexually dimorphic")
-        )
-        self.sel_dimorphism_action_menu.addAction("Not dimorphic")
-        self.sel_dimorphism_action_menu.actions()[-1].triggered.connect(
-            lambda x: self.selected_set_dimorphism(None)
-        )
-
-        # Make a separate layout with tighter margins for the buttons
-        grid_layout = QtWidgets.QGridLayout()
-        grid_layout.setContentsMargins(0, 0, 0, 0)  # No margins around the grid
-        grid_layout.setSpacing(0)  # No space between buttons
-        grid_layout.setColumnStretch(1, 1)  # Make the button column stretchable
-        self.tab2_layout.addLayout(grid_layout)
-
-        # Add checkbox + button to set new Clio group
-        checkbox = QtWidgets.QCheckBox(" ")  # Do not remove the whitespace!
-        checkbox.setToolTip("Check to activate the button to set a new Clio group.")
-        checkbox.setChecked(False)
-        checkbox.stateChanged.connect(
-            lambda x: self.clio_group_button.setEnabled(x == 2)
-        )
-        grid_layout.addWidget(checkbox, 0, 0)
-        self.clio_group_button = QtWidgets.QPushButton("Set new Clio group")
-        self.clio_group_button.setToolTip(
-            "Assign new Clio group. This will use the lowest body ID as group ID."
-        )
-        self.clio_group_button.clicked.connect(self.new_clio_group)
-        self.clio_group_button.setEnabled(False)
-        grid_layout.addWidget(self.clio_group_button, 0, 1)
-
-        # Add button to suggest new MCNS type
-        self.suggest_type_button = QtWidgets.QPushButton("Suggest new HB-style type")
-        self.suggest_type_button.setToolTip(
-            "Suggest new Hemibrain-style type based on main input neuropil(s). See console for output."
-        )
-        self.suggest_type_button.clicked.connect(self.suggest_type)
-        grid_layout.addWidget(self.suggest_type_button, 1, 0, 1, -1)
-
-        # Add button to suggest new MCNS type
-        self.suggest_male_type_button = QtWidgets.QPushButton("Suggest male-only type")
-        self.suggest_male_type_button.setToolTip(
-            "Suggest new male-only type based on main input neuropil(s). See console for output."
-        )
-        self.suggest_male_type_button.clicked.connect(self.suggest_male_type)
-        grid_layout.addWidget(self.suggest_male_type_button, 2, 0, 1, -1)
-
-        # Add button to suggest new CB type
-        self.suggest_cb_type_button = QtWidgets.QPushButton("Suggest new CB-type")
-        self.suggest_cb_type_button.setToolTip("Suggest new CBXXXX type.")
-        self.suggest_cb_type_button.clicked.connect(self.suggest_cb_type)
-        grid_layout.addWidget(self.suggest_cb_type_button, 3, 0, 1, -1)
-
-        # Add checkbox + button to set new super type
-        checkbox = QtWidgets.QCheckBox(" ")  # Do not remove the whitespace!
-        checkbox.setToolTip("Check to activate the button to set a new supertype.")
-        checkbox.setChecked(False)
-        checkbox.stateChanged.connect(
-            lambda x: self.set_supertype_button.setEnabled(x == 2)
-        )
-        grid_layout.addWidget(checkbox, 4, 0)
-        self.set_supertype_button = QtWidgets.QPushButton("Set new SuperType")
-        self.set_supertype_button.setToolTip(
-            "Assign selected neurons to a supertype. This will use the lowest ID as supertype ID."
-        )
-        self.set_supertype_button.clicked.connect(self.new_super_type)
-        self.set_supertype_button.setEnabled(False)
-        grid_layout.addWidget(self.set_supertype_button, 4, 1)
-
-        # This makes it so the legend does not stretch
-        self.tab2_layout.addStretch(1)
 
     def build_embeddings_gui(self):
         """Build the GUI for the Embeddings tab."""
@@ -951,9 +749,11 @@ class ScatterControls(QtWidgets.QWidget):
         """Build the GUI for the Clusters tab."""
         # Top action row
         actions_row = QtWidgets.QHBoxLayout()
+        actions_row.setContentsMargins(0, 0, 0, 0)
+        actions_row.setSpacing(0)
         self.tab7_layout.addLayout(actions_row)
 
-        self.cluster_run_button = QtWidgets.QPushButton("Run clustering")
+        self.cluster_run_button = QtWidgets.QPushButton("Run")
         self.cluster_run_button.setToolTip(
             "Partition the data into clusters using the selected algorithm."
         )
@@ -964,6 +764,18 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_clear_button.setToolTip("Reset points to their defaults.")
         self.cluster_clear_button.clicked.connect(self._clear_cluster)
         actions_row.addWidget(self.cluster_clear_button)
+
+        self.cluster_load_button = QtWidgets.QPushButton()
+        self.cluster_load_button.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_DialogOpenButton)
+        )
+        self.cluster_load_button.setAccessibleName("Load")
+        self.cluster_load_button.setToolTip(
+            "Load cluster assignments from a previously exported CSV file."
+        )
+        self.cluster_load_button.clicked.connect(self._load_cluster_labels)
+        actions_row.addWidget(self.cluster_load_button)
+
 
         # Input group
         input_group = QtWidgets.QGroupBox("Input")
@@ -1230,14 +1042,32 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_result_label.setToolTip("Result of the last clustering run.")
         output_form.addRow("Result:", self.cluster_result_label)
 
-        self.cluster_apply_button = QtWidgets.QPushButton("Apply as labels")
+        cluster_output_buttons = QtWidgets.QWidget()
+        cluster_output_buttons_layout = QtWidgets.QHBoxLayout()
+        cluster_output_buttons_layout.setContentsMargins(0, 0, 0, 0)
+        cluster_output_buttons.setLayout(cluster_output_buttons_layout)
+
+        self.cluster_apply_button = QtWidgets.QPushButton("Apply labels")
         self.cluster_apply_button.setToolTip(
             "Write cluster assignments as a metadata column and switch the "
             "label display to show cluster IDs."
         )
         self.cluster_apply_button.setEnabled(False)
-        self.cluster_apply_button.clicked.connect(self._apply_cluster_labels)
-        output_form.addRow(self.cluster_apply_button)
+        self.cluster_apply_button.clicked.connect(
+            lambda _: self.label_combo_box.setCurrentText(CLUSTER_DATA_OPTION)
+        )
+        cluster_output_buttons_layout.addWidget(self.cluster_apply_button)
+
+        self.cluster_export_button = QtWidgets.QPushButton("Export")
+        self.cluster_export_button.setToolTip(
+            "Save the current cluster assignments as a CSV file "
+            "with 'id' and 'bigclust_cluster' columns."
+        )
+        self.cluster_export_button.setEnabled(False)
+        self.cluster_export_button.clicked.connect(self._export_cluster_labels)
+        cluster_output_buttons_layout.addWidget(self.cluster_export_button)
+
+        output_form.addRow(cluster_output_buttons)
 
         # Manual refinement group (hidden until cluster labels are available)
         self.cluster_manual_group = QtWidgets.QGroupBox("Manual Refinement")
@@ -1537,34 +1367,11 @@ class ScatterControls(QtWidgets.QWidget):
             self.figure.show_message(f"Clustering error: {e}", color="red", duration=4)
             return
 
-        if self.figure.metadata is not None:
-            self.figure.metadata[CLUSTER_DATA_COLUMN] = labels.copy()
-
         self._cluster_labels = labels
         self._cluster_labels_original = labels.copy()
-        self._cluster_colors = labels_to_colors(labels, palette="vispy:husl")
-        self._cluster_colors[labels < 0] = (
-            0.5,
-            0.5,
-            0.5,
-            1.0,
-        )  # grey for noise/unassigned
-        self._color_col_before_clustering = self.color_combo_box.currentText()
 
-        # Apply cluster colors
-        self.update_label_combo_boxes()
-        self.color_combo_box.setCurrentText(CLUSTER_DATA_OPTION)
-        # self._apply_cluster_viewer_colors(colors)
-
-        self.update_label_combo_boxes()
-        self._update_cluster_result_label(labels)
-
-        self.cluster_apply_button.setEnabled(True)
-        self._refresh_manual_refinement_controls()
-        self._update_cluster_labels_maybe()
-
-        # Show the colors in the 3D viewer
-        self.color_combo_box.setCurrentText(CLUSTER_DATA_OPTION)
+        # This function takes care of writing cluster labels to metadata, updating the label/color combo boxes, and refreshing the display
+        self._apply_cluster_labels()
 
     def _clear_cluster(self):
         """Reset viewer to the defaults stored in figure metadata."""
@@ -1573,6 +1380,7 @@ class ScatterControls(QtWidgets.QWidget):
         self._cluster_colors = None
         self.cluster_result_label.setText("N/A")
         self.cluster_apply_button.setEnabled(False)
+        self.cluster_export_button.setEnabled(False)
         self.color_combo_box.setCurrentText(self._color_col_before_clustering)
         if getattr(self, "_label_before_clustering", None):
             self.label_combo_box.setCurrentText(self._label_before_clustering)
@@ -1584,34 +1392,133 @@ class ScatterControls(QtWidgets.QWidget):
         if not hasattr(self, "_cluster_labels") or self._cluster_labels is None:
             return
 
-        # Save the current label so we can restore it when clearing
-        self._label_before_clustering = self.label_combo_box.currentText()
-
-        labels = self._cluster_labels
-        unique_clusters = (
-            np.unique(labels[labels >= 0])
-            if (labels >= 0).any()
-            else np.array([], dtype=int)
+        # (Re-)calculate colors
+        self._cluster_colors = labels_to_colors(
+            self._cluster_labels, palette="vispy:husl"
         )
+        self._cluster_colors[self._cluster_labels < 0] = (
+            0.5,
+            0.5,
+            0.5,
+            1.0,
+        )  # grey for noise/unassigned
 
-        label_strings = np.empty(len(labels), dtype=object)
-        label_strings[labels == -1] = "noise"
-        for lbl in unique_clusters:
-            label_strings[labels == lbl] = f"cluster_{lbl}"
+        # Write new cluster labels to metadata
+        if self.figure.metadata is not None:
+            self.figure.metadata[CLUSTER_DATA_COLUMN] = self._cluster_labels.copy()
 
+        # Save the current label and color mode so we can restore it when clearing
+        self._label_before_clustering = self.label_combo_box.currentText()
+        self._color_col_before_clustering = self.color_combo_box.currentText()
+
+        # Update the cluster summary label
+        self._update_cluster_result_label(self._cluster_labels)
+
+        # Make sure the cluster buttons are enabled and the manual refinement controls are visible
+        self.cluster_apply_button.setEnabled(True)
+        self.cluster_export_button.setEnabled(True)
+        self._refresh_manual_refinement_controls()
+
+        # Apply cluster colors
         self.label_combo_box.blockSignals(True)
-        self.update_label_combo_boxes()
+        self.update_label_combo_boxes()  # this update both label and color combo boxes
         self.label_combo_box.blockSignals(False)
 
-        idx = self.label_combo_box.findText(CLUSTER_DATA_OPTION)
-        if idx >= 0:
-            self.label_combo_box.setCurrentIndex(idx)
-            # currentIndexChanged signal triggers set_labels
+        if self.color_combo_box.currentText() != CLUSTER_DATA_OPTION:
+            self.color_combo_box.setCurrentText(
+                CLUSTER_DATA_OPTION
+            )  # this triggers a refresh
+        else:
+            self.set_colors()  # just refresh colors without changing the combo box text
+
+        # For the labels: we don't automatically enforce setting them but if they are set to the cluster column,
+        # we need to trigger an update
+        if self.label_combo_box.currentText() == CLUSTER_DATA_OPTION:
+            self.set_labels()
 
         if self.figure.show_label_lines:
             self.figure.make_label_lines()
 
         self._refresh_manual_refinement_controls()
+
+    def _load_cluster_labels(self):
+        """Open a load dialog and import cluster assignments from a CSV file."""
+        import pandas as pd
+
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Load cluster labels",
+            "",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+
+        try:
+            df = pd.read_csv(path)
+        except Exception as e:
+            self.figure.show_message(
+                f"Failed to read CSV: {e}", color="red", duration=4
+            )
+            return
+
+        if "id" not in df.columns:
+            self.figure.show_message(
+                "CSV must contain 'id' column.", color="red", duration=4
+            )
+            return
+
+        if CLUSTER_DATA_COLUMN in df.columns:
+            cluster_col = CLUSTER_DATA_COLUMN
+        elif "cluster" in df.columns:
+            cluster_col = "cluster"
+        else:
+            self.figure.show_message(
+                f"CSV must contain '{CLUSTER_DATA_COLUMN}' or 'cluster' column for cluster labels.",
+                color="red",
+                duration=4,
+            )
+
+        df[cluster_col] = df[cluster_col].fillna(-1).astype(self.figure.ids.dtype)
+
+        df = df.set_index("id")
+        labels_series = df[cluster_col].reindex(self.figure.ids)
+        if labels_series.isna().any():
+            self.figure.show_message(
+                "Some IDs in the CSV do not match the current data. "
+                "Missing entries will be marked as noise (-1).",
+                color="orange",
+                duration=4,
+            )
+        labels = labels_series.fillna(-1).astype(int).to_numpy()
+
+        self._cluster_labels = labels
+        self._cluster_labels_original = labels.copy()
+
+        # This function takes care of writing cluster labels to metadata, updating the label/color combo boxes, and refreshing the display
+        self._apply_cluster_labels()
+
+    def _export_cluster_labels(self):
+        """Open a save dialog and write cluster assignments to a CSV file."""
+        if not hasattr(self, "_cluster_labels") or self._cluster_labels is None:
+            return
+
+        path, _ = QtWidgets.QFileDialog.getSaveFileName(
+            self,
+            "Export cluster labels",
+            "clusters.csv",
+            "CSV files (*.csv);;All files (*)",
+        )
+        if not path:
+            return
+
+        import pandas as pd
+
+        labels = self._cluster_labels
+        ids = self.figure.ids if hasattr(self.figure, "ids") else np.arange(len(labels))
+
+        df = pd.DataFrame({"id": ids, CLUSTER_DATA_COLUMN: labels})
+        df.to_csv(path, index=False)
 
     def _update_cluster_result_label(self, labels):
         """Update clustering summary label from integer cluster assignments."""
@@ -1695,25 +1602,6 @@ class ScatterControls(QtWidgets.QWidget):
 
         return None
 
-    def _apply_cluster_labels_to_view(self):
-        """Apply current cluster labels to 2D/3D colors and update status text."""
-        labels = self._ensure_cluster_labels_loaded()
-        if labels is None:
-            return
-
-        colors = labels_to_colors(labels, palette="vispy:husl")
-        self.figure.set_colors(colors, sync_to_viewer=True)
-        # self._apply_cluster_viewer_colors(colors)
-        self._update_cluster_result_label(labels)
-        self.cluster_apply_button.setEnabled(True)
-
-        self._update_cluster_labels_maybe()
-
-    def _update_cluster_labels_maybe(self):
-        """Trigger an update to the labels shown in the 3D viewer, if "cluster" is the active label."""
-        if self.label_combo_box.currentText() == CLUSTER_DATA_OPTION:
-            self._apply_cluster_labels()  # Triggers an update
-
     def _refresh_manual_refinement_controls(self):
         """Show/hide and repopulate manual refinement controls."""
         if not hasattr(self, "cluster_manual_group"):
@@ -1766,7 +1654,7 @@ class ScatterControls(QtWidgets.QWidget):
         labels = labels.copy()
         labels[indices] = int(cluster_id)
         self._cluster_labels = labels
-        self._apply_cluster_labels_to_view()
+        self._apply_cluster_labels()
         self._refresh_manual_refinement_controls()
 
     @requires_selection
@@ -1788,7 +1676,7 @@ class ScatterControls(QtWidgets.QWidget):
         labels = labels.copy()
         labels[indices] = next_cluster_id
         self._cluster_labels = labels
-        self._apply_cluster_labels_to_view()
+        self._apply_cluster_labels()
         self._refresh_manual_refinement_controls()
 
     @requires_selection
@@ -1808,7 +1696,7 @@ class ScatterControls(QtWidgets.QWidget):
         labels = labels.copy()
         labels[indices] = np.asarray(original, dtype=int)[indices]
         self._cluster_labels = labels
-        self._apply_cluster_labels_to_view()
+        self._apply_cluster_labels()
         self._refresh_manual_refinement_controls()
 
     def add_tooltip(self, widget, text, anchor="group_label"):
@@ -1909,7 +1797,10 @@ class ScatterControls(QtWidgets.QWidget):
                 text = combo_box.itemText(i)
                 if text in ("Default", CLUSTER_DATA_OPTION):
                     continue
-                if self.figure.metadata is None or text not in self.figure.metadata.columns:
+                if (
+                    self.figure.metadata is None
+                    or text not in self.figure.metadata.columns
+                ):
                     combo_box.removeItem(i)
 
             # Now add missing items
@@ -2047,293 +1938,6 @@ class ScatterControls(QtWidgets.QWidget):
             is_feature_input and self.pca_check.isChecked()
         )
 
-    @requires_selection
-    def selected_set_dimorphism(self, dimorphism):
-        """Push dimorphism to Clio/FlyTable."""
-        assert dimorphism in (
-            "sex-specific",
-            "sexually dimorphic",
-            "potentially sex-specific",
-            "potentially sexually dimorphic",
-            None,
-        )
-        selected_ids = self.figure.selected_ids
-
-        # Extract FlyWire root and MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        rootids, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        # Get the annotation
-        import clio
-
-        global CLIO_CLIENT
-        if CLIO_CLIENT is None:
-            CLIO_CLIENT = clio.Client(dataset="CNS")
-
-        import ftu
-
-        # Submit the annotations
-        self.futures[(dimorphism, uuid.uuid4())] = self.pool.submit(
-            _push_dimorphism,
-            dimorphism=dimorphism,
-            bodyids=bodyids,
-            rootids=rootids,
-            clio=clio,  #  pass the module
-            ftu=ftu,  #  pass the module
-            figure=self.figure,
-        )
-
-    @requires_selection
-    def push_annotation(self):
-        """Push the current annotation to Clio/FlyTable."""
-        if not any(
-            (
-                self.set_clio_type.isChecked(),
-                self.set_clio_flywire_type.isChecked(),
-                self.set_clio_hemibrain_type.isChecked(),
-                self.set_clio_manc_type.isChecked(),
-                self.set_flytable_type.isChecked(),
-                self.set_flytable_mcns_type.isChecked(),
-                self.set_flytable_hemibrain_type.isChecked(),
-            )
-        ):
-            self.figure.show_message("No fields to push", color="red", duration=2)
-            return
-
-        label = self.ann_combo_box.currentText()
-        if not label:
-            self.figure.show_message("No label to push", color="red", duration=2)
-            return
-
-        # Extract FlyWire root and MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        selected_ids = self.figure.selected_ids
-        rootids, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        # Which fields to set
-        clio_to_set = []
-        if self.set_clio_type.isChecked():
-            clio_to_set.append("type")
-            # If the checkbox is fully checked also set the instance
-            type_state = self.set_clio_type.checkState()
-            if type_state == QtCore.Qt.CheckState.Checked:
-                clio_to_set.append("instance")
-        if self.set_clio_flywire_type.isChecked():
-            clio_to_set.append("flywire_type")
-        if self.set_clio_hemibrain_type.isChecked():
-            clio_to_set.append("hemibrain_type")
-        if self.set_clio_manc_type.isChecked():
-            clio_to_set.append("manc_type")
-        clio_to_set = tuple(clio_to_set)
-
-        flytable_to_set = []
-        if self.set_flytable_type.isChecked():
-            flytable_to_set.append("cell_type")
-        if self.set_flytable_mcns_type.isChecked():
-            flytable_to_set.append("malecns_type")
-        if self.set_flytable_hemibrain_type.isChecked():
-            flytable_to_set.append("hemibrain_type")
-        flytable_to_set = tuple(flytable_to_set)
-
-        # Get the annotation
-        import clio
-
-        global CLIO_CLIENT
-        if CLIO_CLIENT is None:
-            CLIO_CLIENT = clio.Client(dataset="CNS")
-
-        import ftu
-
-        # Submit the annotations
-        self.futures[(label, uuid.uuid4())] = self.pool.submit(
-            _push_annotations,
-            label=label,
-            clio_to_set=clio_to_set,
-            flytable_to_set=flytable_to_set,
-            bodyids=bodyids if clio_to_set else None,
-            rootids=rootids if flytable_to_set else None,
-            clio=clio,  #  pass the module
-            ftu=ftu,  #  pass the module
-            figure=self.figure,
-            controls=self,
-        )
-
-        if clio_to_set and len(bodyids) and CLIO_ANN is not None:
-            # Update the CLIO annotations
-            for col in clio_to_set:
-                CLIO_ANN.loc[
-                    CLIO_ANN.get("bodyId", CLIO_ANN.get("bodyid")).isin(bodyids), col
-                ] = label
-
-    @requires_selection
-    def clear_annotation(self):
-        """Clear the currently selected fields."""
-        if not any(
-            (
-                self.set_clio_type.isChecked(),
-                self.set_clio_flywire_type.isChecked(),
-                self.set_clio_manc_type.isChecked(),
-                self.set_clio_hemibrain_type.isChecked(),
-                self.set_flytable_type.isChecked(),
-                self.set_flytable_mcns_type.isChecked(),
-                self.set_flytable_hemibrain_type.isChecked(),
-            )
-        ):
-            self.figure.show_message("No fields to clear", color="red", duration=2)
-            return
-
-        # Extract FlyWire root and MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        selected_ids = self.figure.selected_ids
-        rootids, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        # Which fields to clear
-        clio_to_clear = []
-        if self.set_clio_type.isChecked():
-            clio_to_clear.append("type")
-        if self.set_clio_flywire_type.isChecked():
-            clio_to_clear.append("flywire_type")
-        if self.set_clio_hemibrain_type.isChecked():
-            clio_to_clear.append("hemibrain_type")
-        if self.set_clio_manc_type.isChecked():
-            clio_to_clear.append("manc_type")
-        clio_to_clear = tuple(clio_to_clear)
-
-        flytable_to_clear = []
-        if self.set_flytable_type.isChecked():
-            flytable_to_clear.append("cell_type")
-        if self.set_flytable_mcns_type.isChecked():
-            flytable_to_clear.append("malecns_type")
-        if self.set_flytable_hemibrain_type.isChecked():
-            flytable_to_clear.append("hemibrain_type")
-        flytable_to_clear = tuple(flytable_to_clear)
-
-        # Get the annotation
-        import clio
-
-        global CLIO_CLIENT
-        if CLIO_CLIENT is None:
-            CLIO_CLIENT = clio.Client(dataset="CNS")
-
-        import ftu
-
-        # Submit the annotations
-        self.futures[uuid.uuid4()] = self.pool.submit(
-            _clear_annotations,
-            bodyids=bodyids if clio_to_clear else None,
-            rootids=rootids if flytable_to_clear else None,
-            clio_to_clear=clio_to_clear,
-            flytable_to_clear=flytable_to_clear,
-            clio=clio,  #  pass the module
-            ftu=ftu,  #  pass the module
-            figure=self.figure,
-            controls=self,
-        )
-
-    @requires_selection
-    def new_super_type(self):
-        """Set a new super type for given IDs."""
-        # N.B. This requires meta data to be present.
-        selected_ids = self.figure.selected_ids
-        rootids, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        # New type name
-        new_type = min(selected_ids)
-
-        # Get the clio module
-        import clio
-
-        global CLIO_CLIENT
-        if CLIO_CLIENT is None:
-            CLIO_CLIENT = clio.Client(dataset="CNS")
-
-        import ftu
-
-        # Submit the annotations
-        self.futures[(new_type, uuid.uuid4())] = self.pool.submit(
-            _push_super_type,
-            super_type=new_type,
-            bodyids=bodyids,
-            rootids=rootids,
-            clio=clio,  #  pass the module
-            sanity_checks=self.set_sanity_check.isChecked(),
-            ftu=ftu,
-            figure=self.figure,
-        )
-
-    @requires_selection
-    def new_clio_group(self):
-        """Set a new Clio group for given IDs."""
-        # MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        selected_ids = self.figure.selected_ids
-        _, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        if not len(bodyids):
-            self.figure.show_message(
-                "No MCNS neurons selected", color="red", duration=2
-            )
-            return
-
-        group = min(bodyids)
-
-        # Get the clio module
-        import clio
-
-        global CLIO_CLIENT
-        if CLIO_CLIENT is None:
-            CLIO_CLIENT = clio.Client(dataset="CNS")
-
-        # Submit the annotations
-        self.futures[(group, uuid.uuid4())] = self.pool.submit(
-            _push_group,
-            group=group,
-            bodyids=bodyids,
-            clio=clio,  #  pass the module
-            figure=self.figure,
-        )
-
-    @requires_selection
-    def suggest_type(self):
-        """Suggest a new type for given IDs."""
-        selected_ids = self.figure.selected_ids
-        # Extract FlyWire root and MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        _, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        if not len(bodyids):
-            self.figure.show_message(
-                "No MCNS neurons selected", color="red", duration=2
-            )
-            return
-
-        # Threading this doesn't make much sense
-        suggest_new_label(bodyids=bodyids)
-
-    @requires_selection
-    def suggest_male_type(self):
-        """Suggest a new male-only type for given IDs."""
-        selected_ids = self.figure.selected_ids
-        # Extract FlyWire root and MaleCNS body IDs from the selected IDs
-        # N.B. This requires meta data to be present.
-        _, bodyids = sort_ids(selected_ids, self.figure.selected_meta)
-
-        if not len(bodyids):
-            self.figure.show_message(
-                "No MCNS neurons selected", color="red", duration=2
-            )
-            return
-
-        # Threading this doesn't make much sense
-        suggest_new_label(bodyids=bodyids, male_only=True)
-
-    def suggest_cb_type(self):
-        """Suggest a new CB type."""
-        # Threading this doesn't make much sense
-        import ftu
-
-        print("Next free CB tyoe:", ftu.info.get_next_cb_id())
-
     def set_add_group(self):
         """Set whether to add neurons as group when selected."""
         self.figure._add_as_group = self.add_group_check.isChecked()
@@ -2442,9 +2046,6 @@ class ScatterControls(QtWidgets.QWidget):
 
     def set_colors(self, sync_to_viewer=True):
         """Set the color mode."""
-        # mode = self.color_combo_box.currentText()
-        # self.figure.set_viewer_color_mode(mode.lower())
-
         color_col = self.color_combo_box.currentText()
 
         if not color_col:
@@ -2520,7 +2121,7 @@ class ScatterControls(QtWidgets.QWidget):
         else:
             labels = self.meta_data[label].astype(str).fillna("").values
 
-        # For labels that were set manually by the user (via pushing annotations)
+        # For labels that were set manually by the user (e.g. via pushing annotations)
         for i, label in self.label_overrides.items():
             # Label overrides {dend index: label}
             # We need to translate into original indices
@@ -2878,455 +2479,3 @@ class QVLine(QtWidgets.QFrame):
         super(QVLine, self).__init__()
         self.setFrameShape(QtWidgets.QFrame.VLine)
         self.setFrameShadow(QtWidgets.QFrame.Sunken)
-
-
-def _push_annotations(
-    label,
-    bodyids,
-    rootids,
-    clio,
-    ftu,
-    clio_to_set,
-    flytable_to_set,
-    figure=None,
-    controls=None,
-):
-    """Push the current annotation to Clio/FlyTable."""
-    try:
-        if bodyids is not None and len(bodyids) and clio_to_set:
-            ann = pd.DataFrame()
-            ann["bodyid"] = bodyids
-            for field in clio_to_set:
-                if field == "instance":
-                    continue
-                ann[field] = label
-
-            # Generate instances
-            if "instance" in clio_to_set and "type" in clio_to_set:
-                data = clio.fetch_annotations(bodyids)
-                sides = {}
-                for col in ("root_side", "soma_side"):
-                    if col in data.columns:
-                        sides.update(zip(data["bodyid"], data[col]))
-                ann["instance"] = [f"{label}_{sides.get(bid, 'NA')}" for bid in bodyids]
-
-            clio.set_annotations(ann)
-        if rootids is not None and len(rootids) and flytable_to_set:
-            kwargs = {}
-
-            for field in flytable_to_set:
-                kwargs[field] = label
-
-                if field in ("cell_type", "hemibrain_type", "malecns_type"):
-                    kwargs[f"{field}_source"] = os.environ.get(
-                        "BC_ANNOTATION_USER", "bigclust"
-                    )
-
-            ftu.info.update_fields(
-                rootids,
-                **kwargs,
-                id_col="root_783",
-                dry_run=False,
-            )
-
-        if clio_to_set and flytable_to_set:
-            msg = f"Set {label} for {len(bodyids)} maleCNS and {len(rootids)} FlyWire neurons"
-        elif clio_to_set:
-            msg = f"Set {label} for {len(bodyids)} male CNS neurons"
-        elif flytable_to_set:
-            msg = f"Set {label} for {len(rootids)} FlyWire neurons"
-
-        print(f"{msg}:")
-        if bodyids is not None and len(bodyids) and clio_to_set:
-            print("  ", bodyids)
-        if rootids is not None and len(rootids) and flytable_to_set:
-            print("  ", rootids)
-
-        if figure:
-            # Update the labels in the figure
-            if clio_to_set and bodyids is not None:
-                ind = figure.selected[np.isin(figure.selected_ids, bodyids)]
-                figure.set_labels(ind, f"{label}(!)")
-                controls.label_overrides.update({i: f"{label}(!)" for i in ind})
-            if flytable_to_set and rootids is not None:
-                ind = figure.selected[np.isin(figure.selected_ids, rootids)]
-                figure.set_labels(ind, f"{label}(!)")
-                controls.label_overrides.update({i: f"{label}(!)" for i in ind})
-
-            # Show the message
-            figure.show_message(msg, color="lightgreen", duration=2)
-    except BaseException as e:
-        if figure:
-            figure.show_message(
-                "Error pushing annotations (see console)", color="red", duration=2
-            )
-        traceback.print_exc()
-        raise
-
-
-def _push_dimorphism(
-    dimorphism,
-    bodyids,
-    rootids,
-    clio,
-    ftu,
-    figure=None,
-):
-    """Push dimorphism status to Clio/FlyTable."""
-    try:
-        if bodyids is not None and len(bodyids):
-            label = (
-                dimorphism.replace("sex-specific", "male-specific")
-                if dimorphism
-                else None
-            )
-
-            clio.set_fields(bodyids, dimorphism=label)
-
-        if rootids is not None and len(rootids):
-            label = (
-                dimorphism.replace("sex-specific", "female-specific")
-                if dimorphism
-                else None
-            )
-
-            ftu.info.update_fields(
-                rootids, dimorphism=label, id_col="root_783", dry_run=False
-            )
-
-        if bodyids is not None and rootids is not None:
-            msg = f"Set dimorphism to '{dimorphism}' for {len(bodyids)} maleCNS and {len(rootids)} FlyWire neurons"
-        elif bodyids is not None:
-            msg = (
-                f"Set dimorphism to '{dimorphism}' for {len(bodyids)} male CNS neurons"
-            )
-        elif rootids is not None:
-            msg = f"Set dimorphism to '{dimorphism}' for {len(rootids)} FlyWire neurons"
-
-        print(f"{msg}:")
-        if bodyids is not None and len(bodyids):
-            print("  ", bodyids)
-        if rootids is not None and len(rootids):
-            print("  ", rootids)
-
-        if figure:
-            # Show the message
-            figure.show_message(msg, color="lightgreen", duration=2)
-    except BaseException as e:
-        if figure:
-            figure.show_message(
-                "Error pushing dimorphism status (see console)", color="red", duration=2
-            )
-        traceback.print_exc()
-        raise
-
-
-def _push_super_type(
-    super_type,
-    bodyids,
-    rootids,
-    clio,
-    ftu,
-    sanity_checks=True,
-    figure=None,
-):
-    """Push supertype to Clio/FlyTable."""
-    try:
-        # Make sure supertype is a string
-        super_type = str(super_type)
-
-        if bodyids is not None and len(bodyids):
-            clio.set_fields(bodyids, supertype=super_type)
-
-        if rootids is not None and len(rootids):
-            ftu.info.update_fields(
-                rootids, supertype=super_type, id_col="root_783", dry_run=False
-            )
-
-        if bodyids is not None and rootids is not None:
-            msg = f"Set super type to '{super_type}' for {len(bodyids)} maleCNS and {len(rootids)} FlyWire neurons"
-        elif bodyids is not None:
-            msg = (
-                f"Set super type to '{super_type}' for {len(bodyids)} male CNS neurons"
-            )
-        elif rootids is not None:
-            msg = f"Set super type to '{super_type}' for {len(rootids)} FlyWire neurons"
-
-        print(f"{msg}:")
-        if bodyids is not None and len(bodyids):
-            print("  ", bodyids)
-        if rootids is not None and len(rootids):
-            print("  ", rootids)
-
-        if figure:
-            # Show the message
-            figure.show_message(msg, color="lightgreen", duration=2)
-    except BaseException as e:
-        if figure:
-            figure.show_message(
-                "Error pushing super type (see console)", color="red", duration=2
-            )
-        traceback.print_exc()
-        raise
-
-
-def _clear_annotations(
-    bodyids,
-    rootids,
-    clio,
-    ftu,
-    clio_to_clear,
-    flytable_to_clear,
-    figure=None,
-    controls=None,
-):
-    """Clear the given fields from to Clio/FlyTable."""
-    cleared_fields = []
-    cleared_ids = []
-    try:
-        if bodyids is not None and len(bodyids) and clio_to_clear:
-            kwargs = {}
-
-            for field in clio_to_clear:
-                kwargs[field] = None
-                cleared_fields.append(f"`{field}`")
-
-            clio.set_fields(bodyids, **kwargs)
-            cleared_ids.append(f"{len(bodyids)} maleCNS")
-
-        if rootids is not None and len(rootids) and flytable_to_clear:
-            kwargs = {}
-
-            for field in flytable_to_clear:
-                kwargs[field] = None
-                cleared_fields.append(f"`{field}`")
-
-                if field in ("cell_type", "hemibrain_type", "malecns_type"):
-                    kwargs[f"{field}_source"] = None
-
-            ftu.info.update_fields(
-                rootids,
-                **kwargs,
-                id_col="root_783",
-                dry_run=False,
-            )
-            cleared_fields.append("`malecns_type`")
-            cleared_ids.append(f"{len(rootids)} FlyWire")
-
-        msg = f"Cleared {', '.join(cleared_fields)} for {' and '.join(cleared_ids)} neuron(s)"
-
-        print(f"{msg}:")
-        if bodyids is not None and len(bodyids) and clio_to_clear:
-            print("  ", bodyids)
-        if rootids is not None and len(rootids) and flytable_to_clear:
-            print("  ", rootids)
-
-        if figure:
-            # Update the labels in the figure
-            if clio_to_clear and bodyids is not None:
-                ind = figure.selected[np.isin(figure.selected_ids, bodyids)]
-                figure.set_labels(ind, "(cleared)(!)")
-                controls.label_overrides.update({i: "(cleared)(!)" for i in ind})
-            if flytable_to_clear and rootids is not None:
-                ind = figure.selected[np.isin(figure.selected_ids, rootids)]
-                figure.set_labels(ind, "(cleared)(!)")
-                controls.label_overrides.update({i: "(cleared)(!)" for i in ind})
-
-            # Show the message
-            figure.show_message(msg, color="lightgreen", duration=2)
-    except:
-        if figure:
-            figure.show_message(
-                "Error pushing annotations (see console)", color="red", duration=2
-            )
-        traceback.print_exc()
-        raise
-
-
-def _push_group(
-    group,
-    bodyids,
-    clio,
-    figure=None,
-):
-    """Push group to Clio."""
-    try:
-        if bodyids is not None:
-            clio.set_fields(bodyids, group=group)
-
-        msg = f"Set group {group} for {len(bodyids)} maleCNS neurons"
-
-        print(f"{msg}:")
-        print("  ", bodyids)
-
-        if figure:
-            # Update the labels in the figure
-            figure.set_labels(
-                figure.selected[np.isin(figure.selected_ids, bodyids)],
-                f"group_{group}(!)",
-            )
-            # Show the message
-            figure.show_message(msg, color="lightgreen", duration=2)
-    except:
-        if figure:
-            figure.show_message(
-                "Error pushing annotations (see console)", color="red", duration=2
-            )
-        traceback.print_exc()
-        raise
-
-
-def suggest_new_label(bodyids, male_only=False):
-    """Suggest a new male-only label."""
-
-    # First we need to find the main input neuropil for these neurons
-    import neuprint as neu
-
-    global NEUPRINT_CLIENT
-    if NEUPRINT_CLIENT is None:
-        NEUPRINT_CLIENT = neu.Client("https://neuprint-cns.janelia.org", dataset="cns")
-
-    meta, roi = neu.fetch_neurons(
-        neu.NeuronCriteria(bodyId=bodyids), client=NEUPRINT_CLIENT
-    )
-
-    # Drop non-primary ROIs
-    roi = roi[roi.roi.isin(NEUPRINT_CLIENT.primary_rois)]
-
-    # Remove the hemisphere information
-    roi["roi"] = roi.roi.str.replace("(R)", "").str.replace("(L)", "")
-
-    # Find the ROIs that collectively hold > 50% of the neurons input
-    roi_in = roi.groupby("roi").post.sum().sort_values(ascending=False)
-    roi_in = roi_in / roi_in.sum()
-
-    global HB_ANN
-    if HB_ANN is None:
-        HB_ANN = pd.read_csv(
-            "https://github.com/flyconnectome/flywire_annotations/raw/refs/heads/main/supplemental_files/Supplemental_file5_hemibrain_meta.csv"
-        )
-
-    import cocoa as cc
-
-    global CLIO_ANN
-    if CLIO_ANN is None:
-        print("Fetching Clio annotations...")
-        CLIO_ANN = cc.MaleCNS().get_annotations()
-
-    print("Suggested cell type for IDs:", bodyids)
-    for roi in roi_in.index.values[:4]:
-        if not male_only:
-            # Check if we already have hemibrain types for this ROI
-            this_hb = np.sort(
-                HB_ANN[
-                    HB_ANN.type.str.match(f"{roi}\d+", na=False)
-                ].morphology_type.unique()
-            )
-
-            # Extract the highest hemibrain type ID
-            min_id = 0
-            if len(this_hb):
-                min_id = int(this_hb[-1][len(roi) : len(roi) + 3])
-
-            # Check if we already have male CNS types for this ROI
-            this_mcns = CLIO_ANN[
-                CLIO_ANN.type.str.match(f"{roi}\d+", na=False)
-            ].type.unique()
-            this_mcns = np.sort([t for ty in this_mcns for t in ty.split()])
-            this_mcns_m = this_mcns[[t.endswith("m") for t in this_mcns]]
-            this_mcns_non_m = this_mcns[[not t.endswith("m") for t in this_mcns]]
-
-            if len(this_mcns):
-                min_id = max(min_id, int(this_mcns_non_m[-1][len(roi) : len(roi) + 3]))
-
-            new_id = min_id + 1
-
-            # Make sure we're not running into m-types
-            if len(this_mcns_m):
-                min_id_m = int(this_mcns_m[0][len(roi) : len(roi) + 3])
-                max_id_m = int(this_mcns_m[-1][len(roi) : len(roi) + 3])
-
-                if (new_id >= min_id_m) and (new_id <= max_id_m):
-                    print(
-                        f"Next free ID in roi '{roi}' would be {new_id:03}, but this is already taken by an m-type."
-                    )
-                    continue
-
-            print(f"{roi}{new_id:03} ({roi_in[roi]:.2%})")
-        else:
-            # Check if we already have male-specific types for this ROI
-            this_mcns = CLIO_ANN[
-                CLIO_ANN.type.str.match(f"{roi}\d+m", na=False)
-            ].type.unique()
-
-            if len(this_mcns):
-                new_id = max([int(t[len(roi) : len(roi) + 3]) for t in this_mcns]) + 1
-            else:
-                # Check if we already have hemibrain types for this ROI
-                this_hb = HB_ANN[
-                    HB_ANN.type.str.match(f"{roi}\d+", na=False)
-                ].morphology_type.unique()
-
-                if len(this_hb):
-                    highest_hb = max([int(t[len(roi) : len(roi) + 1]) for t in this_hb])
-
-                    # Start with the next hundred after the highest hemibrain type
-                    new_id = (highest_hb // 100 + 1) * 100
-                    if (new_id - highest_hb) < 10:
-                        new_id += 100
-                else:
-                    new_id = 1
-
-            print(f"{roi}{new_id:03}m ({roi_in[roi]:.2%})")
-
-
-def is_root_id(x):
-    """Check if the ID is a root ID (as opposed to a body ID) based on its length."""
-    if not isinstance(x, (np.ndarray, tuple, list)):
-        x = [x]
-    return np.array([len(str(i)) > 15 for i in x])
-
-
-def sort_ids(ids, meta):
-    """Sort given IDs into FlyWire root IDs and male CNS body IDs.
-
-    Parameters
-    ----------
-    ids :       array-like
-                IDs to sort.
-    meta :      DataFrame
-                Meta data for the neurons. Order should match the IDs.
-                This is used to determine whether the IDs are FlyWire root IDs
-                or Male CNS body IDs. This requires are `dataset` column
-                which, by convention, uses e.g. `Fw` or `FlyWire` + a side suffix
-                for FlyWire and `Mcns` or `MaleCNS` + a side suffix for the
-                Male CNS.
-
-    Returns
-    -------
-    rootids :   array-like
-                FlyWire root IDs.
-    bodyids :   array-like
-                Male CNS body IDs.
-
-    """
-    ids = np.asarray(ids)
-
-    assert "dataset" in meta.columns, "Meta data must have a 'dataset' column"
-
-    # Process dataset column
-    dataset_lower = meta.dataset.fillna("").str.lower()
-
-    # Get FlyWire root IDs
-    is_fw_root = dataset_lower.str.startswith("fw") | dataset_lower.str.startswith(
-        "flywire"
-    )
-    rootids = ids[is_fw_root]
-
-    # Get MaleCNS body IDs
-    is_mcns = dataset_lower.str.startswith("mcns") | dataset_lower.str.startswith(
-        "malecns"
-    )
-    bodyids = ids[is_mcns]
-
-    return rootids, bodyids

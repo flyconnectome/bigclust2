@@ -59,7 +59,7 @@ class ScatterFigure(BaseFigure):
             ),
         )
 
-        # This group will hold text labels that need to move but not scale with the dendrogram
+        # This group will hold text labels that need to move but not scale with the figure
         self.text_group = gfx.Group()
         self.scene.add(self.text_group)
 
@@ -68,7 +68,7 @@ class ScatterFigure(BaseFigure):
         self.label_group.visible = True
         self.text_group.add(self.label_group)
 
-        # Add some keyboard shortcuts for moving and scaling the dendrogam
+        # Add some keyboard shortcuts for moving and scaling the figure
         def move_camera(x, y):
             self.camera.world.x += x
             self.camera.world.y += y
@@ -147,13 +147,13 @@ class ScatterFigure(BaseFigure):
 
     @property
     def labels(self):
-        """Return the labels of leafs in the dendrogram."""
+        """Return the labels of leafs in the figure."""
         return self._labels
 
     @labels.setter
     @update_figure
     def labels(self, x):
-        """Set the labels of leafs in the dendrogram."""
+        """Set the labels of leafs in the figure."""
         if x is None:
             self._labels = None
             self._label_visuals = None
@@ -303,7 +303,7 @@ class ScatterFigure(BaseFigure):
 
     @property
     def selected_ids(self):
-        """Return the IDs of selected leafs in the dendrogram."""
+        """Return the IDs of selected leafs in the figure."""
         if self.selected is None or not len(self.selected):
             return None
         if self.ids is None:
@@ -311,8 +311,17 @@ class ScatterFigure(BaseFigure):
         return self.ids[self.selected]
 
     @property
+    def selected_ids_dataset(self):
+        """Return the IDs and datasets of selected leafs in the figure."""
+        if self.selected is None or not len(self.selected):
+            return None
+        if self.ids is None or self.datasets is None:
+            raise ValueError("IDs and/or datasets were not provided.")
+        return self.ids[self.selected], self.datasets[self.selected]
+
+    @property
     def selected_labels(self):
-        """Return the labels of selected leafs in the dendrogram."""
+        """Return the labels of selected leafs in the figure."""
         if self.selected is None or not len(self.selected):
             return None
         if self.labels is None:
@@ -321,7 +330,7 @@ class ScatterFigure(BaseFigure):
 
     @property
     def selected_meta(self):
-        """Return the metadata of selected leafs in the dendrogram."""
+        """Return the metadata of selected leafs in the figure."""
         if self.selected is None or not len(self.selected):
             return None
         if self.metadata is None:
@@ -516,7 +525,7 @@ class ScatterFigure(BaseFigure):
         if isinstance(points, np.ndarray) and points.dtype == bool:
             assert len(points) == len(
                 self
-            ), "Selection mask must be the same length as the dendrogram."
+            ), "Selection mask must be the same length as the figure."
             points = np.where(points)[0]
         elif isinstance(points, int):
             points = [points]
@@ -567,7 +576,7 @@ class ScatterFigure(BaseFigure):
         else:
             assert len(self.markers) == len(
                 self
-            ), "Length of leaf_types must match length of dendrogram."
+            ), "Length of leaf_types must match length of figure."
             unique_types = np.unique(self.markers)
 
             assert len(unique_types) <= len(
@@ -1249,7 +1258,7 @@ class ScatterFigure(BaseFigure):
         self.camera.show_object(self.scatter_group)
 
     def sync_viewer(self, viewer):
-        """Sync the dendrogram with a neuroglancer viewer."""
+        """Sync the figure with a neuroglancer viewer."""
         self.ngl_viewer = viewer
 
         # Activate the neuroglancer controls tab
@@ -1257,7 +1266,7 @@ class ScatterFigure(BaseFigure):
             self.controls.tabs.setTabEnabled(2, True)
 
     def sync_widget(self, widget, callback=None):
-        """Connect a widget to the dendrogram.
+        """Connect a widget to the figure.
 
         Parameters
         ----------
@@ -1279,7 +1288,17 @@ class ScatterFigure(BaseFigure):
         if not hasattr(self, "synced_widgets"):
             self.synced_widgets = []
 
-        self.synced_widgets.append((widget, callback))
+        if (widget, callback) not in self.synced_widgets:
+            self.synced_widgets.append((widget, callback))
+
+    def unsync_widget(self, widget):
+        """Disconnect a widget from the figure."""
+        if not hasattr(self, "synced_widgets"):
+            return
+
+        self.synced_widgets = [
+            (w, cb) for w, cb in self.synced_widgets if w != widget
+        ]
 
     def set_colors(self, colors, sync_to_viewer=True):
         """Set the colors for the points in the scatterplot.

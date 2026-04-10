@@ -131,6 +131,13 @@ class ScatterFigure(BaseFigure):
     def __len__(self):
         return len(self.positions) if self.positions is not None else 0
 
+    def center_camera(self):
+        """Center the camera on the scatter plot."""
+        if self.positions is None:
+            return
+
+        self.camera.show_object(self.scatter_group)
+
     def clear(self):
         """Clear contents of the scatter plot."""
         for vis in ("label_group", "scatter_group"):

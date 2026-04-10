@@ -767,6 +767,22 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
+        center_menu = view_menu.addMenu("Center")
+
+        center_scatter_action = QAction("Scatter", self)
+        center_scatter_action.triggered.connect(
+            lambda: self.centralWidget().fig_scatter.center_camera()
+        )
+        center_menu.addAction(center_scatter_action)
+
+        center_3d_action = QAction("3D Viewer", self)
+        center_3d_action.triggered.connect(
+            lambda: self.centralWidget().ngl_viewer.viewer.center_camera()
+        )
+        center_menu.addAction(center_3d_action)
+
+        view_menu.addSeparator()
+
         toggle_figure_controls_action = QAction("Toggle Figure Controls", self)
         toggle_figure_controls_action.triggered.connect(
             lambda: self.centralWidget().toggle_figure_controls()

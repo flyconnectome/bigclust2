@@ -1,10 +1,7 @@
 import re
-import os
-import uuid
 import logging
 import warnings
 import pyperclip
-import traceback
 
 import pandas as pd
 import numpy as np
@@ -237,23 +234,87 @@ class ScatterControls(QtWidgets.QWidget):
         self.color_combo_box.currentIndexChanged.connect(self.set_colors)
         self.palette_combo_box.currentIndexChanged.connect(self.set_colors)
 
+        ########
+        # Selection behavior
+        ########
+
+        selection_group = QtWidgets.QGroupBox("Selection Behavior")
+        selection_form = QtWidgets.QFormLayout()
+        selection_form.setContentsMargins(2, 2, 2, 2)
+        selection_form.setVerticalSpacing(2)
+        selection_group.setLayout(selection_form)
+        self.tab1_layout.addWidget(selection_group)
+
+        self.selection_restrict_toggle = QtWidgets.QToolButton()
+        self.selection_restrict_toggle.setText("Restrict to datasets")
+        self.selection_restrict_toggle.setCheckable(True)
+        self.selection_restrict_toggle.setChecked(False)
+        self.selection_restrict_toggle.setToolButtonStyle(
+            QtCore.Qt.ToolButtonTextBesideIcon
+        )
+        self.selection_restrict_toggle.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.selection_restrict_toggle.setIconSize(QtCore.QSize(10, 10))
+        self.selection_restrict_toggle.setStyleSheet(
+            "QToolButton {"
+            "text-align: left;"
+            "border: none;"
+            "background: transparent;"
+            "padding: 0px;"
+            "}"
+            "QToolButton:pressed, QToolButton:checked, QToolButton:hover {"
+            "border: none;"
+            "background: transparent;"
+            "}"
+        )
+        self.selection_restrict_toggle.setArrowType(QtCore.Qt.RightArrow)
+        self.selection_restrict_toggle.toggled.connect(
+            self._toggle_selection_restrict_panel
+        )
+        selection_form.addRow(self.selection_restrict_toggle)
+
+        self.selection_restrict_panel = QtWidgets.QWidget()
+        selection_restrict_layout = QtWidgets.QVBoxLayout()
+        selection_restrict_layout.setContentsMargins(12, 0, 0, 0)
+        selection_restrict_layout.setSpacing(2)
+        self.selection_restrict_panel.setLayout(selection_restrict_layout)
+        self.selection_restrict_panel.setVisible(False)
+        selection_form.addRow(self.selection_restrict_panel)
+
+        self.selection_restrict_checks = {}
+        self.selection_restrict_empty_label = QtWidgets.QLabel(
+            "No datasets available"
+        )
+        self.selection_restrict_empty_label.setStyleSheet("color: palette(mid);")
+        selection_restrict_layout.addWidget(self.selection_restrict_empty_label)
+
+        self.update_selection_restrict_options()
+
         self.add_group_check = QtWidgets.QCheckBox("Add as group")
         self.add_group_check.setToolTip("Whether to add neurons as group to the viewer when selected")
         self.add_group_check.stateChanged.connect(self.set_add_group)
         self.add_group_check.setChecked(True)
-        self.tab1_layout.addWidget(self.add_group_check)
+        toggle_font = self.selection_restrict_toggle.font()
+        if toggle_font.pointSizeF() > 0:
+            toggle_font.setPointSizeF(toggle_font.pointSizeF() + 0.01)
+        elif toggle_font.pixelSize() > 0:
+            toggle_font.setPixelSize(toggle_font.pixelSize() + 0.01)
+        self.selection_restrict_toggle.setFont(toggle_font)
+        selection_form.addRow(self.add_group_check)
 
         self.dclick_deselect = QtWidgets.QCheckBox("Deselect on double-click")
         self.dclick_deselect.setToolTip("You can always deselect using ESC")
         self.dclick_deselect.setChecked(self.figure.deselect_on_dclick)
         self.dclick_deselect.stateChanged.connect(self.set_dclick_deselect)
-        self.tab1_layout.addWidget(self.dclick_deselect)
+        selection_form.addRow(self.dclick_deselect)
 
         self.empty_deselect = QtWidgets.QCheckBox("Deselect on empty selection")
         self.empty_deselect.setToolTip("You can always deselect using ESC")
         self.empty_deselect.setChecked(self.figure.deselect_on_empty)
         self.empty_deselect.stateChanged.connect(self.set_empty_deselect)
-        self.tab1_layout.addWidget(self.empty_deselect)
+        selection_form.addRow(self.empty_deselect)
 
         # This would make it so the legend does not stretch when
         # we resize the window vertically
@@ -1778,6 +1839,84 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_label_combo_boxes()
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
+        self.update_selection_restrict_options()
+
+    def _toggle_selection_restrict_panel(self, expanded):
+        """Expand/collapse dataset restriction controls."""
+        self.selection_restrict_panel.setVisible(expanded)
+        self.selection_restrict_toggle.setArrowType(
+            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
+        )
+
+    def _available_datasets(self):
+        """Return unique dataset names from the loaded figure data."""
+        datasets = getattr(self.figure, "datasets", None)
+        if datasets is not None:
+            names = sorted(
+                {
+                    str(ds).strip()
+                    for ds in datasets
+                    if (not pd.isna(ds)) and str(ds).strip()
+                }
+            )
+            if names:
+                return names
+
+        meta = getattr(self.figure, "metadata", None)
+        if meta is None or "dataset" not in meta.columns:
+            return []
+        return sorted(
+            {
+                str(ds).strip()
+                for ds in meta["dataset"].dropna().tolist()
+                if str(ds).strip()
+            }
+        )
+
+    def update_selection_restrict_options(self):
+        """Refresh dataset restriction checkboxes from currently loaded data."""
+        if not hasattr(self, "selection_restrict_panel"):
+            return
+
+        datasets = self._available_datasets()
+
+        current_restriction = getattr(self.figure, "_restrict_selection", None)
+        if current_restriction is None:
+            checked_names = {
+                name
+                for name, check in self.selection_restrict_checks.items()
+                if check.isChecked()
+            }
+        else:
+            checked_names = {str(name).strip() for name in current_restriction}
+
+        layout = self.selection_restrict_panel.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+        self.selection_restrict_checks = {}
+
+        if not datasets:
+            self.selection_restrict_empty_label = QtWidgets.QLabel(
+                "No datasets available"
+            )
+            self.selection_restrict_empty_label.setStyleSheet("color: palette(mid);")
+            layout.addWidget(self.selection_restrict_empty_label)
+            if hasattr(self.figure, "_restrict_selection"):
+                delattr(self.figure, "_restrict_selection")
+            return
+
+        for dataset_name in datasets:
+            check = QtWidgets.QCheckBox(dataset_name)
+            check.setChecked(dataset_name in checked_names or not checked_names)
+            check.stateChanged.connect(self.set_selection_restrict)
+            layout.addWidget(check)
+            self.selection_restrict_checks[dataset_name] = check
+
+        self.set_selection_restrict()
 
     def update_label_combo_boxes(self):
         """Update the items in the label and color by combo boxes."""

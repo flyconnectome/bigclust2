@@ -17,7 +17,7 @@ dependencies = [
     "scipy>=1.15.3",
     "gevent==25.5.1",
     "cloud-volume>=12.8.0",
-    "octarine3d>=0.3.3",
+    "octarine3d>=0.4.0",
     "octarine-navis-plugin>=0.1.5",
     "navis>=1.10.0",
     "dvidtools>=0.6.0",

@@ -56,7 +56,7 @@ class FlyWireFlyTableConfig:
         metadata={
             "label": "User initials",
             "placeholder": "e.g. 'PS'",
-            "tooltip": "Will be used for e.g. `cell_type_user` when writing to `cell_type`.",
+            "tooltip": "Will be used for e.g. `cell_type_source` when writing to `cell_type`.",
         }
     )
     table_name: str = field(
@@ -267,8 +267,6 @@ class ClioBackend(AnnotationBackend):
 
         clio = self._get_clio_module()
 
-        print("Setting fields", fields, "to value", value, "for IDs", ids)
-
         to_push = {field: value for field in fields}
 
         # If we're clearing the type, we should also clear the instance (if it exists)
@@ -419,12 +417,12 @@ class FlyWireFlyTableBackend(FlyTableBackend):
         user_fields = []
         for f in fields:
             if f in self.USER_FIELDS:
-                user_field = f"{f}_user"
+                user_field = f"{f}_source"
                 if user_field not in fields:
                     user_fields.append(user_field)
 
         if user_fields:
-            super()._write_annotations(ids, value, user_fields)
+            super()._write_annotations(ids, self.config.user_initials, user_fields)
 
 
 class CSVBackend(AnnotationBackend):

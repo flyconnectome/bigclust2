@@ -90,9 +90,9 @@ class NglViewer:
 
             neuropil_mesh = load_neuropil_mesh(neuropil_mesh)
 
-        if not isinstance(neuropil_mesh, tm.Trimesh):
+        if not oc.utils.is_mesh_like(neuropil_mesh):
             raise ValueError(
-                f"`neuropil_mesh` must be a trimesh.Trimesh object, got {type(neuropil_mesh)}"
+                f"`neuropil_mesh` must be a mesh-like object, got {type(neuropil_mesh)}"
             )
 
         self.neuropil_mesh = neuropil_mesh
@@ -206,7 +206,9 @@ class NglViewer:
         self.viewer.close()
 
     def register(self):
-        self.viewer.add_animation(self.check_futures, run_every=20, req_render=False, on_error="log")
+        self.viewer.add_animation(
+            self.check_futures, run_every=20, req_render=False, on_error="log"
+        )
 
     def unregister(self):
         self.viewer.remove_animation(self.check_futures)
@@ -810,10 +812,11 @@ def load_neuropil_mesh(x):
     if is_url(x):
         mesh = tm.load_remote(x)
     elif "@" in x:
-        id, source = x.split("@")
-        id = int(id)
+        ids, source = x.split("@")
+        ids = [int(id) for id in ids.split(",")]
+
         vol = cv.CloudVolume(source, progress=False, use_https=True)
-        mesh = vol.mesh.get(id)[id]
+        mesh = vol.mesh.get(ids)
     else:
         mesh = tm.load(x)
 
@@ -827,5 +830,13 @@ def load_neuropil_mesh(x):
                 "expected exactly one geometry to convert to a single mesh."
             )
         mesh = mesh[0]
+    elif isinstance(mesh, list):
+        if len(mesh) == 1:
+            mesh = mesh[0]
+        else:
+            assert all(
+                isinstance(m, tm.Trimesh) for m in mesh
+            ), "All geometries must be meshes."
+            mesh = tm.util.concatenate(mesh)
 
     return mesh

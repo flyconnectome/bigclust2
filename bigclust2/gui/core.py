@@ -34,6 +34,7 @@ from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
+from .widgets.features import FeatureExplorerWidget
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
@@ -684,9 +685,11 @@ class MainWindow(QMainWindow):
         self.open_recent_menu = None
         self.connectivity_table_action = None
         self.distances_table_action = None
+        self.feature_explorer_action = None
         self._current_project_loader = None
         self._connectivity_widget = None
         self._connectivity_widget_synced = False
+        self._feature_explorer_widget = None
         self._annotation_dialog = None
         self._distance_widgets = []
         self.annotation_submit_result_received.connect(
@@ -764,6 +767,12 @@ class MainWindow(QMainWindow):
         self.distances_table_action.setEnabled(False)
         self.distances_table_action.triggered.connect(self.show_distances_table)
         view_menu.addAction(self.distances_table_action)
+
+        self.feature_explorer_action = QAction("Feature Explorer", self)
+        self.feature_explorer_action.setShortcut(QKeySequence("Shift+Meta+F"))
+        self.feature_explorer_action.setEnabled(False)
+        self.feature_explorer_action.triggered.connect(self.show_feature_explorer)
+        view_menu.addAction(self.feature_explorer_action)
 
         view_menu.addSeparator()
 
@@ -927,12 +936,26 @@ class MainWindow(QMainWindow):
 
         return dists.shape[0] == dists.shape[1]
 
+    def _can_open_feature_explorer(self):
+        """Whether the feature explorer can be opened for the current project."""
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
+            return False
+
+        features = self._data.get("features")
+        meta = self._data.get("meta")
+        if not isinstance(features, pd.DataFrame) or not isinstance(meta, pd.DataFrame):
+            return False
+
+        return (not features.empty) and (not meta.empty)
+
     def _update_view_actions(self):
         """Update View menu action states."""
         if self.connectivity_table_action is not None:
             self.connectivity_table_action.setEnabled(self._can_open_connectivity_table())
         if self.distances_table_action is not None:
             self.distances_table_action.setEnabled(self._can_open_distances_table())
+        if self.feature_explorer_action is not None:
+            self.feature_explorer_action.setEnabled(self._can_open_feature_explorer())
 
     def show_connectivity_table(self):
         """Open the connectivity table widget for the current project."""
@@ -982,6 +1005,44 @@ class MainWindow(QMainWindow):
             lambda _obj=None, w=widget: fig.unsync_widget(w)
         )
 
+    def show_feature_explorer(self):
+        """Open the Feature Explorer widget for the current project."""
+        if not self._can_open_feature_explorer():
+            return
+
+        existing = self._feature_explorer_widget
+        if existing is not None:
+            try:
+                existing.showNormal()
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:
+                self._feature_explorer_widget = None
+
+        features = self._data.get("features")
+        meta_data = self._data.get("meta")
+        if features is None or meta_data is None:
+            return
+
+        widget = FeatureExplorerWidget(
+            metadata=meta_data,
+            features=features,
+            figure=self.centralWidget().fig_scatter,
+            parent=None,
+        )
+        widget.setAttribute(Qt.WA_DeleteOnClose, True)
+        widget.setWindowFlag(Qt.Window, True)
+        widget.setWindowTitle("Feature Explorer")
+        # widget.resize(1100, 700)
+        widget.show()
+
+        self._feature_explorer_widget = widget
+        widget.destroyed.connect(
+            lambda _obj=None: setattr(self, "_feature_explorer_widget", None)
+        )
+
     def _sync_connectivity_widget(self, widget):
         """Ensure the cached connectivity widget is synced to figure selection."""
         if widget is None or self._connectivity_widget_synced:
@@ -1019,6 +1080,20 @@ class MainWindow(QMainWindow):
 
         try:
             widget.removeEventFilter(self)
+            widget.close()
+            widget.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
+
+    def _dispose_feature_explorer_widget(self):
+        """Dispose the cached feature explorer widget when project context changes."""
+        widget = self._feature_explorer_widget
+        if widget is None:
+            return
+
+        self._feature_explorer_widget = None
+        try:
             widget.close()
             widget.deleteLater()
         except RuntimeError:
@@ -1646,6 +1721,7 @@ class MainWindow(QMainWindow):
 
         # Connectivity table is project-specific; reset cached instance on reload.
         self._dispose_connectivity_widget()
+        self._dispose_feature_explorer_widget()
         self._dispose_annotation_dialog()
 
         # Create progress dialog with range

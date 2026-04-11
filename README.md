@@ -66,10 +66,6 @@ The `info` file contains information about the dataset, including which files ar
         "type": "connectivity",
         "file": "connections.feather",
     },
-    # optional: define how to update annotations for a given dataset from an annotation backend
-    "push_annotations": {
-        "hemibrain": "clio://https://clio.janelia.org@hemibrain"
-    }
 }
 ```
 
@@ -108,13 +104,13 @@ The top-level `info` file would look like this:
 ### Ideas / TODOs
 - [ ] Add more detailed documentation about data formats and structure
 - [ ] Caching system for remote data sources for faster start-up times
-- [ ] Enable multiple embeddings per dataset (with a dropdown to select embedding)
+- [x] Enable multiple embeddings per dataset (with a dropdown to select embedding)
 - [ ] Allow users to change project settings (e.g. neuroglancer sources) before or after loading
 - [ ] Support loading up-to-date annotations when opening a project (e.g. from Clio or Neuprint)
-- [ ] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
+- [x] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
 - [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
 - [ ] Fine-control over hover info
-- [ ] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
+- [x] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
 
 
 ## Usage

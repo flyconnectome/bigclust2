@@ -46,7 +46,7 @@ class ScatterFigure(BaseFigure):
         )
         self._font_size = 0.01
         self._points_scale = 1  # used for scaling points uniformly
-        self.label_vis_limit = 200  # number of labels shown at once before hiding all
+        self.label_vis_limit = 400  # number of labels shown at once before hiding all
         self.label_refresh_rate = 30  # update labels every n frames
 
         # Add the selection gizmo

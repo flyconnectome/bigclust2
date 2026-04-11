@@ -389,7 +389,7 @@ class ScatterControls(QtWidgets.QWidget):
         label.setToolTip("Set the font size for the labels in the figure.")
         hlayout.addWidget(label)
         self.font_size_slider = QtWidgets.QDoubleSpinBox()
-        self.font_size_slider.setRange(1, 200)
+        self.font_size_slider.setRange(.01, 200)
         self.font_size_slider.setValue(self.figure.font_size)
         self.font_size_slider.valueChanged.connect(
             lambda x: setattr(self.figure, "font_size", x)

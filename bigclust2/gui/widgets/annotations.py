@@ -4,7 +4,7 @@ import json
 
 from dataclasses import asdict, dataclass
 
-from PySide6 import QtCore, QtGui, QtWidgets
+from PySide6 import QtCore, QtWidgets
 
 try:
     from .annotation_backends import BACKEND_REGISTRY
@@ -15,7 +15,7 @@ except ImportError:
 
 @dataclass(frozen=True)
 class SelectionRecord:
-    """Minimal selected-neuron record used by the prototype dialog."""
+    """Minimal selected-neuron record."""
 
     neuron_id: int
     dataset: str
@@ -197,11 +197,7 @@ class FunctionRunnable(QtCore.QRunnable):
 
 
 class AnnotationDialog(QtWidgets.QDialog):
-    """Prototype annotation dialog for selecting backends and field writes.
-
-    This widget is intentionally self-contained so it can be iterated in
-    isolation before being wired into the main BigClust flow.
-    """
+    """Annotation dialog for selecting backends and field to write."""
 
     submitted = QtCore.Signal(dict)
     _session_config_validated = False
@@ -1656,100 +1652,3 @@ class AnnotationDialog(QtWidgets.QDialog):
         self._dispatch_backend_writes(callback=self._submit_result_callback())
         self.submitted.emit(payload)
         self.accept()
-
-
-class AnnotationPrototypeWindow(QtWidgets.QWidget):
-    """Simple host window for iterating on the annotation dialog."""
-
-    submit_result_received = QtCore.Signal(str)
-
-    def __init__(self):
-        """Initialize prototype host window and mock selection state."""
-        super().__init__()
-        self.setWindowTitle("Annotation Dialog Prototype")
-        self.resize(720, 380)
-        self.threadpool = QtCore.QThreadPool(self)
-        self.submit_result_received.connect(self._append_submit_result)
-
-        self._selection = self._mock_selection()
-        self._build_ui()
-        self._update_selection_label()
-
-    def _build_ui(self):
-        """Build controls for launching the dialog and showing results."""
-        layout = QtWidgets.QVBoxLayout(self)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(10)
-
-        intro = QtWidgets.QLabel(
-            "Prototype runner for the annotation dialog. "
-            "Click the button or press Cmd+A to open it."
-        )
-        intro.setWordWrap(True)
-        layout.addWidget(intro)
-
-        self.selection_label = QtWidgets.QLabel()
-        self.selection_label.setWordWrap(True)
-        layout.addWidget(self.selection_label)
-
-        open_button = QtWidgets.QPushButton("Open Annotation Dialog")
-        open_button.clicked.connect(self.open_dialog)
-        layout.addWidget(open_button)
-
-        self.result_box = QtWidgets.QPlainTextEdit()
-        self.result_box.setReadOnly(True)
-        self.result_box.setPlaceholderText("Submission payload will be shown here.")
-        layout.addWidget(self.result_box, stretch=1)
-
-        shortcut = QtGui.QShortcut(
-            QtGui.QKeySequence(QtGui.QKeySequence.SelectAll),
-            self,
-        )
-        shortcut.activated.connect(self.open_dialog)
-
-    def _mock_selection(self):
-        """Return static mock neuron selection records for the prototype."""
-        return [
-            SelectionRecord(720575940628299419, "FwR"),
-            SelectionRecord(720575940640052621, "FwL"),
-            SelectionRecord(720575940631290082, "FwR"),
-            SelectionRecord(529529442, "McnsR"),
-            SelectionRecord(585510588, "McnsL"),
-        ]
-
-    def _update_selection_label(self):
-        """Refresh summary label describing the current mock selection."""
-        ids_preview = ", ".join(str(rec.neuron_id) for rec in self._selection[:6])
-        dataset_count = len({rec.dataset for rec in self._selection})
-        self.selection_label.setText(
-            "Mock selection contains "
-            f"{len(self._selection)} neurons across {dataset_count} dataset(s): "
-            f"{ids_preview}"
-        )
-
-    def open_dialog(self):
-        """Open the annotation dialog and hook up submit callback."""
-        dialog = AnnotationDialog(selection=self._selection, parent=self)
-        dialog.submitted.connect(self._handle_submitted)
-        dialog.exec()
-
-    def _handle_submitted(self, payload):
-        """Display the emitted payload in the prototype result box."""
-        self.result_box.setPlainText(str(payload))
-
-    def on_annotation_submit_result(self, message):
-        """Receive async submit result messages from the dialog worker."""
-        self.submit_result_received.emit(str(message))
-
-    def _append_submit_result(self, message):
-        """Append async submit status lines to the prototype result box."""
-        if self.result_box.toPlainText().strip():
-            self.result_box.appendPlainText("")
-        self.result_box.appendPlainText(str(message))
-
-
-if __name__ in {"__main__", "main"}:
-    app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
-    window = AnnotationPrototypeWindow()
-    window.show()
-    app.exec()

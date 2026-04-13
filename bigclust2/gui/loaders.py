@@ -129,13 +129,30 @@ class OpenProjectDialog(QDialog):
 
         options_layout.addLayout(filter_row)
 
+        self.filter_hint_label = QLabel(
+            "Tip: for filtered datasets, recomputing embeddings is usually better than using global precomputed embeddings. "
+        )
+        self.filter_hint_label.setWordWrap(True)
+        self.filter_hint_label.setStyleSheet("color: #8a8a8a;")
+        self.filter_hint_label.setVisible(bool(self.filter_edit.text().strip()))
+        options_layout.addWidget(self.filter_hint_label)
+
         # Row with dropdown for embeddings
         emb_row = QHBoxLayout()
         emb_label = QLabel("Embeddings:")
         emb_row.addWidget(emb_label)
         self.embedding_combo = QComboBox()
+        self.embedding_combo.currentTextChanged.connect(self.update_embedding_hint)
         emb_row.addWidget(self.embedding_combo)
         options_layout.addLayout(emb_row)
+
+        self.embedding_hint_label = QLabel(
+            'Tip: open the "Embeddings" tab in the control panel to fine-tune the embeddings.'
+        )
+        self.embedding_hint_label.setWordWrap(True)
+        self.embedding_hint_label.setStyleSheet("color: #8a8a8a;")
+        self.embedding_hint_label.setVisible(False)
+        options_layout.addWidget(self.embedding_hint_label)
 
         # Dialog buttons at the very bottom
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel)
@@ -194,6 +211,7 @@ class OpenProjectDialog(QDialog):
             self.embedding_combo.addItem("calculate from distances", 0)
         if project.info.get("features", None):
             self.embedding_combo.addItem("calculate from features", 0)
+        self.update_embedding_hint()
 
         # Update filter help tooltip with available columns
         try:
@@ -242,6 +260,7 @@ class OpenProjectDialog(QDialog):
     def validate_filter(self):
         """Validate the filter expression. Show red outline on error."""
         filter_expr = self.filter_edit.text().strip()
+        self.filter_hint_label.setVisible(bool(filter_expr))
         if not filter_expr:
             # Clear styling if field is empty
             self.filter_edit.setStyleSheet("")
@@ -264,6 +283,12 @@ class OpenProjectDialog(QDialog):
                 "QLineEdit { border: 2px solid red; border-radius: 3px; }"
             )
             self.load_btn.setEnabled(False)
+
+    def update_embedding_hint(self):
+        """Show guidance when embeddings are recomputed."""
+        selected = self.embedding_combo.currentText().strip().lower()
+        show_hint = bool(selected) and selected != "use precomputed"
+        self.embedding_hint_label.setVisible(show_hint)
 
     def on_accept(self):
         """Save the path before accepting the dialog."""

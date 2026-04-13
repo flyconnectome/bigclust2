@@ -1,5 +1,7 @@
+import json
 import logging
 
+import requests
 from PySide6.QtWidgets import (
     QVBoxLayout,
     QHBoxLayout,
@@ -79,7 +81,18 @@ class OpenProjectDialog(QDialog):
 
         path_row.addWidget(self.path_edit)
         path_row.addWidget(browse_btn)
-        layout.addLayout(path_row)
+
+        path_group = QVBoxLayout()
+        path_group.setSpacing(4)
+        path_group.addLayout(path_row)
+
+        self.path_error_label = QLabel("")
+        self.path_error_label.setWordWrap(True)
+        self.path_error_label.setStyleSheet("color: #a00; margin-left: 4px; font-size: 12px;")
+        self.path_error_label.setVisible(False)
+        path_group.addWidget(self.path_error_label)
+
+        layout.addLayout(path_group)
 
         # Container for showing/selecting projects
         project_label = QLabel("Select Project:")
@@ -228,6 +241,7 @@ class OpenProjectDialog(QDialog):
         if not path:
             # Clear styling if field is empty
             self.path_edit.setStyleSheet("")
+            self._clear_path_error()
             self.project_combo.clear()
             self.embedding_combo.clear()
             self.details_table.setRowCount(0)
@@ -241,6 +255,7 @@ class OpenProjectDialog(QDialog):
 
             # Valid path - clear red outline and populate projects
             self.path_edit.setStyleSheet("")
+            self._clear_path_error()
             self.project_combo.clear()
             self.embedding_combo.clear()
             self.details_table.setRowCount(0)
@@ -248,14 +263,41 @@ class OpenProjectDialog(QDialog):
             for i, project in enumerate(self.projects):
                 self.project_combo.addItem(project.name, i)
         except Exception as e:
-            # Invalid path - add red outline and print error
+            # Invalid path - add red outline and show error label
             logger.debug(f"Error validating path: {e}")
             self.path_edit.setStyleSheet(
                 "QComboBox { border: 2px solid red; border-radius: 3px; }"
             )
+            self._set_path_error(self._format_path_error(e))
             self.project_combo.clear()
             self.embedding_combo.clear()
             self.details_table.setRowCount(0)
+
+    def _set_path_error(self, message):
+        self.path_error_label.setText(message)
+        self.path_error_label.setVisible(True)
+
+    def _clear_path_error(self):
+        self.path_error_label.setText("")
+        self.path_error_label.setVisible(False)
+
+    def _format_path_error(self, exc):
+        if isinstance(exc, FileNotFoundError):
+            text = str(exc)
+            if "No 'info' file found" in text:
+                return "No info file found in selected directory. Make sure the dataset folder contains an 'info' file."
+            if "Path does not exist" in text:
+                return "The path does not exist. Enter a valid local folder or URL."
+            return "Path not found or inaccessible."
+        if isinstance(exc, json.JSONDecodeError):
+            return "Malformed info file. The 'info' file must contain valid JSON."
+        if isinstance(exc, ValueError):
+            if "Invalid info format" in str(exc):
+                return "Malformed info file. Expected a JSON object or list in the 'info' file."
+            return f"Invalid dataset info: {exc}"
+        if isinstance(exc, requests.exceptions.RequestException):
+            return "Unable to load remote info file. Check the URL and your network connection."
+        return "Unable to parse path. Use a valid local dataset directory or remote URL."
 
     def validate_filter(self):
         """Validate the filter expression. Show red outline on error."""

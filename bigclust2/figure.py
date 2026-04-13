@@ -77,7 +77,6 @@ class BaseFigure:
         # Setup key events
         self.key_events = {}
         self.key_events["f"] = lambda: self.toggle_fps()
-        # self.key_events["c"] = lambda: self._toggle_controls()
 
         def _keydown(event):
             """Handle key presses."""

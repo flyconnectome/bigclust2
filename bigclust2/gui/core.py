@@ -35,6 +35,7 @@ from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
 from .widgets.features import FeatureExplorerWidget
+from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
@@ -774,6 +775,12 @@ class MainWindow(QMainWindow):
         self.feature_explorer_action.triggered.connect(self.show_feature_explorer)
         view_menu.addAction(self.feature_explorer_action)
 
+        self.meta_explorer_action = QAction("Meta Data Explorer", self)
+        self.meta_explorer_action.setShortcut(QKeySequence("Shift+Meta+M"))
+        self.meta_explorer_action.setEnabled(False)
+        self.meta_explorer_action.triggered.connect(self.show_meta_explorer)
+        view_menu.addAction(self.meta_explorer_action)
+
         view_menu.addSeparator()
 
         center_menu = view_menu.addMenu("Center")
@@ -948,6 +955,16 @@ class MainWindow(QMainWindow):
 
         return (not features.empty) and (not meta.empty)
 
+    def _can_open_meta_explorer(self):
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
+            return False
+
+        meta = self._data.get("meta")
+        if not isinstance(meta, pd.DataFrame):
+            return False
+
+        return not meta.empty
+
     def _update_view_actions(self):
         """Update View menu action states."""
         if self.connectivity_table_action is not None:
@@ -956,6 +973,8 @@ class MainWindow(QMainWindow):
             self.distances_table_action.setEnabled(self._can_open_distances_table())
         if self.feature_explorer_action is not None:
             self.feature_explorer_action.setEnabled(self._can_open_feature_explorer())
+        if self.meta_explorer_action is not None:
+            self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
 
     def show_connectivity_table(self):
         """Open the connectivity table widget for the current project."""
@@ -1041,6 +1060,39 @@ class MainWindow(QMainWindow):
         self._feature_explorer_widget = widget
         widget.destroyed.connect(
             lambda _obj=None: setattr(self, "_feature_explorer_widget", None)
+        )
+
+    def show_meta_explorer(self):
+        """Open the meta data explorer dialog for the current project."""
+        if not self._can_open_meta_explorer():
+            return
+
+        existing = getattr(self, "_meta_explorer_dialog", None)
+        if existing is not None:
+            try:
+                existing.showNormal()
+                existing.show()
+                existing.raise_()
+                existing.activateWindow()
+                return
+            except RuntimeError:
+                self._meta_explorer_dialog = None
+
+        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
+        if meta_data is None:
+            return
+
+        dialog = MetaExplorerDialog(
+            meta_data,
+            figure=self.centralWidget().fig_scatter,
+            parent=self,
+        )
+        dialog.setAttribute(Qt.WA_DeleteOnClose, True)
+        dialog.show()
+
+        self._meta_explorer_dialog = dialog
+        dialog.destroyed.connect(
+            lambda _obj=None: setattr(self, "_meta_explorer_dialog", None)
         )
 
     def _sync_connectivity_widget(self, widget):

@@ -317,6 +317,47 @@ class ScatterFigure(BaseFigure):
             raise ValueError("No IDs were provided.")
         return self.ids[self.selected]
 
+    def select(self, ids):
+        """Select points by ID list or index list."""
+        if ids is None:
+            self.selected = []
+            return
+
+        if isinstance(ids, (np.integer, int)):
+            ids = [int(ids)]
+
+        if isinstance(ids, (list, tuple, np.ndarray)) and len(ids) == 0:
+            self.selected = []
+            return
+
+        if self.ids is None:
+            self.selected = np.asarray(ids, dtype=int)
+            return
+
+        ids_arr = np.asarray(ids, dtype=object)
+        ids_values = np.asarray(self.ids, dtype=object)
+
+        if np.array_equal(ids_values, np.arange(len(self))):
+            self.selected = np.asarray(ids_arr, dtype=int)
+            return
+
+        selected_positions = np.flatnonzero(np.isin(ids_values, ids_arr))
+        self.selected = selected_positions
+
+    def open_selection_in_new_window(self, ids=None):
+        """Open the current or given selection in a new window."""
+        if ids is not None:
+            self.select(ids)
+
+        window = self.canvas.window()
+        while window is not None and not hasattr(window, "on_open_selection_in_new_window"):
+            window = window.parent()
+
+        if window is None:
+            raise RuntimeError("Unable to find parent window to open selection in a new window.")
+
+        window.on_open_selection_in_new_window()
+
     @property
     def selected_ids_dataset(self):
         """Return the IDs and datasets of selected leafs in the figure."""
@@ -1376,94 +1417,6 @@ class ScatterFigure(BaseFigure):
             raise ValueError("Colors must be a dictionary.")
 
         self.ngl_viewer.set_colors(colors)
-
-    # def set_viewer_color_mode(self, mode, palette="vispy:husl"):
-    #     """Set the color mode for the neuroglancer viewer.
-
-    #     Parameters
-    #     ----------
-    #     mode :  "dataset" | "cluster" | "label" | "default"
-    #             The color mode to use.
-
-    #     """
-    #     if not hasattr(self, "ngl_viewer"):
-    #         raise ValueError("No neuroglancer viewer connected to this figure.")
-
-    #     assert mode in (
-    #         "dataset",
-    #         "cluster",
-    #         "label",
-    #         "default",
-    #     ), f"Unknown mode '{mode}'."
-
-    #     if mode == "cluster":
-    #         # Collect colors for each leaf from the visual
-    #         colors = {}
-    #         for vis in self.point_visuals:
-    #             this_ids = self.ids[vis._point_ix]
-
-    #             if self.datasets is None:
-    #                 colors.update(zip(this_ids, vis.geometry.colors.data))
-    #             else:
-    #                 this_datasets = self.datasets[vis._point_ix]
-    #                 colors.update(
-    #                     zip(
-    #                         zip(this_ids, this_datasets),
-    #                         vis.geometry.colors.data,
-    #                     )
-    #                 )
-    #     elif mode == "label":
-    #         labels_unique = np.unique(self.labels.astype(str))
-
-    #         # To avoid similar labels getting a similar color we will jumble the labels
-    #         rng = np.random.default_rng(seed=42)
-    #         rng.shuffle(labels_unique)
-
-    #         palette = cmap.Colormap(palette)
-    #         colormap = {
-    #             l: c.hex
-    #             for l, c in zip(labels_unique, palette.iter_colors(len(labels_unique)))
-    #         }
-    #         if self.datasets is None:
-    #             colors = {i: colormap[str(l)] for i, l in zip(self.ids, self.labels)}
-    #         else:
-    #             colors = {
-    #                 (i, d): colormap[str(l)]
-    #                 for i, l, d in zip(self.ids, self.labels, self.datasets)
-    #             }
-    #     elif mode == "dataset":
-    #         palette = cmap.Colormap(palette)
-    #         colormap = {
-    #             i: c.hex
-    #             for i, c in zip(
-    #                 range(len(self.point_visuals)),
-    #                 palette.iter_colors(len(self.point_visuals)),
-    #             )
-    #         }
-    #         colors = {}
-    #         for i, vis in enumerate(self.point_visuals):
-    #             this_ids = self.ids[vis._point_ix]
-    #             this_c = colormap[i]
-    #             if self.datasets is None:
-    #                 colors.update({i: this_c for this_id in this_ids})
-    #             else:
-    #                 this_datasets = self.datasets[vis._point_ix]
-    #                 colors.update(
-    #                     {
-    #                         (this_id, this_dataset): this_c
-    #                         for this_id, this_dataset in zip(this_ids, this_datasets)
-    #                     }
-    #                 )
-    #     elif mode == "default":
-    #         self.ngl_viewer.set_default_colors()
-    #         return
-    #     else:
-    #         raise ValueError(
-    #             f"Unknown color mode '{mode}'. "
-    #             f"Expected 'dataset', 'cluster', 'label' or 'default'."
-    #         )
-
-    #     self.set_viewer_colors(colors)
 
     @update_figure
     def update_point_labels(self):

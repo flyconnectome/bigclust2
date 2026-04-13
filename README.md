@@ -14,10 +14,10 @@ containing both the data itself and metadata files describing the setup. Here is
 ```
 /my_clustering/
     info                <- JSON-formatted settings for the dataset
-    meta.parquet        <- per-neuron metadata in Apache Arrow Feather or Parquet format
-    distances.parquet   <- pairwise distances in Apache Arrow Feather or Parquet format (optional)
-    embeddings.parquet  <- low-dimensional embeddings in Apache Arrow Feather or Parquet format (optional)
-    features.parquet    <- high-dimensional features in Apache Arrow Feather or Parquet format (optional)
+    meta.parquet        <- per-neuron metadata in Parquet (recommended) or Apache Arrow Feather format
+    distances.parquet   <- pairwise distances in Parquet (recommended) or Apache Arrow Feather format (optional)
+    embeddings.parquet  <- low-dimensional embeddings in Parquet (recommended) or Apache Arrow Feather format (optional)
+    features.parquet    <- high-dimensional features in Parquet (recommended) or Apache Arrow Feather format (optional)
 ```
 
 The `info` file contains information about the dataset, including which files are present and how to interpret them:
@@ -31,14 +31,14 @@ The `info` file contains information about the dataset, including which files ar
     "date_created": "2024-06-01",
     # required: metadata about each observation (e.g. neuron)
     "meta": {
-        "file": "meta.feather",  # must at least have `id`, `label` and `dataset` columns
+        "file": "meta.parquet",  # must at least have `id`, `label` and `dataset` columns
         "source": "neuprint://https://neuprint.janelia.org@hemibrain:v1.2",  # define source for updating metadata
         "last_updated": "2024-06-01",  # meta data can be update independently of the other data
         "color": "color"  # optional: column in meta to use for colors
     },
     # required: precomputed low-dimensional embeddings for scatter plot
     "embeddings": {
-        "file": "embeddings.feather"  # alternatively: "columns": ["x_coord", "y_coord"]
+        "file": "embeddings.parquet"  # alternatively: "columns": ["x_coord", "y_coord"]
     },
     # optional: settings for neuroglancer viewer
     "neuroglancer": {
@@ -58,13 +58,13 @@ The `info` file contains information about the dataset, including which files ar
     # optional: pairwise (square) distance matrix
     "distances": {
         "type": "connectivity",
-        "file": "distances.feather",
+        "file": "distances.parquet",
         "metric": "cosine"
     },
     # optional: feature vector
     "features": {
         "type": "connectivity",
-        "file": "connections.feather",
+        "file": "connections.parquet",
     },
 }
 ```

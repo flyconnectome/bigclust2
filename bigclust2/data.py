@@ -154,7 +154,19 @@ class BaseProjectLoader(ABC):
         """
         file = str(file)
         if file.endswith(".feather"):
-            return pl.scan_ipc(f"{self.path}/{file}")
+            try:
+                lazy = pl.scan_ipc(f"{self.path}/{file}")
+                # Some malformed IPC buffers only fail on materialization, not scan creation.
+                lazy.limit(1).collect()
+                return lazy
+            except Exception as e:
+                # Some Feather/IPC variants fail in lazy scan but are readable via pandas/pyarrow.
+                logger.warning(
+                    "Falling back to eager Feather load for '%s' after scan_ipc failed: %s",
+                    file,
+                    e,
+                )
+                return pl.from_pandas(self.load_file(file)).lazy()
         elif file.endswith(".csv"):
             return pl.scan_csv(f"{self.path}/{file}")
         elif file.endswith(".parquet"):
@@ -313,7 +325,7 @@ class SingleProjectLoader(BaseProjectLoader):
     def meta_lazy(self):
         """Metadata as a Polars LazyFrame."""
         if not hasattr(self, "_meta_lazy"):
-            self._meta_lazy = self.load_file_lazy(self.info["meta"]["file"])
+            self._meta_lazy = self.load_file_lazy(self._get_file_spec("meta"))
         return self._meta_lazy
 
     @property
@@ -378,12 +390,26 @@ class SingleProjectLoader(BaseProjectLoader):
         """Load or update the info JSON file."""
         self._info = self.load_file("info")
 
+    def _get_file_spec(self, key):
+        """Return the file path configured for a dataset component.
+
+        The info JSON supports either:
+          - a plain file path string, or
+          - a dictionary with a "file" key.
+        """
+        value = self.info.get(key)
+        if value is None:
+            return None
+        if isinstance(value, dict):
+            file = value.get("file")
+            if file is None:
+                raise ValueError(f"Missing 'file' entry for '{key}' in info.")
+            return file
+        return value
+
     def load_meta(self):
         """Load or update the meta data."""
-        if isinstance(self.info["meta"], dict):
-            file = self.info["meta"]["file"]
-        else:
-            file = self.info["meta"]
+        file = self._get_file_spec("meta")
 
         meta = self.load_file(file)
         self._meta = meta
@@ -391,10 +417,7 @@ class SingleProjectLoader(BaseProjectLoader):
     def load_distances(self):
         """Load or update the pairwise distances."""
         if "distances" in self.info and self.info["distances"] is not None:
-            if isinstance(self.info["distances"], dict):
-                file = self.info["distances"]["file"]
-            else:
-                file = self.info["distances"]
+            file = self._get_file_spec("distances")
             return self.load_file(file)
         else:
             return None
@@ -402,7 +425,7 @@ class SingleProjectLoader(BaseProjectLoader):
     def load_features(self):
         """Load or update the feature vectors."""
         if "features" in self.info and self.info["features"] is not None:
-            return self.load_file(self.info["features"]["file"])
+            return self.load_file(self._get_file_spec("features"))
         else:
             return None
 
@@ -410,11 +433,11 @@ class SingleProjectLoader(BaseProjectLoader):
         """Load or update the low-dimensional embeddings."""
         if "embeddings" in self.info and self.info["embeddings"] is not None:
             # Embeddings can be a separate file or columns in the meta file
-            if "columns" in self.info["embeddings"]:
+            if isinstance(self.info["embeddings"], dict) and "columns" in self.info["embeddings"]:
                 cols = self.info["embeddings"]["columns"]
                 emb = self.meta[cols]
             else:
-                emb = self.load_file(self.info["embeddings"]["file"])
+                emb = self.load_file(self._get_file_spec("embeddings"))
 
             if isinstance(emb, pd.DataFrame):
                 emb = emb.values
@@ -463,12 +486,17 @@ class SingleProjectLoader(BaseProjectLoader):
                 data[attr] = getattr(self, attr)
                 report_if_callback(progress_callback, value=int((i + 1) * 40 / 4))
         else:
-            report_if_callback(progress_callback, value=0, text="Loadin meta data...")
+            report_if_callback(progress_callback, value=0, text="Loading meta data...")
 
-            meta_lazy = self.load_file_lazy(self.info["meta"]["file"])
+            meta_lazy = self.load_file_lazy(self._get_file_spec("meta"))
             expr = string_to_polars_filter(self.filter_expr)
             filtered_meta = meta_lazy.filter(expr).collect().to_pandas()
-            data = {"meta": filtered_meta, "distances": None, "embeddings": None}
+            data = {
+                "meta": filtered_meta,
+                "distances": None,
+                "features": None,
+                "embeddings": None,
+            }
 
             # IDs to keep
             ids = filtered_meta.id.unique()
@@ -482,7 +510,7 @@ class SingleProjectLoader(BaseProjectLoader):
                     cols = self.info["embeddings"]["columns"]
                     data["embeddings"] = filtered_meta[cols].values
                 else:
-                    emb_lazy = self.load_file_lazy(self.info["embeddings"]["file"])
+                    emb_lazy = self.load_file_lazy(self._get_file_spec("embeddings"))
 
                     # We're expecting either an `id` or an `index` column to filter on
                     cols = emb_lazy.collect_schema().names()
@@ -517,7 +545,7 @@ class SingleProjectLoader(BaseProjectLoader):
             if self.info.get("distances", None) is not None:
                 report_if_callback(progress_callback, text="Loading distances...")
                 # Lazy load distances
-                dist_lazy = self.load_file_lazy(self.info["distances"]["file"])
+                dist_lazy = self.load_file_lazy(self._get_file_spec("distances"))
 
                 # If these are pairwise distances, we need to filter on both rows and columns
                 cols = dist_lazy.collect_schema().names()
@@ -541,7 +569,7 @@ class SingleProjectLoader(BaseProjectLoader):
                     )
 
                 dists = (
-                    cols.filter(pl.col(id_col).is_in(ids))
+                    dist_lazy.filter(pl.col(id_col).is_in(ids))
                     .select(ids.astype(str))
                     .collect()
                     .to_pandas()
@@ -556,7 +584,7 @@ class SingleProjectLoader(BaseProjectLoader):
             if self.info.get("features", None) is not None:
                 report_if_callback(progress_callback, text="Loading features...")
                 # Lazy load features
-                features_lazy = self.load_file_lazy(self.info["features"]["file"])
+                features_lazy = self.load_file_lazy(self._get_file_spec("features"))
 
                 # We're expecting either an `id` or `index` column for the rows
                 cols = features_lazy.collect_schema().names()

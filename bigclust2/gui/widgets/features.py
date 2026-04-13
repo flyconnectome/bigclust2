@@ -257,6 +257,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         self.group_a_name = str(group_a_name)
         self.group_b_name = str(group_b_name)
+        self._perm_scoring_user_overridden = False
+        self._updating_perm_scoring_default = False
         self._figure_sync_callbacks = {
             "a": lambda ids, datasets=None: self._apply_figure_selection_to_group(
                 "a", ids, invert=self._group_sync_is_inverse("a")
@@ -301,8 +303,31 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         top_row.addWidget(controls_box, stretch=1, alignment=QtCore.Qt.AlignTop)
         root.addLayout(top_row)
 
+        self.metric_warning_label = QtWidgets.QLabel()
+        self.metric_warning_label.setWordWrap(True)
+        self.metric_warning_label.setStyleSheet(
+            "background-color: #fff3cd; color: #6b4f00; border: 1px solid #f0d98c; border-radius: 4px; padding: 6px 8px;"
+        )
+        self.metric_warning_label.hide()
+        root.addWidget(self.metric_warning_label)
+
+        filter_row = QtWidgets.QHBoxLayout()
+        filter_row.setContentsMargins(0, 0, 0, 0)
+        filter_row.setSpacing(6)
+        filter_row.addStretch(1)
+        self.feature_filter_edit = QtWidgets.QLineEdit()
+        self.feature_filter_edit.setPlaceholderText("Filter features...")
+        self.feature_filter_edit.setToolTip(
+            "Filter visible rows by text in the Feature column."
+        )
+        self.feature_filter_edit.setClearButtonEnabled(True)
+        self.feature_filter_edit.setMaximumWidth(220)
+        self.feature_filter_edit.textChanged.connect(self._apply_feature_text_filter)
+        filter_row.addWidget(self.feature_filter_edit)
+        root.addLayout(filter_row)
+
         # Compute column layout based on MultiIndex hierarchy
-        n_cols = 5 + self._n_hierarchy_levels
+        n_cols = 6 + self._n_hierarchy_levels
         self.table = QtWidgets.QTableWidget(0, n_cols)
 
         headers = ["Feature"]
@@ -319,7 +344,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         # Add remaining standard headers
         headers.extend(
             [
-                "Score",
+                "Score (abs)",
+                "Score (raw)",
                 "Group A\n(mean +/- sd)",
                 "Group B\n(mean +/- sd)",
                 "Flags",
@@ -335,7 +361,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 if col == self._get_col_flags()
                 else QtWidgets.QHeaderView.ResizeToContents,
             )
-        header.setSortIndicator(self._get_col_score(), QtCore.Qt.DescendingOrder)
+        header.setSortIndicator(self._get_col_score_abs(), QtCore.Qt.DescendingOrder)
         header.setSortIndicatorShown(True)
         self.table.verticalHeader().setVisible(False)
         self.table.setAlternatingRowColors(True)
@@ -350,11 +376,21 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         root.addWidget(self.table_hint_label)
 
         footer = QtWidgets.QHBoxLayout()
-        footer.addWidget(QtWidgets.QLabel("Top N:"))
+        footer.addWidget(QtWidgets.QLabel("Show Top N:"))
         self.top_n_spin = QtWidgets.QSpinBox()
-        self.top_n_spin.setRange(1, 500)
+        self.top_n_spin.setRange(0, 500)
+        self.top_n_spin.setSpecialValueText("All")
         self.top_n_spin.setValue(25)
         footer.addWidget(self.top_n_spin)
+        footer.addWidget(QtWidgets.QLabel("Top N by:"))
+
+        self.top_n_mode_combo = QtWidgets.QComboBox()
+        self.top_n_mode_combo.addItem("Absolute", userData="abs")
+        self.top_n_mode_combo.addItem("Raw", userData="raw")
+        self.top_n_mode_combo.setToolTip(
+            "How Top N features are selected before table display."
+        )
+        footer.addWidget(self.top_n_mode_combo)
 
         self.keep_on_top_check = QtWidgets.QCheckBox("Always on top")
         self.keep_on_top_check.setChecked(False)
@@ -396,6 +432,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         root.addLayout(footer)
 
         self.top_n_spin.valueChanged.connect(self._populate_feature_rows)
+        self.top_n_mode_combo.currentIndexChanged.connect(self._populate_feature_rows)
         self._update_flags_column_visibility()
         self._update_group_summary()
         self._populate_feature_rows()
@@ -404,7 +441,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         box = QtWidgets.QGroupBox("Groups")
         layout = QtWidgets.QVBoxLayout(box)
         layout.setContentsMargins(8, 8, 8, 8)
-        layout.setSpacing(6)
+        layout.setSpacing(0)
 
         self.group_a_box = QtWidgets.QGroupBox("Group A")
         group_a_layout = QtWidgets.QVBoxLayout(self.group_a_box)
@@ -437,6 +474,28 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             )
             group_a_layout.addWidget(self.group_a_sync_check)
         layout.addWidget(self.group_a_box)
+
+        self.swap_groups_btn = QtWidgets.QToolButton()
+        self.swap_groups_btn.setIcon(
+            self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload)
+        )
+        self.swap_groups_btn.setToolTip("Swap Group A and Group B")
+        self.swap_groups_btn.setAutoRaise(True)
+        self.swap_groups_btn.setFixedSize(26, 26)
+        self.swap_groups_btn.setIconSize(QtCore.QSize(14, 14))
+        self.swap_groups_btn.setStyleSheet(
+            "QToolButton {"
+            "background-color: palette(base);"
+            "border: 1px solid #bdbdbd;"
+            "border-radius: 13px;"
+            "margin-top: -8px;"
+            "margin-bottom: -8px;"
+            "}"
+            "QToolButton:hover { background-color: #f4f4f4; }"
+            "QToolButton:pressed { background-color: #e9e9e9; }"
+        )
+        self.swap_groups_btn.clicked.connect(self._swap_groups)
+        layout.addWidget(self.swap_groups_btn, alignment=QtCore.Qt.AlignHCenter)
 
         self.group_b_box = QtWidgets.QGroupBox("Group B")
         group_b_layout = QtWidgets.QVBoxLayout(self.group_b_box)
@@ -473,29 +532,43 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.group_feature_count_label = QtWidgets.QLabel()
         self.group_feature_count_label.setStyleSheet("color: #777; font-size: 11px;")
         self.group_feature_count_label.setToolTip(
-            "Numeric feature columns remaining after filtering to selected IDs and dropping all-zero columns."
+            "Numeric feature columns surviving the current top-level and minimum-value filters for the selected groups."
         )
         layout.addWidget(self.group_feature_count_label)
 
         return box
 
     def _count_group_filtered_features(self):
-        """Count numeric features remaining after selecting both groups and dropping all-zero columns."""
-        numeric = self.features.select_dtypes(include="number")
+        """Count features that survive the current scoring filters for the selected groups."""
+        numeric = self._get_numeric_feature_table()
         total_numeric = int(numeric.shape[1])
         if total_numeric == 0:
             return 0, 0
 
-        selected_ids = set(self.group_a_ids) | set(self.group_b_ids)
-        if not selected_ids:
+        if not self.group_a_ids or not self.group_b_ids:
             return 0, total_numeric
 
-        selected = numeric.loc[numeric.index.isin(selected_ids)]
-        if selected.empty:
+        group_a = self._get_group_features(self.group_a_ids)
+        group_b = self._get_group_features(self.group_b_ids)
+        if group_a.empty or group_b.empty:
             return 0, total_numeric
 
-        kept = self._drop_all_zero_feature_columns(selected)
-        return int(kept.shape[1]), total_numeric
+        kept_cols = self._get_feature_columns_passing_threshold(group_a, group_b)
+        return int(len(kept_cols)), total_numeric
+
+    def _update_group_feature_count_label(self, kept_n=None, total_n=None):
+        """Update the feature-count label using the current scoring filters."""
+        if not hasattr(self, "group_feature_count_label"):
+            return
+
+        if len(self.group_a_ids) == 0 or len(self.group_b_ids) == 0:
+            self.group_feature_count_label.setText("")
+            return
+
+        if kept_n is None or total_n is None:
+            kept_n, total_n = self._count_group_filtered_features()
+
+        self.group_feature_count_label.setText(f"Feature count: {kept_n}/{total_n}")
 
     def _make_data_box(self):
         box = QtWidgets.QGroupBox("Data")
@@ -677,7 +750,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         l1_layout.addRow("", l1_core_widget)
 
         self.l1_stability_check = QtWidgets.QCheckBox("Use stability selection")
-        self.l1_stability_check.setChecked(False)
+        self.l1_stability_check.setChecked(True)
         self.l1_stability_check.setToolTip(
             "Use bootstrap L1 refits and rank by signed selection frequency."
         )
@@ -733,12 +806,15 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         perm_layout.addRow("Repeats", self.perm_repeats_spin)
 
         self.perm_scoring_combo = QtWidgets.QComboBox()
-        self.perm_scoring_combo.addItems(["roc_auc", "accuracy", "average_precision"])
-        self.perm_scoring_combo.setCurrentText("roc_auc")
+        self.perm_scoring_combo.addItems(
+            ["neg_log_loss", "roc_auc", "accuracy", "average_precision"]
+        )
         self.perm_scoring_combo.setToolTip(
             "Scoring function used to measure performance drop after permutation."
         )
-        self.perm_scoring_combo.currentIndexChanged.connect(self._populate_feature_rows)
+        self.perm_scoring_combo.currentIndexChanged.connect(
+            self._on_perm_scoring_changed
+        )
         perm_layout.addRow("Scoring", self.perm_scoring_combo)
 
         self.perm_eval_combo = QtWidgets.QComboBox()
@@ -752,6 +828,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         layout.addRow("", self.perm_settings_widget)
 
+        self._apply_permutation_scoring_default(force=True)
         self._update_metric_help_tooltip()
         self._set_metric_item_tooltips()
         self._update_metric_specific_controls()
@@ -792,7 +869,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         ),
         "Permutation Importance": (
             "Model-based importance from performance drop after randomly permuting each feature.\n"
-            "Uses a logistic classifier and ROC AUC as the scoring objective.\n"
+            "Uses a logistic classifier and a user-selectable scoring objective.\n"
+            "For small groups the default scoring is neg_log_loss, which is usually less degenerate than ROC AUC.\n"
             "Displayed score is signed by (center_A - center_B); magnitude reflects importance."
         ),
         "Effect size (Cohen d)": (
@@ -831,21 +909,25 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         """Get column index for Feature."""
         return 0
 
-    def _get_col_score(self):
-        """Get column index for Score."""
+    def _get_col_score_abs(self):
+        """Get column index for Score (abs)."""
         return self._n_hierarchy_levels + 1
+
+    def _get_col_score_raw(self):
+        """Get column index for Score (raw)."""
+        return self._n_hierarchy_levels + 2
 
     def _get_col_group_a(self):
         """Get column index for Group A."""
-        return self._n_hierarchy_levels + 2
+        return self._n_hierarchy_levels + 3
 
     def _get_col_group_b(self):
         """Get column index for Group B."""
-        return self._n_hierarchy_levels + 3
+        return self._n_hierarchy_levels + 4
 
     def _get_col_flags(self):
         """Get column index for Flags."""
-        return self._n_hierarchy_levels + 4
+        return self._n_hierarchy_levels + 5
 
     def _update_metric_help_tooltip(self):
         desc = self._METRIC_DESCRIPTIONS.get(self.metric_combo.currentText(), "")
@@ -878,6 +960,41 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.l1_settings_widget.setVisible(is_l1)
         self.perm_settings_widget.setVisible(is_perm)
 
+    def _preferred_permutation_scoring(self):
+        """Return the default permutation scoring for the current group sizes."""
+        if not self.group_a_ids or not self.group_b_ids:
+            return "roc_auc"
+
+        min_group_n = min(len(self.group_a_ids), len(self.group_b_ids))
+        if min_group_n <= 20:
+            return "neg_log_loss"
+        return "roc_auc"
+
+    def _apply_permutation_scoring_default(self, force=False):
+        """Apply the preferred permutation scoring unless the user chose one explicitly."""
+        if not hasattr(self, "perm_scoring_combo"):
+            return
+        if self._perm_scoring_user_overridden and not force:
+            return
+
+        preferred = self._preferred_permutation_scoring()
+        if self.perm_scoring_combo.currentText() == preferred:
+            return
+
+        self._updating_perm_scoring_default = True
+        try:
+            self.perm_scoring_combo.setCurrentText(preferred)
+        finally:
+            self._updating_perm_scoring_default = False
+
+    def _on_perm_scoring_changed(self):
+        """Persist user scoring choices while still allowing automatic defaults before override."""
+        if not self._updating_perm_scoring_default:
+            self._perm_scoring_user_overridden = True
+        if not hasattr(self, "status_label"):
+            return
+        self._populate_feature_rows()
+
     def _update_l1_stability_controls(self):
         """Show stability-specific L1 controls only when enabled."""
         is_enabled = self.l1_stability_check.isChecked()
@@ -900,6 +1017,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         group_a_n = len(self.group_a_ids)
         group_b_n = len(self.group_b_ids)
 
+        self._apply_permutation_scoring_default()
+
         if hasattr(self, "group_a_box"):
             self.group_a_box.setTitle(f"Group A: {self.group_a_name}")
             a_color = "#d9534f" if group_a_n == 0 else "#2e8b57"
@@ -914,14 +1033,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         if hasattr(self, "group_a_count_label"):
             self.group_a_count_label.setText(f"{group_a_n} selected")
 
-        if hasattr(self, "group_feature_count_label"):
-            kept_n, total_n = self._count_group_filtered_features()
-            if group_a_n == 0 or group_b_n == 0:
-                self.group_feature_count_label.setText("")
-            else:
-                self.group_feature_count_label.setText(
-                    f"Feature count: {kept_n}/{total_n}"
-                )
+        self._update_group_feature_count_label()
 
         if hasattr(self, "group_b_button"):
             self.group_b_button.setText("Select ..." if group_b_n == 0 else "Edit")
@@ -933,6 +1045,26 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             "Compare two neuron groups and rank connections that best "
             f"separate them. Full feature matrix: {feature_shape[0]} x {feature_shape[1]}."
         )
+
+    def _swap_groups(self):
+        """Swap group IDs and display names, then refresh computed rankings."""
+        self.group_a_ids, self.group_b_ids = self.group_b_ids, self.group_a_ids
+        self.group_a_name, self.group_b_name = self.group_b_name, self.group_a_name
+
+        if hasattr(self, "group_a_sync_check") and hasattr(self, "group_b_sync_check"):
+            a_state = self.group_a_sync_check.checkState()
+            b_state = self.group_b_sync_check.checkState()
+
+            self.group_a_sync_check.blockSignals(True)
+            self.group_b_sync_check.blockSignals(True)
+            self.group_a_sync_check.setCheckState(b_state)
+            self.group_b_sync_check.setCheckState(a_state)
+            self.group_a_sync_check.blockSignals(False)
+            self.group_b_sync_check.blockSignals(False)
+            self._refresh_figure_sync_callbacks()
+
+        self._update_group_summary()
+        self._populate_feature_rows()
 
     def _group_name_from_ids(self, ids, fallback):
         """Infer group display name from selected IDs and metadata labels."""
@@ -1135,10 +1267,12 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             self.table.setSortingEnabled(False)
 
         try:
+            self._set_metric_warning(None)
             numeric_features = self.features.select_dtypes(include="number")
             numeric_features = self._filter_by_top_level(numeric_features)
 
             if numeric_features.shape[1] == 0:
+                self._update_group_feature_count_label(0, 0)
                 self._set_single_status_row(
                     feature_text="No features selected",
                     flags_text="Enable at least one top-level filter",
@@ -1146,57 +1280,67 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 return
 
             if numeric_features.empty:
+                self._update_group_feature_count_label(0, 0)
                 self._set_single_status_row(
                     feature_text="No numeric features",
                     flags_text="Check connections.feather",
                 )
                 return
 
-            if self.normalize_check.isChecked():
-                numeric_features = self._normalize_features(numeric_features)
-
-            group_a = numeric_features.loc[
-                numeric_features.index.isin(self.group_a_ids)
-            ]
-            group_b = numeric_features.loc[
-                numeric_features.index.isin(self.group_b_ids)
-            ]
+            group_a = self._get_group_features(self.group_a_ids)
+            group_b = self._get_group_features(self.group_b_ids)
 
             if group_a.empty or group_b.empty:
+                self._update_group_feature_count_label(0, int(numeric_features.shape[1]))
                 self._set_single_status_row(
                     feature_text="Missing group data",
                     flags_text="Could not match IDs between metadata and features",
                 )
                 return
 
+            valid_cols = self._get_feature_columns_passing_threshold(group_a, group_b)
+            self._update_group_feature_count_label(
+                int(len(valid_cols)), int(numeric_features.shape[1])
+            )
+            if len(valid_cols) == 0:
+                self._set_single_status_row(
+                    feature_text="No features above threshold",
+                    flags_text="Lower the minimum value or change the group selection",
+                )
+                return
+
+            group_a = group_a.reindex(columns=valid_cols)
+            group_b = group_b.reindex(columns=valid_cols)
+
             group_a_center, group_a_spread = self._aggregate_group(group_a)
             group_b_center, group_b_spread = self._aggregate_group(group_b)
 
-            if self.normalize_check.isChecked():
-                min_count = self.min_count_spin_norm.value()
-            else:
-                min_count = float(self.min_count_spin.value())
-            if min_count > 0:
-                passes = (group_a_center >= min_count) | (group_b_center >= min_count)
-                group_a_center = group_a_center[passes]
-                group_b_center = group_b_center[passes]
-                if group_a_spread is not None:
-                    group_a_spread = group_a_spread[passes]
-                if group_b_spread is not None:
-                    group_b_spread = group_b_spread[passes]
-
-            valid_cols = group_a_center.index
             scores = self._compute_metric_scores(
-                group_a.reindex(columns=valid_cols),
-                group_b.reindex(columns=valid_cols),
+                group_a,
+                group_b,
                 group_a_center,
                 group_b_center,
             )
-            # Rank by magnitude so features separating in either direction compete equally.
-            # The signed value is preserved in `scores` and shown in the Score column.
-            ranking = scores.abs().sort_values(ascending=False)
-            top_n = min(self.top_n_spin.value(), len(ranking))
-            ranking = ranking.iloc[:top_n]
+            self._update_metric_warning_banner(
+                scores,
+                group_a,
+                group_b,
+                group_a_center,
+                group_b_center,
+            )
+            # Rank by selected Top-N mode (absolute or raw).
+            # When scores tie exactly, prefer larger displayed group separation.
+            ranking = scores.reindex(
+                self._feature_ranking_order(
+                    scores,
+                    group_a_center,
+                    group_b_center,
+                    mode=str(self.top_n_mode_combo.currentData() or "abs"),
+                )
+            )
+            top_n_value = int(self.top_n_spin.value())
+            if top_n_value > 0:
+                ranking = ranking.iloc[: min(top_n_value, len(ranking))]
 
             aggr_label = self._current_aggr_header_label()
             self.table.setHorizontalHeaderItem(
@@ -1274,9 +1418,16 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                         row, h_idx + 1, QtWidgets.QTableWidgetItem(str(h_value))
                     )
 
-                score_item = _SortableNumberItem(f"{float(score):.4g}")
-                score_item.setData(QtCore.Qt.UserRole, float(score))
-                self.table.setItem(row, self._get_col_score(), score_item)
+                raw_score = float(score)
+                abs_score = abs(raw_score)
+
+                score_abs_item = _SortableNumberItem(f"{abs_score:.6g}")
+                score_abs_item.setData(QtCore.Qt.UserRole, abs_score)
+                self.table.setItem(row, self._get_col_score_abs(), score_abs_item)
+
+                score_raw_item = _SortableNumberItem(f"{raw_score:.6g}")
+                score_raw_item.setData(QtCore.Qt.UserRole, raw_score)
+                self.table.setItem(row, self._get_col_score_raw(), score_raw_item)
 
                 # Keep hidden numeric items under widget columns so they can be sorted.
                 group_a_item = _SortableNumberItem("")
@@ -1317,7 +1468,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         finally:
             if was_sorting_enabled:
                 self.table.setSortingEnabled(True)
-                self.table.sortItems(self._get_col_score(), QtCore.Qt.DescendingOrder)
+            self._apply_feature_text_filter()
 
     def _table_to_text(self, separator):
         """Serialise visible table rows to delimited text."""
@@ -1418,10 +1569,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             )
             return
 
-        numeric_features = self.features.select_dtypes(include="number")
-        numeric_features = self._filter_by_top_level(numeric_features)
-        if self.normalize_check.isChecked():
-            numeric_features = self._normalize_features(numeric_features)
+        numeric_features = self._get_numeric_feature_table()
 
         if feature_name not in numeric_features.columns:
             # Column names may be tuples (MultiIndex); fall back to matching by representation
@@ -1432,20 +1580,32 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 return
             feature_name = col_match[0]
 
-        vals_a = (
-            numeric_features.loc[
-                numeric_features.index.isin(self.group_a_ids), feature_name
-            ]
-            .dropna()
-            .values.astype(float)
-        )
-        vals_b = (
-            numeric_features.loc[
-                numeric_features.index.isin(self.group_b_ids), feature_name
-            ]
-            .dropna()
-            .values.astype(float)
-        )
+        if self.normalize_check.isChecked():
+            vals_a = (
+                self._get_group_features(self.group_a_ids)[feature_name]
+                .dropna()
+                .values.astype(float)
+            )
+            vals_b = (
+                self._get_group_features(self.group_b_ids)[feature_name]
+                .dropna()
+                .values.astype(float)
+            )
+        else:
+            vals_a = (
+                numeric_features.loc[
+                    numeric_features.index.isin(self.group_a_ids), feature_name
+                ]
+                .dropna()
+                .values.astype(float)
+            )
+            vals_b = (
+                numeric_features.loc[
+                    numeric_features.index.isin(self.group_b_ids), feature_name
+                ]
+                .dropna()
+                .values.astype(float)
+            )
 
         dlg = QtWidgets.QDialog(self)
         dlg.setWindowTitle(str(feature_name))
@@ -1513,6 +1673,20 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         """Autoscale all table columns to current content."""
         self.table.resizeColumnsToContents()
 
+    def _apply_feature_text_filter(self):
+        """Hide rows whose Feature text does not match the current filter query."""
+        if not hasattr(self, "table") or not hasattr(self, "feature_filter_edit"):
+            return
+
+        query = self.feature_filter_edit.text().strip().lower()
+        feature_col = self._get_col_feature()
+
+        for row in range(self.table.rowCount()):
+            item = self.table.item(row, feature_col)
+            text = item.text().lower() if item is not None else ""
+            hide_row = bool(query) and (query not in text)
+            self.table.setRowHidden(row, hide_row)
+
     def _set_single_status_row(
         self,
         feature_text,
@@ -1526,7 +1700,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self._clear_value_cell_widgets(0)
         values = (
             (self._get_col_feature(), feature_text),
-            (self._get_col_score(), score_text),
+            (self._get_col_score_abs(), score_text),
+            (self._get_col_score_raw(), score_text),
             (self._get_col_group_a(), group_a_text),
             (self._get_col_group_b(), group_b_text),
             (self._get_col_flags(), flags_text),
@@ -1635,6 +1810,236 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             return group.max(axis=0), None
         # fallback
         return group.mean(axis=0), group.std(axis=0).fillna(0)
+
+    def _center_difference(self, center_a, center_b):
+        """Return signed center difference as float to avoid unsigned wrap-around."""
+        a = pd.to_numeric(center_a, errors="coerce").astype(float)
+        b = pd.to_numeric(center_b, errors="coerce").astype(float)
+        return a - b
+
+    def _feature_ranking_order(self, scores, center_a, center_b, mode="abs"):
+        """Return a stable feature order using selected score mode and center shift tie-break."""
+        score_mode = str(mode).lower()
+        if score_mode not in {"abs", "raw"}:
+            score_mode = "abs"
+
+        ranking_df = pd.DataFrame(
+            {
+                "abs_score": scores.abs(),
+                "raw_score": scores,
+                "abs_center_diff": self._center_difference(center_a, center_b)
+                .abs()
+                .reindex(scores.index),
+            },
+            index=scores.index,
+        ).fillna({"abs_score": -np.inf, "raw_score": -np.inf, "abs_center_diff": -np.inf})
+
+        if score_mode == "raw":
+            ranking_df = ranking_df.sort_values(
+                ["raw_score", "abs_center_diff"],
+                ascending=[False, False],
+                kind="mergesort",
+            )
+        else:
+            ranking_df = ranking_df.sort_values(
+                ["abs_score", "abs_center_diff"],
+                ascending=[False, False],
+                kind="mergesort",
+            )
+        return ranking_df.index
+
+    def _set_metric_warning(self, text):
+        """Show or hide the metric warning banner."""
+        if not hasattr(self, "metric_warning_label"):
+            return
+        if not text:
+            self.metric_warning_label.clear()
+            self.metric_warning_label.hide()
+            return
+        self.metric_warning_label.setText(text)
+        self.metric_warning_label.show()
+
+    def _label_entropy(self, n_a, n_b):
+        """Return the binary label entropy in nats for the current group sizes."""
+        total = int(n_a + n_b)
+        if total <= 0:
+            return 0.0
+
+        probs = np.array([n_a / total, n_b / total], dtype=float)
+        probs = probs[probs > 0]
+        if probs.size == 0:
+            return 0.0
+        return float(-(probs * np.log(probs)).sum())
+
+    def _count_near_perfect_single_feature_separators(self, group_a, group_b):
+        """Count features whose single-feature AUC is effectively perfect."""
+        y = np.array([0] * len(group_a) + [1] * len(group_b), dtype=int)
+        count = 0
+        for col in group_a.columns:
+            x = np.concatenate(
+                [
+                    group_a[col].values.astype(float),
+                    group_b[col].values.astype(float),
+                ]
+            )
+            valid = np.isfinite(x)
+            if valid.sum() < 2:
+                continue
+            try:
+                auc = float(_roc_auc_score(y[valid], x[valid]))
+            except Exception:
+                continue
+            if max(auc, 1.0 - auc) >= 0.99:
+                count += 1
+        return count
+
+    def _update_metric_warning_banner(
+        self, scores, group_a, group_b, center_a, center_b
+    ):
+        """Surface metric-specific warnings for saturated or degenerate outputs."""
+        metric = self.metric_combo.currentText()
+        finite_scores = scores[np.isfinite(scores.values)].astype(float)
+        if finite_scores.empty:
+            self._set_metric_warning(None)
+            return
+
+        warning_text = None
+
+        if metric == "Permutation Importance":
+            scoring = str(self.perm_scoring_combo.currentText())
+            finite_abs = np.abs(finite_scores.values.astype(float))
+            rounded_abs = np.unique(np.round(finite_abs, decimals=10))
+            nonzero_abs = rounded_abs[rounded_abs > 1e-10]
+            compressed_scores = finite_abs.size > 0 and (
+                finite_abs.max() <= 5e-2 and nonzero_abs.size <= 3
+            )
+            near_perfect = self._count_near_perfect_single_feature_separators(
+                group_a, group_b
+            )
+            min_group_n = min(len(group_a), len(group_b))
+            if self._is_degenerate_permutation_importance(
+                finite_scores.values, scoring
+            ) or compressed_scores or (
+                scoring in {"roc_auc", "average_precision"}
+                and (
+                    (near_perfect >= 1 and min_group_n <= 50)
+                    or (near_perfect >= 2)
+                )
+            ) or (
+                scoring == "accuracy" and near_perfect >= 1 and min_group_n <= 30
+            ):
+                warning_text = (
+                    "Permutation importance may be unreliable here because the groups look very easy to separate, "
+                    "which can make the reported importances coarse, unstable, or less informative than they appear. "
+                    "Treat this ranking cautiously; consider neg_log_loss, cross-validation, or a simpler single-feature metric."
+                )
+
+        elif metric == "Mutual information":
+            entropy = self._label_entropy(len(group_a), len(group_b))
+            if entropy > 0:
+                near_ceiling = np.isclose(
+                    finite_scores.values,
+                    entropy,
+                    rtol=2e-2,
+                    atol=max(1e-6, entropy * 2e-2),
+                )
+                if int(near_ceiling.sum()) >= 2:
+                    warning_text = (
+                        "Mutual information is saturated: several features nearly determine the group label, "
+                        "so they receive the same maximal score. Use mean difference, AUC, or inspect raw group values to break ties."
+                    )
+
+        elif metric == "Logistic (L1)":
+            nonzero_scores = int((np.abs(finite_scores.values) > 1e-12).sum())
+            near_perfect = self._count_near_perfect_single_feature_separators(
+                group_a, group_b
+            )
+            min_group_n = min(len(group_a), len(group_b))
+            sparse_explanation = nonzero_scores <= 5
+            if (
+                (near_perfect >= 1 and min_group_n <= 50)
+                or near_perfect >= 2
+                or (near_perfect >= 1 and sparse_explanation)
+                or (near_perfect >= 1 and not self.l1_stability_check.isChecked())
+            ):
+                warning_text = (
+                    "Logistic (L1) ranking may be unstable here because multiple features may separate the groups well, "
+                    "while the model still picks one sparse explanation. Coefficients can therefore reflect one convenient solution, "
+                    "not necessarily the most biologically important feature set. Treat this ranking cautiously."
+                )
+
+        self._set_metric_warning(warning_text)
+
+    def _fit_permutation_model(self, X, y):
+        """Fit the shared classifier used for permutation-importance scoring."""
+        model = _LogisticRegression(
+            penalty="l2",
+            C=1.0,
+            solver="lbfgs",
+            max_iter=2000,
+            fit_intercept=True,
+            random_state=0,
+        )
+        model.fit(X, y)
+        return model
+
+    def _collect_permutation_importances(self, X, y, scoring, n_repeats, eval_mode):
+        """Return mean permutation importances for the requested scoring/eval mode."""
+        if eval_mode == "In-sample":
+            model = self._fit_permutation_model(X, y)
+            perm = _permutation_importance(
+                model,
+                X,
+                y,
+                scoring=scoring,
+                n_repeats=n_repeats,
+                random_state=0,
+                n_jobs=1,
+            )
+            return perm.importances_mean.astype(float)
+
+        n_splits = 3 if eval_mode == "3-fold CV" else 5
+        skf = _StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=0)
+        fold_importances = []
+        for train_idx, test_idx in skf.split(X, y):
+            X_train, X_test = X[train_idx], X[test_idx]
+            y_train, y_test = y[train_idx], y[test_idx]
+            if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
+                continue
+            model = self._fit_permutation_model(X_train, y_train)
+            perm = _permutation_importance(
+                model,
+                X_test,
+                y_test,
+                scoring=scoring,
+                n_repeats=n_repeats,
+                random_state=0,
+                n_jobs=1,
+            )
+            fold_importances.append(perm.importances_mean.astype(float))
+
+        if not fold_importances:
+            return None
+
+        return np.mean(np.vstack(fold_importances), axis=0)
+
+    def _is_degenerate_permutation_importance(self, importances, scoring):
+        """Detect coarse or collapsed permutation scores that are not useful for ranking."""
+        finite = np.asarray(importances, dtype=float)
+        finite = finite[np.isfinite(finite)]
+        if finite.size == 0:
+            return True
+
+        finite_abs = np.abs(finite)
+        if np.allclose(finite_abs, 0.0):
+            return True
+
+        if scoring not in {"roc_auc", "average_precision"}:
+            return False
+
+        rounded = np.unique(np.round(finite_abs, decimals=12))
+        nonzero = rounded[rounded > 1e-12]
+        return finite_abs.max() <= 1e-2 and nonzero.size <= 1
 
     def _compute_assumption_flags(
         self, col_a, col_b, check_normality=True, check_equal_var=True
@@ -1838,7 +2243,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                     freq = select_counts / float(n_success)
                     direction = np.sign(direction_sum)
                     fallback_dir = np.sign(
-                        (center_a - center_b)
+                        self._center_difference(center_a, center_b)
                         .reindex(group_a.columns)
                         .values.astype(float)
                     )
@@ -1880,75 +2285,108 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 eval_mode = str(self.perm_eval_combo.currentText())
 
                 direction = np.sign(
-                    (center_a - center_b).reindex(group_a.columns).values.astype(float)
+                    self._center_difference(center_a, center_b)
+                    .reindex(group_a.columns)
+                    .values.astype(float)
                 )
 
-                if eval_mode == "In-sample":
-                    model = _LogisticRegression(
-                        penalty="l2",
-                        C=1.0,
-                        solver="lbfgs",
-                        max_iter=2000,
-                        fit_intercept=True,
-                        random_state=0,
-                    )
-                    model.fit(X, y)
-                    perm = _permutation_importance(
-                        model,
+                importances = self._collect_permutation_importances(
+                    X,
+                    y,
+                    scoring=scoring,
+                    n_repeats=n_repeats,
+                    eval_mode=eval_mode,
+                )
+                if importances is None:
+                    return pd.Series(np.nan, index=group_a.columns, dtype=float)
+
+                current_scoring = scoring
+                if self._is_degenerate_permutation_importance(
+                    importances, current_scoring
+                ) and scoring != "neg_log_loss":
+                    fallback_importances = self._collect_permutation_importances(
                         X,
                         y,
-                        scoring=scoring,
+                        scoring="neg_log_loss",
                         n_repeats=n_repeats,
-                        random_state=0,
-                        n_jobs=1,
+                        eval_mode=eval_mode,
                     )
-                    importances = perm.importances_mean.astype(float)
-                else:
-                    n_splits = 3 if eval_mode == "3-fold CV" else 5
-                    skf = _StratifiedKFold(
-                        n_splits=n_splits, shuffle=True, random_state=0
-                    )
-                    fold_importances = []
-                    for train_idx, test_idx in skf.split(X, y):
-                        X_train, X_test = X[train_idx], X[test_idx]
-                        y_train, y_test = y[train_idx], y[test_idx]
-                        if np.unique(y_train).size < 2 or np.unique(y_test).size < 2:
-                            continue
-                        model = _LogisticRegression(
-                            penalty="l2",
-                            C=1.0,
-                            solver="lbfgs",
-                            max_iter=2000,
-                            fit_intercept=True,
-                            random_state=0,
-                        )
-                        model.fit(X_train, y_train)
-                        perm = _permutation_importance(
-                            model,
-                            X_test,
-                            y_test,
-                            scoring=scoring,
-                            n_repeats=n_repeats,
-                            random_state=0,
-                            n_jobs=1,
-                        )
-                        fold_importances.append(perm.importances_mean.astype(float))
+                    if fallback_importances is not None:
+                        importances = fallback_importances
+                        current_scoring = "neg_log_loss"
 
-                    if not fold_importances:
-                        return pd.Series(np.nan, index=group_a.columns, dtype=float)
-                    importances = np.mean(np.vstack(fold_importances), axis=0)
+                if self._is_degenerate_permutation_importance(
+                    importances, current_scoring
+                ):
+                    fallback_model = self._fit_permutation_model(X, y)
+                    importances = np.abs(fallback_model.coef_[0]).astype(float)
 
                 scores = importances * direction
                 return pd.Series(scores, index=group_a.columns, dtype=float)
             except Exception:
                 return pd.Series(np.nan, index=group_a.columns, dtype=float)
         elif method == "Mutual information":
-            X = pd.concat([group_a, group_b], axis=0).fillna(0).values
-            y = np.array([0] * len(group_a) + [1] * len(group_b))
-            mi = _mutual_info_classif(X, y, discrete_features=False, random_state=0)
+            X_df = pd.concat([group_a, group_b], axis=0).fillna(0.0)
+            X = X_df.values.astype(float)
+            y = np.array([0] * len(group_a) + [1] * len(group_b), dtype=int)
+
+            # Use a per-feature discrete mask for count-like columns when not normalized.
+            # This avoids continuous-kNN MI artifacts on integer-valued sparse counts.
+            if self.normalize_check.isChecked():
+                discrete_mask = False
+            else:
+                discrete_mask = np.all(np.isclose(X, np.rint(X)), axis=0)
+
+            min_class_n = int(min(len(group_a), len(group_b)))
+            n_neighbors = max(1, min(5, min_class_n - 1)) if min_class_n > 1 else 1
+
+            if self.normalize_check.isChecked():
+                # On normalized sparse vectors, kNN MI can appear quantized for small groups.
+                # Average a few tiny-jitter estimates to smooth plateaus while staying deterministic.
+                rng = np.random.default_rng(0)
+                std = X.std(axis=0)
+                std[~np.isfinite(std)] = 0.0
+                jitter_scale = np.where(std > 0, std * 1e-8, 1e-12)
+                mi_runs = []
+                for _ in range(4):
+                    X_jitter = X + rng.normal(0.0, jitter_scale, size=X.shape)
+                    mi_runs.append(
+                        _mutual_info_classif(
+                            X_jitter,
+                            y,
+                            discrete_features=False,
+                            n_neighbors=n_neighbors,
+                            random_state=0,
+                        )
+                    )
+                mi = np.mean(np.vstack(mi_runs), axis=0)
+            else:
+                mi = _mutual_info_classif(
+                    X,
+                    y,
+                    discrete_features=discrete_mask,
+                    n_neighbors=n_neighbors,
+                    random_state=0,
+                )
+
+            # In near-perfect separation regimes, MI estimates can differ by tiny
+            # numerical amounts while all features are effectively at the entropy
+            # ceiling. Collapse those near-ceiling scores to stabilize ranking.
+            entropy = self._label_entropy(len(group_a), len(group_b))
+            if entropy > 0:
+                mi = np.minimum(mi, entropy)
+                near_ceiling = np.isclose(
+                    mi,
+                    entropy,
+                    rtol=2e-2,
+                    atol=max(1e-6, entropy * 2e-2),
+                )
+                if int(near_ceiling.sum()) >= 2:
+                    mi = mi.copy()
+                    mi[near_ceiling] = entropy
             return pd.Series(mi, index=group_a.columns, dtype=float)
         # Default: center difference (respects aggregation choice)
-        return center_a - center_b
+        return self._center_difference(center_a, center_b)
 
     def _normalize_features(self, features):
         """Normalize features row-wise, per top-level group when MultiIndex."""
@@ -1986,6 +2424,38 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         keep_mask = features.columns.get_level_values(0).isin(selected_levels)
         return features.loc[:, keep_mask]
+
+    def _get_numeric_feature_table(self):
+        """Return the currently visible numeric feature table after top-level filtering."""
+        return self._filter_by_top_level(self.features.select_dtypes(include="number"))
+
+    def _current_min_feature_value(self):
+        """Return the active raw feature-value threshold."""
+        if self.normalize_check.isChecked():
+            return float(self.min_count_spin_norm.value())
+        return float(self.min_count_spin.value())
+
+    def _get_feature_columns_passing_threshold(self, group_a, group_b):
+        """Return features whose raw selected values clear the active threshold in either group."""
+        if group_a.empty or group_b.empty:
+            return group_a.columns[:0]
+
+        min_value = self._current_min_feature_value()
+        if min_value <= 0:
+            return group_a.columns
+
+        max_a = group_a.fillna(0.0).max(axis=0)
+        max_b = group_b.fillna(0.0).max(axis=0)
+        keep_mask = (max_a >= min_value) | (max_b >= min_value)
+        return group_a.columns[keep_mask]
+
+    def _get_group_features(self, group_ids):
+        """Return the selected group's numeric feature rows, normalized if enabled."""
+        features = self._get_numeric_feature_table()
+        group = features.loc[features.index.isin(group_ids)]
+        if self.normalize_check.isChecked():
+            return self._normalize_features(group)
+        return group
 
     def closeEvent(self, event):
         """Ensure figure callbacks are removed when this widget closes."""

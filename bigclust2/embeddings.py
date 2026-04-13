@@ -55,6 +55,9 @@ def make_embedding_estimator(
     umap_n_neighbors=10,
     umap_min_dist=0.1,
     umap_spread=1.0,
+    umap_set_op_mix_ratio=0.5,
+    umap_densmap=False,
+    umap_dens_lambda=2.0,
     mds_n_init=4,
     mds_max_iter=300,
     mds_eps=0.001,
@@ -70,6 +73,9 @@ def make_embedding_estimator(
             n_neighbors=umap_n_neighbors,
             min_dist=umap_min_dist,
             spread=umap_spread,
+            set_op_mix_ratio=umap_set_op_mix_ratio,
+            densmap=umap_densmap,
+            dens_lambda=umap_dens_lambda,
             random_state=random_state,
         )
 

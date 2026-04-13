@@ -639,6 +639,47 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_spread_slider.valueChanged.connect(self.calculate_embeddings_maybe)
         self.umap_settings_layout.addRow("Spread:", self.umap_spread_slider)
 
+        self.umap_set_op_mix_ratio_spinbox = QtWidgets.QDoubleSpinBox()
+        self.umap_set_op_mix_ratio_spinbox.setRange(0.0, 1.0)
+        self.umap_set_op_mix_ratio_spinbox.setSingleStep(0.01)
+        self.umap_set_op_mix_ratio_spinbox.setDecimals(2)
+        self.umap_set_op_mix_ratio_spinbox.setValue(1.0)
+        self.umap_set_op_mix_ratio_spinbox.setToolTip(
+            "Adjust the UMAP set_op_mix_ratio between 0 and 1. Lower values encourage the embedding to preserve outliers as outlying."
+        )
+        self.umap_set_op_mix_ratio_spinbox.valueChanged.connect(
+            self.calculate_embeddings_maybe
+        )
+        self.umap_settings_layout.addRow(
+            "Set operation mix ratio:", self.umap_set_op_mix_ratio_spinbox
+        )
+
+        self.umap_densmap_check = QtWidgets.QCheckBox("Use DensMAP")
+        self.umap_densmap_check.setToolTip(
+            "Use UMAP's densMAP extension to better preserve local density relationships in the embedding."
+        )
+        self.umap_densmap_check.setChecked(False)
+        self.umap_densmap_check.stateChanged.connect(
+            lambda _: (self._update_densmap_controls(), self.calculate_embeddings_maybe())
+        )
+        self.umap_settings_layout.addRow("DensMAP:", self.umap_densmap_check)
+
+        self.umap_dens_lambda_label = QtWidgets.QLabel("DensMAP lambda:")
+        self.umap_dens_lambda_spinbox = QtWidgets.QDoubleSpinBox()
+        self.umap_dens_lambda_spinbox.setRange(0.0, 10.0)
+        self.umap_dens_lambda_spinbox.setSingleStep(0.1)
+        self.umap_dens_lambda_spinbox.setDecimals(3)
+        self.umap_dens_lambda_spinbox.setValue(2.0)
+        self.umap_dens_lambda_spinbox.setToolTip(
+            "Strength of the DensMAP density-preservation penalty. Higher values preserve density more strongly."
+        )
+        self.umap_dens_lambda_spinbox.valueChanged.connect(self.calculate_embeddings_maybe)
+        self.umap_settings_layout.addRow(
+            self.umap_dens_lambda_label,
+            self.umap_dens_lambda_spinbox,
+        )
+        self._update_densmap_controls()
+
         self.mds_settings_widget = QtWidgets.QWidget()
         self.mds_settings_layout = QtWidgets.QFormLayout()
         self.mds_settings_layout.setContentsMargins(0, 0, 0, 0)
@@ -852,7 +893,6 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.cluster_load_button.clicked.connect(self._load_cluster_labels)
         actions_row.addWidget(self.cluster_load_button)
-
 
         # Input group
         input_group = QtWidgets.QGroupBox("Input")
@@ -2182,6 +2222,17 @@ class ScatterControls(QtWidgets.QWidget):
             is_feature_input and has_selected_features and self.pca_check.isChecked()
         )
 
+        self._update_densmap_controls()
+
+    def _update_densmap_controls(self):
+        """Show the dens_lambda control only when DensMAP is enabled."""
+        show = self.umap_densmap_check.isChecked()
+        self.umap_dens_lambda_label.setVisible(show)
+        self.umap_dens_lambda_spinbox.setVisible(show)
+        if show:
+            self.umap_dens_lambda_label.setEnabled(True)
+            self.umap_dens_lambda_spinbox.setEnabled(True)
+
     def set_add_group(self):
         """Set whether to add neurons as group when selected."""
         self.figure._add_as_group = self.add_group_check.isChecked()
@@ -2479,6 +2530,9 @@ class ScatterControls(QtWidgets.QWidget):
             umap_n_neighbors=self.umap_n_neighbors_slider.value(),
             umap_min_dist=self.umap_min_dist_slider.value(),
             umap_spread=self.umap_spread_slider.value(),
+            umap_set_op_mix_ratio=self.umap_set_op_mix_ratio_spinbox.value(),
+            umap_densmap=self.umap_densmap_check.isChecked(),
+            umap_dens_lambda=self.umap_dens_lambda_spinbox.value(),
             mds_n_init=self.mds_n_init_slider.value(),
             mds_max_iter=self.mds_max_iter_slider.value(),
             mds_eps=self.mds_eps_slider.value(),

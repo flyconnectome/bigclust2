@@ -99,6 +99,56 @@ class FlyWireFlyTableConfig:
 
 
 @dataclass(frozen=True)
+class HemibrainFlyTableConfig:
+    """FlyTableConfig with defaults set for the Hemibrain FlyTable."""
+
+    user_initials: str = field(
+        metadata={
+            "label": "User initials",
+            "placeholder": "e.g. 'PS'",
+            "tooltip": "Will be used for e.g. `cell_type_source` when writing to `cell_type`.",
+        }
+    )
+    table_name: str = field(
+        default="hb_info",
+        metadata={
+            "label": "Table name",
+            "placeholder": "e.g. neuron_annotations",
+            "tooltip": "Target FlyTable table for writes.",
+            "show": False,
+        },
+    )
+    base_name: str = field(
+        default="hemibrain",
+        metadata={
+            "label": "Base name",
+            "placeholder": "e.g. neuron_annotations",
+            "tooltip": "Name of the base the table is in. Providing this can speed up finding the table.",
+            "required": False,
+            "show": False,
+        },
+    )
+    id_column: str = field(
+        default="bodyId",
+        metadata={
+            "label": "ID column",
+            "placeholder": "e.g. bodyID",
+            "tooltip": "Column containing neuron IDs in the FlyTable table.",
+        },
+    )
+    server: str = field(
+        default="https://flytable.mrc-lmb.cam.ac.uk",
+        metadata={
+            "label": "Server",
+            "placeholder": "Optional. Leave empty to use environment variable.",
+            "tooltip": "If left empty, the backend falls back to the configured environment variable.",
+            "required": False,
+            "show": False,
+        },
+    )
+
+
+@dataclass(frozen=True)
 class ClioConfig:
     """Required configuration for Clio backend writes."""
 
@@ -110,7 +160,7 @@ class ClioConfig:
         }
     )
     auto_fix_instances: bool = field(
-        default=False,
+        default=True,
         metadata={
             "label": "Auto-fix instances",
             "tooltip": "Automatically fix the `instance` when changing the type. This can lead to unintended consequences, so use with caution.",
@@ -385,7 +435,7 @@ class FlyWireFlyTableBackend(FlyTableBackend):
     CONFIG_CLASS = FlyWireFlyTableConfig
     FIELD_SUGGESTIONS = (
         "cell_type",
-        "hemilineage",
+        "ito_lee_hemilineage",
         "super_class",
         "side",
     )
@@ -402,6 +452,48 @@ class FlyWireFlyTableBackend(FlyTableBackend):
     }
 
     def __init__(self, config: FlyWireFlyTableConfig, debug=False):
+        super().__init__(config=config, debug=debug)
+
+    def validate_field_value(self, field, value):
+        if field in self.VALUE_RESTRICTIONS:
+            return value in self.VALUE_RESTRICTIONS[field]
+        return True
+
+    def _write_annotations(self, ids, value, fields):
+        # Write the actual fields
+        super()._write_annotations(ids, value, fields)
+
+        # Now check if we need to also update the user fields
+        user_fields = []
+        for f in fields:
+            if f in self.USER_FIELDS:
+                user_field = f"{f}_source"
+                if user_field not in fields:
+                    user_fields.append(user_field)
+
+        if user_fields:
+            super()._write_annotations(ids, self.config.user_initials, user_fields)
+
+
+class HemibrainFlyTableBackend(FlyTableBackend):
+    """HemibrainFlyTableBackend with defaults set for the Hemibrain FlyTable."""
+
+    BACKEND_NAME = "Hemibrain @ FlyTable"
+    CONFIG_CLASS = HemibrainFlyTableConfig
+    FIELD_SUGGESTIONS = (
+        "type_corrected",
+        "instance_corrected",
+        "type",
+        "ito_lee_hemilineage",
+        "super_class",
+        "side",
+    )
+    USER_FIELDS = ("type_corrected", )
+    VALUE_RESTRICTIONS = {
+        "side": {"left", "right", "center", None},
+    }
+
+    def __init__(self, config: HemibrainFlyTableConfig, debug=False):
         super().__init__(config=config, debug=debug)
 
     def validate_field_value(self, field, value):
@@ -480,6 +572,7 @@ BACKEND_CLASSES = (
     ClioBackend,
     FlyTableBackend,
     FlyWireFlyTableBackend,
+    HemibrainFlyTableBackend,
     CSVBackend,
 )
 

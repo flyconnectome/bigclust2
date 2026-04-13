@@ -294,7 +294,7 @@ class AnnotationDialog(QtWidgets.QDialog):
         submit_tab = self._build_submit_tab()
         config_tab = self._build_config_tab()
 
-        self._submit_tab_index = self.tabs.addTab(submit_tab, "Submit annotations")
+        self._submit_tab_index = self.tabs.addTab(submit_tab, "Submit Annotations")
         self._config_tab_index = self.tabs.addTab(config_tab, "Configuration")
 
         # Starts disabled until all datasets are mapped to backends.
@@ -890,9 +890,11 @@ class AnnotationDialog(QtWidgets.QDialog):
         )
         return backend, signature_values
 
-    def _submit_dataset_groups(self):
+    def _submit_dataset_groups(self, selected_datasets=None):
         """Return dataset groups based on grouping toggle and signatures."""
         datasets = self._writable_datasets()
+        if selected_datasets is not None:
+            datasets = [ds for ds in datasets if ds in selected_datasets]
         if not datasets:
             return []
 
@@ -974,7 +976,7 @@ class AnnotationDialog(QtWidgets.QDialog):
 
     def _populate_submit_dataset_rows(self):
         """Rebuild dataset field selector rows for current grouping state."""
-        # Capture current per-dataset selections so edits survive regrouping.
+        selected_datasets = {rec.dataset for rec in self.selection}
         existing_fields_by_dataset = self._collect_submit_dataset_field_map()
 
         # Clear previously rendered dynamic rows but keep the trailing stretch.
@@ -985,7 +987,7 @@ class AnnotationDialog(QtWidgets.QDialog):
                 widget.deleteLater()
 
         self._submit_dataset_rows = {}
-        for group in self._submit_dataset_groups():
+        for group in self._submit_dataset_groups(selected_datasets=selected_datasets):
             datasets = group["datasets"]
             primary_dataset = datasets[0]
             row_widget = QtWidgets.QWidget()
@@ -1004,7 +1006,6 @@ class AnnotationDialog(QtWidgets.QDialog):
             dataset_label = QtWidgets.QLabel(label_text)
             dataset_label.setMinimumWidth(140)
 
-            fields_edit = QtWidgets.QLineEdit()
             fields_edit = FieldChipInput()
             fields_edit.changed.connect(self._update_submit_state)
 
@@ -1210,11 +1211,12 @@ class AnnotationDialog(QtWidgets.QDialog):
                 return False
         return True
 
-    def _set_config_cell(self, dataset, backend, initial_values=None):
+    def _set_config_cell(self, dataset, backend, initial_values=None, enabled=True):
         """Render backend-specific configuration editors for one dataset row."""
         initial_values = initial_values or {}
         row = self._dataset_row_index[dataset]
         container = QtWidgets.QWidget()
+        container.setEnabled(enabled)
         container_layout = QtWidgets.QVBoxLayout(container)
         container_layout.setContentsMargins(0, 4, 0, 4)
         container_layout.setSpacing(0)

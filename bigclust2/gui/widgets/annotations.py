@@ -200,6 +200,7 @@ class AnnotationDialog(QtWidgets.QDialog):
     """Annotation dialog for selecting backends and field to write."""
 
     submitted = QtCore.Signal(dict)
+    annotations_logged = QtCore.Signal(list)
     _session_config_validated = False
 
     UNSELECTED_BACKEND = "-- Select backend --"
@@ -1577,6 +1578,13 @@ class AnnotationDialog(QtWidgets.QDialog):
         pushed_neuron_count = 0
         backend_batches = {}
 
+        changed_neurons = [
+            (dataset, neuron_id)
+            for dataset, ids in by_dataset.items()
+            if dataset in dataset_field_map and dataset_field_map[dataset]
+            for neuron_id in ids
+        ]
+
         # Group dataset writes by backend instance and field set so shared
         # backend configs are written in fewer calls without widening fields.
         for dataset, field_names in dataset_field_map.items():
@@ -1623,13 +1631,29 @@ class AnnotationDialog(QtWidgets.QDialog):
             # Count neurons only for datasets that were actually written.
             pushed_neuron_count += len(batch["ids"])
 
+        if pushed_neuron_count:
+            log_entries = [
+                {
+                    "dataset": dataset,
+                    "fields": dataset_field_map.get(dataset, []),
+                    "ids": sorted(ids),
+                    "value": shared_value,
+                }
+                for dataset, ids in by_dataset.items()
+                if dataset in dataset_field_map and dataset_field_map[dataset]
+            ]
+            if log_entries:
+                self.annotations_logged.emit(log_entries)
+
         if not self._clear_mode_enabled():
             callback(
-                f"Successfully pushed annotations for {pushed_neuron_count} neurons to {len(used_backends)} backends"
+                f"Successfully pushed annotations for {pushed_neuron_count} neurons to {len(used_backends)} backends",
+                changed_neurons=changed_neurons,
             )
         else:
             callback(
-                f"Successfully cleared annotations for {pushed_neuron_count} neurons across {len(used_backends)} backends"
+                f"Successfully cleared annotations for {pushed_neuron_count} neurons across {len(used_backends)} backends",
+                changed_neurons=changed_neurons,
             )
 
     def _on_submit(self):

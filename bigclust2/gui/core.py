@@ -1,7 +1,10 @@
 import sys
 import cmap
+import csv
+import io
 import json
 import logging
+from datetime import datetime
 from html import escape
 
 import numpy as np
@@ -20,6 +23,8 @@ from PySide6.QtWidgets import (
     QFrame,
     QLabel,
     QDialog,
+    QPlainTextEdit,
+    QComboBox,
     QSizePolicy,
     QProgressDialog,
     QWidgetAction,
@@ -672,12 +677,105 @@ class MainWidget(QWidget):
                 window.resize(orig_size)
 
 
+class AnnotationLogDialog(QDialog):
+    """Dialog that shows the current window's annotation log."""
+
+    FORMAT_PLAIN = "Plain Text"
+    FORMAT_JSON = "JSON"
+    FORMAT_CSV = "CSV"
+
+    def __init__(self, parent=None, entries=None):
+        super().__init__(parent)
+        self.setWindowTitle("Annotation Log")
+        self.resize(700, 520)
+
+        self._entries = entries or []
+
+        layout = QVBoxLayout(self)
+
+        header_layout = QHBoxLayout()
+        header_layout.addStretch(1)
+        header_layout.addWidget(QLabel("Format:"))
+
+        self._format_combo = QComboBox(self)
+        self._format_combo.addItems(
+            [
+                self.FORMAT_PLAIN,
+                self.FORMAT_JSON,
+                self.FORMAT_CSV,
+            ]
+        )
+        self._format_combo.setCurrentText(self.FORMAT_PLAIN)
+        self._format_combo.currentTextChanged.connect(self._on_format_changed)
+        header_layout.addWidget(self._format_combo)
+        layout.addLayout(header_layout)
+
+        self._text = QPlainTextEdit(self)
+        self._text.setReadOnly(True)
+        self._text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(self._text)
+
+        self.update_entries(self._entries)
+
+    def _on_format_changed(self, value):
+        self.update_entries(self._entries)
+
+    def update_entries(self, entries):
+        self._entries = entries or []
+        if not self._entries:
+            self._text.setPlainText("No annotation log entries.")
+            return
+
+        fmt = self._format_combo.currentText()
+        if fmt == self.FORMAT_JSON:
+            self._text.setPlainText(json.dumps(self._entries, indent=2))
+            return
+
+        if fmt == self.FORMAT_CSV:
+            self._text.setPlainText(self._format_csv(self._entries))
+            return
+
+        self._text.setPlainText(self._format_plain(self._entries))
+
+    def _format_plain(self, entries):
+        lines = []
+        for entry in entries:
+            dataset = entry.get("dataset")
+            fields = entry.get("fields", [])
+            ids = entry.get("ids", [])
+            value = entry.get("value")
+            lines.append(f"Dataset: {dataset}")
+            lines.append("Fields: " + ", ".join(str(f) for f in fields))
+            lines.append("Value: " + str(value))
+            lines.append("IDs: " + ", ".join(str(i) for i in ids))
+            lines.append("---")
+        return "\n".join(lines).rstrip("\n-")
+
+    def _format_csv(self, entries):
+        buffer = io.StringIO()
+        writer = csv.writer(buffer)
+        writer.writerow(["dataset", "fields", "value", "ids"])
+        for entry in entries:
+            dataset = entry.get("dataset")
+            fields = entry.get("fields", [])
+            value = entry.get("value")
+            ids = entry.get("ids", [])
+            writer.writerow([
+                dataset,
+                ";".join(str(f) for f in fields),
+                value,
+                ";".join(str(i) for i in ids),
+            ])
+        return buffer.getvalue().rstrip("\n")
+
+
 class MainWindow(QMainWindow):
     """Main application window."""
 
     RECENT_PROJECTS_KEY = "openRecentProjects/v1"
     MAX_RECENT_PROJECTS = 10
     annotation_submit_result_received = Signal(str)
+    annotation_changed = Signal(object)
 
     def __init__(self):
         super().__init__()
@@ -692,10 +790,18 @@ class MainWindow(QMainWindow):
         self._connectivity_widget_synced = False
         self._feature_explorer_widget = None
         self._annotation_dialog = None
+        self._annotation_log = []
+        self._annotation_log_dir = Path.home() / ".bigclust"
+        self._annotation_log_dir.mkdir(parents=True, exist_ok=True)
+        self._annotation_log_file = self._annotation_log_dir / (
+            f"annotation_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log"
+        )
+        self._annotation_log_file.touch(exist_ok=True)
         self._distance_widgets = []
         self.annotation_submit_result_received.connect(
             self._handle_annotation_submit_result
         )
+        self.annotation_changed.connect(self._handle_annotation_changed)
         _OPEN_WINDOWS.append(self)
         self.destroyed.connect(lambda _obj=None, w=self: _OPEN_WINDOWS.remove(w) if w in _OPEN_WINDOWS else None)
         self.init_ui()
@@ -886,6 +992,10 @@ class MainWindow(QMainWindow):
         minimize_action.setShortcut("Ctrl+M")
         minimize_action.triggered.connect(self.showMinimized)
         window_menu.addAction(minimize_action)
+
+        show_annotation_log_action = QAction("Show Annotation Log", self)
+        show_annotation_log_action.triggered.connect(self.show_annotation_log)
+        window_menu.addAction(show_annotation_log_action)
 
         # Help menu
         help_menu = menu_bar.addMenu("Help")
@@ -1210,6 +1320,7 @@ class MainWindow(QMainWindow):
             parent=self,
             project_datasets=project_datasets,
         )
+        dialog.annotations_logged.connect(self._log_annotation_entries)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
@@ -1219,11 +1330,13 @@ class MainWindow(QMainWindow):
             lambda _obj=None: setattr(self, "_annotation_dialog", None)
         )
 
-    def on_annotation_submit_result(self, message):
+    def on_annotation_submit_result(self, message, changed_neurons=None):
         """Receive async submit result message and forward to UI + console."""
         text = str(message)
         print(text)
         self.annotation_submit_result_received.emit(text)
+        if changed_neurons:
+            self.annotation_changed.emit(changed_neurons)
 
     def _handle_annotation_submit_result(self, message):
         """Show user-facing submit result status on the scatter figure."""
@@ -1237,6 +1350,62 @@ class MainWindow(QMainWindow):
             fig.show_message(text, color=color, duration=3)
         except Exception as e:
             logger.debug(f"Failed to show annotation submit status message: {e}")
+
+    def _handle_annotation_changed(self, changed_neurons):
+        """Highlight labels for neurons whose annotations were changed."""
+        try:
+            fig = self.centralWidget().fig_scatter
+            ids = getattr(fig, "ids", None)
+            datasets = getattr(fig, "datasets", None)
+            if ids is None or len(ids) == 0:
+                return
+
+            matches = []
+            for entry in changed_neurons:
+                if isinstance(entry, dict):
+                    neuron_id = entry.get("id")
+                    dataset = entry.get("dataset")
+                elif isinstance(entry, tuple) and len(entry) == 2:
+                    dataset, neuron_id = entry
+                else:
+                    continue
+
+                if datasets is None:
+                    idx = np.where(ids == neuron_id)[0]
+                else:
+                    idx = np.where((ids == neuron_id) & (datasets == dataset))[0]
+                matches.extend(idx.tolist())
+
+            if matches:
+                fig.set_label_color(matches, "#ff69b4")
+        except Exception as e:
+            logger.debug(f"Failed to highlight changed annotation labels: {e}")
+
+    def _log_annotation_entries(self, entries):
+        """Store per-window annotation log entries for successful dataset writes."""
+        if not isinstance(entries, list):
+            return
+        self._annotation_log.extend(entries)
+        self._write_annotation_log_entries(entries)
+
+    def _write_annotation_log_entries(self, entries):
+        try:
+            with self._annotation_log_file.open("a", encoding="utf-8") as fh:
+                for entry in entries:
+                    fh.write(json.dumps(entry, ensure_ascii=False))
+                    fh.write("\n")
+        except Exception as e:
+            logger.debug(f"Failed to write annotation log file: {e}")
+
+    def show_annotation_log(self):
+        """Open a dialog showing the current window's annotation log."""
+        dialog = AnnotationLogDialog(self, entries=self._annotation_log)
+        dialog.exec()
+
+    @property
+    def annotation_log(self):
+        """Return the per-window annotation log."""
+        return list(self._annotation_log)
 
     def _dispose_annotation_dialog(self):
         """Dispose the cached annotation dialog when project context changes."""

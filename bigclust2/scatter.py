@@ -34,6 +34,7 @@ class ScatterFigure(BaseFigure):
         # Some internal state
         self.labels = None
         self.label_visuals = None
+        self._label_colors = None
         self.point_visuals = None
         self.positions = None
         self.metadata = None
@@ -147,6 +148,7 @@ class ScatterFigure(BaseFigure):
 
         self.labels = None
         self.label_visuals = None
+        self._label_colors = None
         self.point_visuals = None
         self.positions = None
         self.metadata = None
@@ -966,6 +968,14 @@ class ScatterFigure(BaseFigure):
                 ix = len(self) + ix
 
             if self.label_visuals[ix] is None:
+                label_color = (
+                    self._label_colors[ix]
+                    if self._label_colors is not None
+                    else "w"
+                )
+                if label_color is None:
+                    label_color = "w"
+
                 t = text2gfx(
                     str(self.labels[ix]),
                     position=(
@@ -973,6 +983,7 @@ class ScatterFigure(BaseFigure):
                         self.positions[ix, 1],
                         0,
                     ),
+                    color=label_color,
                     font_size=self._font_size,
                     anchor="middle-left",
                     pickable=True,
@@ -1213,6 +1224,7 @@ class ScatterFigure(BaseFigure):
         self.default_label_col = label_col
         self.default_color_col = color_col
         self.label_visuals = [None] * len(metadata) if label_col else None
+        self._label_colors = [None] * len(metadata) if label_col else None
         self.labels = metadata[label_col].astype(str).values if label_col else None
         self.ids = metadata[id_col].values if id_col else None
         self.colors = metadata[color_col].values if color_col else None
@@ -1565,6 +1577,40 @@ class ScatterFigure(BaseFigure):
             if self.label_visuals[ix] is not None:
                 self.label_visuals[ix].set_text(label)
                 self.label_visuals[ix]._text = label
+
+    @update_figure
+    def set_label_color(self, indices, new_color):
+        """Change the color of given point labels in the figure.
+
+        Parameters
+        ----------
+        indices : int or list of int
+            Index or list of indices of the point labels to recolor.
+        new_color : str or tuple or list
+            Color string/tuple or list of colors to apply.
+        """
+        if self.labels is None:
+            raise ValueError("No labels were provided.")
+
+        if not isinstance(indices, (list, np.ndarray, tuple, set)):
+            indices = [indices]
+
+        if isinstance(new_color, (str, tuple)):
+            new_color = [new_color] * len(indices)
+
+        assert len(indices) == len(
+            new_color
+        ), "Number of indices and colors must match."
+
+        if self._label_colors is None:
+            self._label_colors = [None] * len(self)
+
+        for ix, color in zip(indices, new_color):
+            if ix < 0:
+                ix = len(self) + ix
+            self._label_colors[ix] = color
+            if self.label_visuals is not None and self.label_visuals[ix] is not None:
+                self.label_visuals[ix].material.color = color
 
     def calculate_embedding_fidelity(self, k=10, metric="auto", rank=True):
         """Calculate the neighborhood fidelity of the embedding."""

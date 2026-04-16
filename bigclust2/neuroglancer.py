@@ -23,6 +23,9 @@ logger = logging.getLogger(__name__)
 # Restart the thread pool after this many tasks to prevent issues with requests sessions (too many open files/sockets).
 POOL_RESTART_INTERVAL = 10_000
 
+# Hide navis' progress bar
+navis.config.pbar_hide = True
+
 
 class NglViewer:
     """Viewer for neurons.
@@ -594,6 +597,10 @@ class NglViewer:
             print(f"Error loading mesh for {x} ({dataset}):")
             traceback.print_exc()
             return e
+
+        if isinstance(m, navis.NeuronList):
+            assert len(m) == 1, f"Expected exactly one neuron for {x}, got {len(m)}"
+            m = m[0]
 
         if isinstance(m, navis.TreeNeuron):
             return octarine_navis_plugin.neuron2gfx(m, color=kwargs["color"])

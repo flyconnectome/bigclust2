@@ -218,12 +218,18 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		self.add_filter_btn.clicked.connect(self.add_filter_row)
 		self.clear_filters_btn = QtWidgets.QPushButton("Clear Filters")
 		self.clear_filters_btn.clicked.connect(self.clear_filters)
+		self.filter_logic_combo = QtWidgets.QComboBox()
+		self.filter_logic_combo.addItems(["AND", "OR"])
+		self.filter_logic_combo.setToolTip("Choose whether filter rows are combined with logical AND or OR.")
+		self.filter_logic_combo.currentTextChanged.connect(self.apply_filters)
 		self.filter_status_label = QtWidgets.QLabel("")
 		self.filter_status_label.setStyleSheet("color: #7a7a7a;")
 
 		filter_header_row.addWidget(self.filter_toggle_btn)
 		filter_header_row.addWidget(filter_header_label)
 		filter_header_row.addStretch(1)
+		filter_header_row.addWidget(QtWidgets.QLabel("Logic:"))
+		filter_header_row.addWidget(self.filter_logic_combo)
 		filter_header_row.addWidget(self.filter_status_label)
 		filter_header_row.addWidget(self.clear_filters_btn)
 		filter_header_row.addWidget(self.add_filter_btn)
@@ -377,8 +383,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		return mask
 
 	def apply_filters(self):
-		mask = np.ones(len(self._meta), dtype=bool)
-
+		masks = []
 		active_filters = 0
 		for row in self._filter_rows:
 			spec = row.filter_spec()
@@ -387,13 +392,21 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 				continue
 
 			active_filters += 1
-			mask = self._apply_filter_spec(mask, spec, row)
+			masks.append(self._apply_filter_spec(np.ones(len(self._meta), dtype=bool), spec, row))
+
+		if masks:
+			if self.filter_logic_combo.currentText() == "OR":
+				mask = np.logical_or.reduce(masks)
+			else:
+				mask = np.logical_and.reduce(masks)
+		else:
+			mask = np.ones(len(self._meta), dtype=bool)
 
 		rows = np.flatnonzero(mask)
 		self.table_model.set_row_positions(rows)
 
 		self.count_label.setText(f"Showing {len(rows):,} / {len(self._meta):,} rows")
-		self.filter_status_label.setText(f"Active filters: {active_filters}")
+		self.filter_status_label.setText(f"Active filters: {active_filters} ({self.filter_logic_combo.currentText()})")
 		self.update_selection_info()
 
 	def filtered_row_positions(self):

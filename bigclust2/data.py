@@ -55,7 +55,9 @@ def parse_directory(path):
     if isinstance(info, list):
         return MultiProjectLoader(path, info)
     elif isinstance(info, dict):
-        return SingleProjectLoader(name=info.get('name', 'unnamed'), path=path, info=info)
+        return SingleProjectLoader(
+            name=info.get("name", "unnamed"), path=path, info=info
+        )
     else:
         raise ValueError("Invalid info format:", type(info))
 
@@ -384,7 +386,7 @@ class SingleProjectLoader(BaseProjectLoader):
         """Low-dimensional embeddings as a Pandas DataFrame."""
         if not self.has_features:
             return None
-        return self.info['features'].get('type', None)
+        return self.info["features"].get("type", None)
 
     def load_info(self):
         """Load or update the info JSON file."""
@@ -433,7 +435,10 @@ class SingleProjectLoader(BaseProjectLoader):
         """Load or update the low-dimensional embeddings."""
         if "embeddings" in self.info and self.info["embeddings"] is not None:
             # Embeddings can be a separate file or columns in the meta file
-            if isinstance(self.info["embeddings"], dict) and "columns" in self.info["embeddings"]:
+            if (
+                isinstance(self.info["embeddings"], dict)
+                and "columns" in self.info["embeddings"]
+            ):
                 cols = self.info["embeddings"]["columns"]
                 emb = self.meta[cols]
             else:
@@ -490,16 +495,21 @@ class SingleProjectLoader(BaseProjectLoader):
 
             meta_lazy = self.load_file_lazy(self._get_file_spec("meta"))
             expr = string_to_polars_filter(self.filter_expr)
-            filtered_meta = meta_lazy.filter(expr).collect().to_pandas()
+
+            filtered_meta = (
+                meta_lazy.with_row_index(name="__index__").filter(expr).collect().to_pandas()
+            )
+
             data = {
-                "meta": filtered_meta,
+                "meta": filtered_meta.drop(columns="__index__"),
                 "distances": None,
                 "features": None,
                 "embeddings": None,
             }
 
-            # IDs to keep
-            ids = filtered_meta.id.unique()
+            # We need to be weary of duplicate IDs here - that's why we're using indices
+            # instead of IDs for filtering all other data artifacts.
+            ind = filtered_meta["__index__"].values
 
             report_if_callback(progress_callback, value=10)
 
@@ -510,30 +520,18 @@ class SingleProjectLoader(BaseProjectLoader):
                     cols = self.info["embeddings"]["columns"]
                     data["embeddings"] = filtered_meta[cols].values
                 else:
+                    # Lazy load embeddings
                     emb_lazy = self.load_file_lazy(self._get_file_spec("embeddings"))
 
-                    # We're expecting either an `id` or an `index` column to filter on
-                    cols = emb_lazy.collect_schema().names()
-                    if "id" in cols:
-                        id_col = "id"
-                    elif "index" in cols:
-                        id_col = "index"
-                    else:
-                        raise ValueError(
-                            "Embeddings must have either an 'id' or 'index' column to filter on."
-                        )
-
-                    # Load relevant data, filter and sort by IDs
-                    # This will raise if any IDs are missing
+                    # Load the requests indices
                     data["embeddings"] = (
-                        (
-                            emb_lazy.filter(pl.col(id_col).is_in(ids))
-                            .collect()
-                            .to_pandas()
-                            .set_index(id_col)
-                        )
-                        .loc[ids]
-                        .values
+                        emb_lazy.with_row_index(
+                            name="__index__"
+                        )  # add index column for filtering
+                        .filter(pl.col("__index__").is_in(ind))  # filter on index
+                        .collect()  # materialize the filtered embeddings
+                        .drop("__index__")  # drop the index column again
+                        .to_numpy()  # turn into numpy
                     )
 
                     assert (
@@ -550,39 +548,65 @@ class SingleProjectLoader(BaseProjectLoader):
                 # If these are pairwise distances, we need to filter on both rows and columns
                 cols = dist_lazy.collect_schema().names()
 
-                # We're expecting either an `id` or `index` column for the rows
+                # It's quite likely that we have either an "index" or an "id" column which we
+                # must ignore in our indexing
+                id_col = None
                 if "id" in cols:
                     id_col = "id"
                 elif "index" in cols:
                     id_col = "index"
                 else:
                     raise ValueError(
-                        "Distances must have either an 'id' or 'index' column to filter on."
+                        "Distance file must have either an 'id' or 'index' column to filter on."
                     )
 
-                # Next, we need to check that all IDs exists as columns too
-                # (note that columns have to be strings)
-                missing = ids[~np.isin(ids, cols)]
-                if len(missing):
+                col_mask = np.zeros(len(cols), dtype=bool)
+                if cols.index(id_col) == 0:  # index/id column is the first column
+                    col_mask[0] = True
+                    col_mask[ind + 1] = True  # +1 because of the id/index column
+                elif (
+                    cols.index(id_col) == len(cols) - 1
+                ):  # index/id column is the last column
+                    col_mask[-1] = True
+                    col_mask[ind] = True
+                else:
                     raise ValueError(
-                        f"The following IDs are missing as distance columns: {missing}"
+                        "Distance file must have the 'id' or 'index' column as the first or last column for correct filtering, "
+                        f" but got: index {cols.index(id_col)} of {len(cols)} columns"
                     )
 
+                # Which columns do we need to load?
+                cols_to_load = np.array(cols)[col_mask]
                 dists = (
-                    dist_lazy.filter(pl.col(id_col).is_in(ids))
-                    .select(ids.astype(str))
+                    dist_lazy.with_row_index(name="__index__")
+                    .filter(pl.col("__index__").is_in(ind))
+                    .select(cols_to_load)
+                    .drop("__index__")  # drop the index column again after filtering
                     .collect()
                     .to_pandas()
                     .set_index(id_col)
                 )
+
+                if dists.shape[0] != dists.shape[1]:
+                    raise ValueError(
+                        f"Distance matrix must be square after filtering, but got shape {dists.shape} with {len(ind)} requested IDs."
+                    )
+
+                # Column are likely strings whereas indices are likely integers, so we need to make sure they match
                 dists.columns = dists.columns.astype(dists.index.dtype)
-                dists = dists.loc[ids, ids]
+                if (dists.index != dists.columns).any():
+                    raise ValueError(
+                        "Distance matrix index and columns must match after filtering, but got mismatching indices and columns."
+                    )
+
+                # All good - assign to data dict
                 data["distances"] = dists
 
                 report_if_callback(progress_callback, value=30)
 
             if self.info.get("features", None) is not None:
                 report_if_callback(progress_callback, text="Loading features...")
+
                 # Lazy load features
                 features_lazy = self.load_file_lazy(self._get_file_spec("features"))
 
@@ -596,11 +620,13 @@ class SingleProjectLoader(BaseProjectLoader):
                     id_col = "__index_level_0__"
                 else:
                     raise ValueError(
-                        "Features must have either an 'id' or 'index' column to filter on."
+                        "Features must have either an 'id', 'index' or '__index_level_0__' column to filter on."
                     )
 
                 features = (
-                    features_lazy.filter(pl.col(id_col).is_in(ids))
+                    features_lazy.with_row_index(name="__index__")
+                    .filter(pl.col("__index__").is_in(ind))
+                    .drop("__index__")
                     .collect()
                     .to_pandas()
                     .set_index(id_col)

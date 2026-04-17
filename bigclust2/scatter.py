@@ -1247,10 +1247,32 @@ class ScatterFigure(BaseFigure):
             self.dists = {}
 
         if distances is not None:
-            self.dists["distances"] = distances.loc[self.ids, self.ids]
+            if distances.shape[0] != distances.shape[1]:
+                raise ValueError(
+                    f"Distance matrix must be square, got {distances.shape}."
+                )
+            if not distances.shape[0] == len(metadata):
+                raise ValueError(
+                    f"Distance matrix must have the same number of rows as metadata, got {distances.shape[0]} and {len(metadata)}."
+                )
+            if not np.all(distances.index == self.ids) or not np.all(
+                distances.columns == self.ids
+            ):
+                raise ValueError(
+                    "Index and columns of distance matrix must match IDs in metadata."
+                )
+
+            self.dists["distances"] = distances
 
         if features is not None:
-            self.dists["features"] = features.loc[self.ids]
+            if features.shape[0] != len(metadata):
+                raise ValueError(
+                    f"Number of rows in features must match number of points, got {features.shape[0]} and {len(metadata)}."
+                )
+            if not np.all(features.index == self.ids):
+                raise ValueError("Index of features must match IDs in metadata.")
+
+            self.dists["features"] = features
 
         # Datasets are used to avoid collisions when the same ID is used in different datasets
         self.datasets = self.metadata[dataset_col].values if dataset_col else None

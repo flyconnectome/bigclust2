@@ -1761,7 +1761,6 @@ class MainWindow(QMainWindow):
                 if source_features is not None:
                     if isinstance(source_features, pd.DataFrame):
                         selected_features = source_features.iloc[selected_indices].copy()
-                        selected_features.index = selected_ids
                     else:
                         selected_features = pd.DataFrame(
                             np.asarray(source_features)[selected_indices],

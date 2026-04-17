@@ -1036,11 +1036,14 @@ class MainWindow(QMainWindow):
 
     def _can_open_connectivity_table(self):
         """Whether the connectivity table can be opened for the current project."""
-        project = self._current_project_loader
-        if project is None:
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
             return False
 
-        return project.feature_type == "connectivity"
+        features = self._data.get("features")
+        if features is None or not hasattr(features, "shape") or len(features.shape) != 2:
+            return False
+
+        return features.shape[0] > 0 and features.shape[1] > 0
 
     def _can_open_distances_table(self):
         """Whether the distance heatmap can be opened for the current project."""

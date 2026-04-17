@@ -525,8 +525,8 @@ class DistancesTable(QtWidgets.QWidget):
         self.setWindowFlag(Qt.WindowStaysOnTopHint, False)
         self.show()
 
-    def select(self, ids):
-        self._model.select_rows(ids, use_index=True)
+    def select(self, indices):
+        self._model.select_rows(indices, use_index=False)
 
     def find_header(self):
         curr_col = self._table.currentIndex().column()

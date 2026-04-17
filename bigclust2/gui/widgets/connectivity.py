@@ -107,7 +107,21 @@ class TableModel(QtCore.QAbstractTableModel):
                 return str(self._view.index[section])
 
     def select_rows(self, indices, drop_empty_cols=True, use_index=True):
-        """Select rows by indices."""
+        """Select rows by indices.
+
+        Parameters
+        ----------
+        indices : list-like
+            The indices of the rows to select. Can be either the index labels (IDs)
+            or integer positions.
+        drop_empty_cols : bool, optional
+            Whether to drop columns that are zero for all selected rows. Default is True.
+        use_index : bool, optional
+            Whether the provided indices are index labels (IDs) or integer positions.
+            Default is True, i.e. the indices are index labels. If False, the
+            indices are treated as integer positions.
+
+        """
         if use_index:
             self._selected_ids = self._data.loc[indices].index
             self._view = _view_temp = self._data.loc[self._selected_ids]
@@ -860,9 +874,9 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._model.set_filter_rows(search)
 
     @trigger_graph_update
-    def select(self, ids):
-        """Select rows by IDs."""
-        self._model.select_rows(ids, use_index=True)
+    def select(self, indices):
+        """Select rows by Indices."""
+        self._model.select_rows(indices, use_index=False)
 
     def find_header(self):
         """Find the currently selected header."""

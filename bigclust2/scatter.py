@@ -240,7 +240,7 @@ class ScatterFigure(BaseFigure):
     @selected.setter
     @update_figure
     def selected(self, x):
-        """Select given points in the plot."""
+        """Select given points in the plot (indices!)."""
         if isinstance(x, type(None)):
             x = []
         elif isinstance(x, int):
@@ -297,11 +297,11 @@ class ScatterFigure(BaseFigure):
                         and self.datasets is not None
                     ):
                         func(
-                            self.ids[self.selected],
+                            self.selected,
                             datasets=self.datasets[self.selected],
                         )
                     else:
-                        func(self.ids[self.selected])
+                        func(self.selected)
                 except BaseException as e:
                     print(f"Failed to sync widget {w}:\n", e)
 
@@ -312,44 +312,50 @@ class ScatterFigure(BaseFigure):
 
     @property
     def selected_ids(self):
-        """Return the IDs of selected leafs in the figure."""
+        """Return the IDs of selected points in the figure."""
         if self.selected is None or not len(self.selected):
             return None
         if self.ids is None:
             raise ValueError("No IDs were provided.")
         return self.ids[self.selected]
 
-    def select(self, ids):
-        """Select points by ID list or index list."""
-        if ids is None:
-            self.selected = []
-            return
-
-        if isinstance(ids, (np.integer, int)):
-            ids = [int(ids)]
-
-        if isinstance(ids, (list, tuple, np.ndarray)) and len(ids) == 0:
-            self.selected = []
-            return
-
+    @selected_ids.setter
+    def selected_ids(self, x):
+        """Select given IDs in the plot."""
         if self.ids is None:
-            self.selected = np.asarray(ids, dtype=int)
-            return
+            raise ValueError("No IDs were provided.")
+        if isinstance(x, str):
+            x = [x]
+        elif isinstance(x, int):
+            x = [x]
+        elif isinstance(x, list):
+            x = np.array(x)
+        elif not isinstance(x, np.ndarray):
+            raise ValueError(f"Expected array or list, got {type(x)}.")
 
-        ids_arr = np.asarray(ids, dtype=object)
-        ids_values = np.asarray(self.ids, dtype=object)
+        ind = np.where(np.isin(self.ids, x))[0]
+        self.selected = ind
 
-        if np.array_equal(ids_values, np.arange(len(self))):
-            self.selected = np.asarray(ids_arr, dtype=int)
-            return
+    def open_selection_in_new_window(self, ids=None, ind=None):
+        """Open the current or given selection in a new window.
 
-        selected_positions = np.flatnonzero(np.isin(ids_values, ids_arr))
-        self.selected = selected_positions
+        Parameters
+        ----------
+        ids : array-like of int or str, optional
+            IDs of the leafs to open in a new window. If None, the currently
+            selected leafs will be used.
+        ind : array-like of int, optional
+            Indices of the leafs to open in a new window. If None, the currently
+            selected leafs will be used.
+        """
+        if ids is not None and ind is not None:
+            raise ValueError("Cannot specify both `ids` and `ind`.")
 
-    def open_selection_in_new_window(self, ids=None):
-        """Open the current or given selection in a new window."""
-        if ids is not None:
-            self.select(ids)
+        curr_sel = self.selected
+        if ind is not None:
+            self.selected = ind
+        elif ids is not None:
+            self.selected_ids = ids
 
         window = self.canvas.window()
         while window is not None and not hasattr(window, "on_open_selection_in_new_window"):
@@ -359,6 +365,8 @@ class ScatterFigure(BaseFigure):
             raise RuntimeError("Unable to find parent window to open selection in a new window.")
 
         window.on_open_selection_in_new_window()
+
+        self.selected = curr_sel  # restore the current selection after opening the new window
 
     @property
     def selected_ids_dataset(self):
@@ -1334,15 +1342,13 @@ class ScatterFigure(BaseFigure):
                 The widget to sync.
         callback
                 The function to call. If `None`, the widget must implement a
-                `.select()` method that takes a list of IDs to select.
-                If either method accepts a `datasets` parameter, the dataset for
-                each ID will also be passed to the method.
+                `.select()` method that takes a list of indices to select.
 
         """
         if callback is None:
             assert hasattr(widget, "select") and callable(
                 widget.select
-            ), "Widget must have a `select` method that takes a list of IDs to select."
+            ), "Widget must have a `select` method that takes a list of indices to select."
             callback = widget.select
 
         if not hasattr(self, "synced_widgets"):

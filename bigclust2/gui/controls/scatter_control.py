@@ -36,7 +36,7 @@ def requires_selection(func):
     """Decorator to check if a selection is required."""
 
     def wrapper(self, *args, **kwargs):
-        if self.figure.selected_ids is None or len(self.figure.selected_ids) == 0:
+        if self.figure.selected is None or len(self.figure.selected) == 0:
             self.figure.show_message("No neurons selected", color="red", duration=2)
             return
         return func(self, *args, **kwargs)
@@ -109,7 +109,7 @@ class ScatterControls(QtWidgets.QWidget):
 
     @property
     def selected_indices(self):
-        """Get the selected IDs."""
+        """Get the selected indices."""
         selected = getattr(self.figure, "selected", None)
         if selected is None:
             return np.array([], dtype=int)

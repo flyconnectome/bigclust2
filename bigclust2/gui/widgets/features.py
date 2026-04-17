@@ -44,8 +44,8 @@ class _OrderedTriStateCheckBox(QtWidgets.QCheckBox):
             self.setCheckState(QtCore.Qt.Unchecked)
 
 
-class _SelectIdsDialog(QtWidgets.QDialog):
-    """Reusable list-selection dialog for metadata IDs."""
+class _SelectIdDialog(QtWidgets.QDialog):
+    """Reusable list-selection dialog for metadata indices."""
 
     def __init__(self, parent, meta, figure=None):
         super().__init__(parent)
@@ -184,21 +184,20 @@ class _SelectIdsDialog(QtWidgets.QDialog):
         self.id_list.clearSelection()
 
     def _copy_figure_selection(self):
-        selected_ids = self.figure.selected_ids if self.figure is not None else None
-        if selected_ids is None:
+        selected_indices = self.figure.selected if self.figure is not None else None
+        if selected_indices is None:
             QtWidgets.QMessageBox.information(
                 self,
                 "No figure selection",
-                "Could not find parent.fig_scatter.selected_ids.",
+                "Could not find parent.fig_scatter.selected_indices.",
             )
             return
 
-        wanted = {int(i) for i in selected_ids}
+        wanted = {int(i) for i in selected_indices}
         self.id_list.clearSelection()
-        for i in range(self.id_list.count()):
+        for i in wanted:
             item = self.id_list.item(i)
-            if int(item.data(QtCore.Qt.UserRole)) in wanted:
-                item.setSelected(True)
+            item.setSelected(True)
 
 
 class FeatureExplorerWidget(QtWidgets.QWidget):
@@ -209,8 +208,6 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         metadata=None,
         group_a_name="Group A",
         group_b_name="Group B",
-        group_a_ids=None,
-        group_b_ids=None,
         features=None,
         figure=None,
         parent=None,
@@ -227,44 +224,28 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             features if isinstance(features, pd.DataFrame) else pd.DataFrame()
         )
         if not raw_features.empty and not self.meta.empty:
-            candidate_ids = set(self.meta["id"].tolist())
-            try:
-                raw_features = _set_feature_index(raw_features, candidate_ids)
-            except Exception:
-                # Fall back to original table if index inference fails.
-                pass
-
-            if raw_features.index.isin(candidate_ids).sum() > 0:
-                meta_order = pd.Index(self.meta["id"].tolist(), dtype="int64")
-                raw_features = raw_features.loc[
-                    raw_features.index.isin(candidate_ids)
-                ].copy()
-                raw_features = raw_features.reindex(
-                    meta_order.intersection(raw_features.index)
-                )
+            # IDs may be duplicate but index or (id, dataset) should uniquely identify rows
+            assert (
+                raw_features.shape[0] == self.meta.shape[0]
+            ), "Features and metadata must have the same number of rows."
 
         self.features = self._drop_all_zero_feature_columns(raw_features)
         self.figure = figure
-        self._cached_select_ids_dialog = None
+        self._cached_select_indices_dialog = None
 
-        available_ids = set(self.features.index.tolist())
-        self.group_a_ids = [
-            int(i) for i in (group_a_ids or []) if int(i) in available_ids
-        ]
-        self.group_b_ids = [
-            int(i) for i in (group_b_ids or []) if int(i) in available_ids
-        ]
+        self.group_a_indices = []
+        self.group_b_indices = []
 
         self.group_a_name = str(group_a_name)
         self.group_b_name = str(group_b_name)
         self._perm_scoring_user_overridden = False
         self._updating_perm_scoring_default = False
         self._figure_sync_callbacks = {
-            "a": lambda ids, datasets=None: self._apply_figure_selection_to_group(
-                "a", ids, invert=self._group_sync_is_inverse("a")
+            "a": lambda indices, datasets=None: self._apply_figure_selection_to_group(
+                "a", indices, invert=self._group_sync_is_inverse("a")
             ),
-            "b": lambda ids, datasets=None: self._apply_figure_selection_to_group(
-                "b", ids, invert=self._group_sync_is_inverse("b")
+            "b": lambda indices, datasets=None: self._apply_figure_selection_to_group(
+                "b", indices, invert=self._group_sync_is_inverse("b")
             ),
         }
 
@@ -357,9 +338,11 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         for col in range(self.table.columnCount()):
             header.setSectionResizeMode(
                 col,
-                QtWidgets.QHeaderView.Stretch
-                if col == self._get_col_flags()
-                else QtWidgets.QHeaderView.ResizeToContents,
+                (
+                    QtWidgets.QHeaderView.Stretch
+                    if col == self._get_col_flags()
+                    else QtWidgets.QHeaderView.ResizeToContents
+                ),
             )
         header.setSortIndicator(self._get_col_score_abs(), QtCore.Qt.DescendingOrder)
         header.setSortIndicatorShown(True)
@@ -371,7 +354,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.table.cellClicked.connect(self._on_feature_clicked)
         root.addWidget(self.table, stretch=1)
 
-        self.table_hint_label = QtWidgets.QLabel("Hint: click a row to open the feature distribution plot.")
+        self.table_hint_label = QtWidgets.QLabel(
+            "Hint: click a row to open the feature distribution plot."
+        )
         self.table_hint_label.setStyleSheet("color: #777; font-size: 11px;")
         root.addWidget(self.table_hint_label)
 
@@ -545,11 +530,11 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         if total_numeric == 0:
             return 0, 0
 
-        if not self.group_a_ids or not self.group_b_ids:
+        if not self.group_a_indices or not self.group_b_indices:
             return 0, total_numeric
 
-        group_a = self._get_group_features(self.group_a_ids)
-        group_b = self._get_group_features(self.group_b_ids)
+        group_a = self._get_group_features(self.group_a_indices)
+        group_b = self._get_group_features(self.group_b_indices)
         if group_a.empty or group_b.empty:
             return 0, total_numeric
 
@@ -561,7 +546,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         if not hasattr(self, "group_feature_count_label"):
             return
 
-        if len(self.group_a_ids) == 0 or len(self.group_b_ids) == 0:
+        if len(self.group_a_indices) == 0 or len(self.group_b_indices) == 0:
             self.group_feature_count_label.setText("")
             return
 
@@ -575,20 +560,26 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         box.setSizePolicy(
             QtWidgets.QSizePolicy.Minimum, QtWidgets.QSizePolicy.Preferred
         )
-        box.setToolTip("Choose how features are filtered, normalized, and summarized before scoring.")
+        box.setToolTip(
+            "Choose how features are filtered, normalized, and summarized before scoring."
+        )
         layout = QtWidgets.QFormLayout(box)
 
         self.aggregation_combo = QtWidgets.QComboBox()
         self.aggregation_combo.addItems(
             ["Mean ± SD", "Median ± IQR", "Trimmed mean (10%) ± SD", "Max"]
         )
-        self.aggregation_combo.setToolTip("Statistic used to summarize each group per feature.")
+        self.aggregation_combo.setToolTip(
+            "Statistic used to summarize each group per feature."
+        )
         self.aggregation_combo.currentIndexChanged.connect(self._populate_feature_rows)
         layout.addRow("Aggregation", self.aggregation_combo)
 
         self.top_level_checks = {}
         self.top_level_filter_widget = QtWidgets.QWidget()
-        self.top_level_filter_widget.setToolTip("Filter MultiIndex features by top-level category.")
+        self.top_level_filter_widget.setToolTip(
+            "Filter MultiIndex features by top-level category."
+        )
         top_level_filter_layout = QtWidgets.QVBoxLayout(self.top_level_filter_widget)
         top_level_filter_layout.setContentsMargins(0, 0, 0, 0)
         top_level_filter_layout.setSpacing(4)
@@ -598,7 +589,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             for level_name in top_levels:
                 check = QtWidgets.QCheckBox(str(level_name))
                 check.setChecked(True)
-                check.setToolTip(f"Include features from top-level group '{level_name}'.")
+                check.setToolTip(
+                    f"Include features from top-level group '{level_name}'."
+                )
                 check.stateChanged.connect(self._populate_feature_rows)
                 top_level_filter_layout.addWidget(check)
                 self.top_level_checks[level_name] = check
@@ -612,7 +605,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.min_count_spin = QtWidgets.QSpinBox()
         self.min_count_spin.setRange(0, 10000)
         self.min_count_spin.setValue(3)
-        self.min_count_spin.setToolTip("Drop features whose values are below this threshold in both groups.")
+        self.min_count_spin.setToolTip(
+            "Drop features whose values are below this threshold in both groups."
+        )
         self.min_count_spin.valueChanged.connect(self._populate_feature_rows)
 
         self.min_count_spin_norm = QtWidgets.QDoubleSpinBox()
@@ -620,11 +615,15 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.min_count_spin_norm.setDecimals(3)
         self.min_count_spin_norm.setSingleStep(0.001)
         self.min_count_spin_norm.setValue(0.005)
-        self.min_count_spin_norm.setToolTip("Drop normalized features below this threshold in both groups.")
+        self.min_count_spin_norm.setToolTip(
+            "Drop normalized features below this threshold in both groups."
+        )
         self.min_count_spin_norm.valueChanged.connect(self._populate_feature_rows)
 
         self.min_count_label = QtWidgets.QLabel("Min synapse count")
-        self.min_count_label.setToolTip("Active minimum threshold used to filter low-value features.")
+        self.min_count_label.setToolTip(
+            "Active minimum threshold used to filter low-value features."
+        )
         self.min_count_stack = QtWidgets.QStackedWidget()
         self.min_count_stack.addWidget(self.min_count_spin)
         self.min_count_stack.addWidget(self.min_count_spin_norm)
@@ -637,12 +636,16 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.min_count_stack.setSizePolicy(
             QtWidgets.QSizePolicy.Preferred, QtWidgets.QSizePolicy.Fixed
         )
-        self.min_count_stack.setToolTip("Threshold control switches with normalization mode.")
+        self.min_count_stack.setToolTip(
+            "Threshold control switches with normalization mode."
+        )
         layout.addRow(self.min_count_label, self.min_count_stack)
 
         self.normalize_check = QtWidgets.QCheckBox("Normalize per neuron")
         self.normalize_check.setChecked(False)
-        self.normalize_check.setToolTip("Normalize each neuron's feature vector before scoring.")
+        self.normalize_check.setToolTip(
+            "Normalize each neuron's feature vector before scoring."
+        )
         self.normalize_check.stateChanged.connect(self._populate_feature_rows)
         self.normalize_check.stateChanged.connect(
             self._update_min_count_control_visibility
@@ -792,7 +795,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         layout.addRow("", self.l1_settings_widget)
 
         self.perm_settings_widget = QtWidgets.QWidget()
-        self.perm_settings_widget.setToolTip("Options for Permutation Importance scoring.")
+        self.perm_settings_widget.setToolTip(
+            "Options for Permutation Importance scoring."
+        )
         perm_layout = QtWidgets.QFormLayout(self.perm_settings_widget)
         perm_layout.setContentsMargins(0, 0, 0, 0)
 
@@ -962,10 +967,10 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
     def _preferred_permutation_scoring(self):
         """Return the default permutation scoring for the current group sizes."""
-        if not self.group_a_ids or not self.group_b_ids:
+        if not self.group_a_indices or not self.group_b_indices:
             return "roc_auc"
 
-        min_group_n = min(len(self.group_a_ids), len(self.group_b_ids))
+        min_group_n = min(len(self.group_a_indices), len(self.group_b_indices))
         if min_group_n <= 20:
             return "neg_log_loss"
         return "roc_auc"
@@ -1008,14 +1013,16 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         for col in range(self.table.columnCount()):
             header.setSectionResizeMode(
                 col,
-                QtWidgets.QHeaderView.Stretch
-                if col == self._get_col_flags()
-                else QtWidgets.QHeaderView.ResizeToContents,
+                (
+                    QtWidgets.QHeaderView.Stretch
+                    if col == self._get_col_flags()
+                    else QtWidgets.QHeaderView.ResizeToContents
+                ),
             )
 
     def _update_group_summary(self):
-        group_a_n = len(self.group_a_ids)
-        group_b_n = len(self.group_b_ids)
+        group_a_n = len(self.group_a_indices)
+        group_b_n = len(self.group_b_indices)
 
         self._apply_permutation_scoring_default()
 
@@ -1047,8 +1054,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         )
 
     def _swap_groups(self):
-        """Swap group IDs and display names, then refresh computed rankings."""
-        self.group_a_ids, self.group_b_ids = self.group_b_ids, self.group_a_ids
+        """Swap group indices and display names, then refresh computed rankings."""
+        self.group_a_indices, self.group_b_indices = self.group_b_indices, self.group_a_indices
         self.group_a_name, self.group_b_name = self.group_b_name, self.group_a_name
 
         if hasattr(self, "group_a_sync_check") and hasattr(self, "group_b_sync_check"):
@@ -1086,18 +1093,18 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
     def _open_group_selection(self, target):
         """Open an ID selection dialog for one group."""
-        current_ids = self.group_a_ids if target == "a" else self.group_b_ids
+        current_indices = self.group_a_indices if target == "a" else self.group_b_indices
         title = "Select Group A IDs" if target == "a" else "Select Group B IDs"
-        selected_ids = self._select_ids_dialog(title=title, preselected_ids=current_ids)
-        if selected_ids is None:
+        selected_indices = self._select_indices_dialog(title=title, preselected_indices=current_indices)
+        if selected_indices is None:
             return
 
         if target == "a":
-            self.group_a_ids = selected_ids
-            self.group_a_name = self._group_name_from_ids(selected_ids, "Group A")
+            self.group_a_indices = selected_indices
+            self.group_a_name = self._group_name_from_ids(selected_indices, "Group A")
         else:
-            self.group_b_ids = selected_ids
-            self.group_b_name = self._group_name_from_ids(selected_ids, "Group B")
+            self.group_b_indices = selected_indices
+            self.group_b_name = self._group_name_from_ids(selected_indices, "Group B")
 
         self._update_group_summary()
         self._populate_feature_rows()
@@ -1123,7 +1130,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         ):
             self._apply_figure_selection_to_group(
                 target,
-                self.figure.selected_ids,
+                self.figure.selected,
                 invert=self._group_sync_is_inverse(target),
             )
 
@@ -1132,9 +1139,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         check = (
             self.group_a_sync_check
             if target == "a"
-            else self.group_b_sync_check
-            if target == "b"
-            else None
+            else self.group_b_sync_check if target == "b" else None
         )
         if check is None:
             return False
@@ -1163,56 +1168,49 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         ):
             self.figure.sync_widget(self, callback=self._figure_sync_callbacks["b"])
 
-    def _apply_figure_selection_to_group(self, target, selected_ids, invert=False):
-        """Apply figure selection IDs to one group and refresh results."""
-        available_ids = set(self.features.index.tolist())
-        selected_set = (
-            {int(i) for i in selected_ids if int(i) in available_ids}
-            if selected_ids is not None
-            else set()
-        )
+    def _apply_figure_selection_to_group(self, target, selected_indices, invert=False):
+        """Apply figure selection to one group and refresh results."""
+        available_indices = set(range(len(self.meta)))
+        selected_set = set(selected_indices)
         if invert:
-            new_ids = sorted(available_ids - selected_set)
+            new_indices = sorted(available_indices - selected_set)
         else:
-            new_ids = sorted(selected_set)
+            new_indices = sorted(selected_set)
 
         if target == "a":
-            if new_ids == self.group_a_ids:
+            if new_indices == self.group_a_indices:
                 return
-            self.group_a_ids = new_ids
-            self.group_a_name = self._group_name_from_ids(new_ids, "Group A")
+            self.group_a_indices = new_indices
+            self.group_a_name = self._group_name_from_ids(new_indices, "Group A")
         else:
-            if new_ids == self.group_b_ids:
+            if new_indices == self.group_b_indices:
                 return
-            self.group_b_ids = new_ids
-            self.group_b_name = self._group_name_from_ids(new_ids, "Group B")
+            self.group_b_indices = new_indices
+            self.group_b_name = self._group_name_from_ids(new_indices, "Group B")
 
         self._update_group_summary()
         self._populate_feature_rows()
 
-    def _select_ids_dialog(self, title, preselected_ids):
-        """Show a modal dialog to pick IDs from metadata."""
+    def _select_indices_dialog(self, title, preselected_indices):
+        """Show a modal dialog to pick indices from metadata."""
         if self.meta.empty or "id" not in self.meta.columns:
             QtWidgets.QMessageBox.warning(
                 self, "No metadata", "Metadata with an 'id' column is required."
             )
             return None
 
-        if self._cached_select_ids_dialog is None:
-            self._cached_select_ids_dialog = _SelectIdsDialog(
+        if self._cached_select_indices_dialog is None:
+            self._cached_select_indices_dialog = _SelectIdDialog(
                 self, self.meta, figure=self.figure
             )
         else:
-            self._cached_select_ids_dialog.set_figure(self.figure)
+            self._cached_select_indices_dialog.set_figure(self.figure)
 
-        self._cached_select_ids_dialog.reset(title, preselected_ids)
-        if self._cached_select_ids_dialog.exec() != QtWidgets.QDialog.Accepted:
+        self._cached_select_indices_dialog.reset(title, preselected_indices)
+        if self._cached_select_indices_dialog.exec() != QtWidgets.QDialog.Accepted:
             return None
 
-        return [
-            int(item.data(QtCore.Qt.UserRole))
-            for item in self._cached_select_ids_dialog.id_list.selectedItems()
-        ]
+        return [index.row() for index in self._cached_select_indices_dialog.id_list.selectedIndexes()]
 
     def _drop_all_zero_feature_columns(self, features):
         """Drop numeric columns that are zero for every row."""
@@ -1287,11 +1285,13 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 )
                 return
 
-            group_a = self._get_group_features(self.group_a_ids)
-            group_b = self._get_group_features(self.group_b_ids)
+            group_a = self._get_group_features(self.group_a_indices)
+            group_b = self._get_group_features(self.group_b_indices)
 
             if group_a.empty or group_b.empty:
-                self._update_group_feature_count_label(0, int(numeric_features.shape[1]))
+                self._update_group_feature_count_label(
+                    0, int(numeric_features.shape[1])
+                )
                 self._set_single_status_row(
                     feature_text="Missing group data",
                     flags_text="Could not match IDs between metadata and features",
@@ -1582,27 +1582,23 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         if self.normalize_check.isChecked():
             vals_a = (
-                self._get_group_features(self.group_a_ids)[feature_name]
+                self._get_group_features(self.group_a_indices)[feature_name]
                 .dropna()
                 .values.astype(float)
             )
             vals_b = (
-                self._get_group_features(self.group_b_ids)[feature_name]
+                self._get_group_features(self.group_b_indices)[feature_name]
                 .dropna()
                 .values.astype(float)
             )
         else:
             vals_a = (
-                numeric_features.loc[
-                    numeric_features.index.isin(self.group_a_ids), feature_name
-                ]
+                numeric_features.iloc[list(self.group_a_indices)][feature_name]
                 .dropna()
                 .values.astype(float)
             )
             vals_b = (
-                numeric_features.loc[
-                    numeric_features.index.isin(self.group_b_ids), feature_name
-                ]
+                numeric_features.iloc[list(self.group_b_indices)][feature_name]
                 .dropna()
                 .values.astype(float)
             )
@@ -1832,7 +1828,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 .reindex(scores.index),
             },
             index=scores.index,
-        ).fillna({"abs_score": -np.inf, "raw_score": -np.inf, "abs_center_diff": -np.inf})
+        ).fillna(
+            {"abs_score": -np.inf, "raw_score": -np.inf, "abs_center_diff": -np.inf}
+        )
 
         if score_mode == "raw":
             ranking_df = ranking_df.sort_values(
@@ -1917,16 +1915,18 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                 group_a, group_b
             )
             min_group_n = min(len(group_a), len(group_b))
-            if self._is_degenerate_permutation_importance(
-                finite_scores.values, scoring
-            ) or compressed_scores or (
-                scoring in {"roc_auc", "average_precision"}
-                and (
-                    (near_perfect >= 1 and min_group_n <= 50)
-                    or (near_perfect >= 2)
+            if (
+                self._is_degenerate_permutation_importance(
+                    finite_scores.values, scoring
                 )
-            ) or (
-                scoring == "accuracy" and near_perfect >= 1 and min_group_n <= 30
+                or compressed_scores
+                or (
+                    scoring in {"roc_auc", "average_precision"}
+                    and (
+                        (near_perfect >= 1 and min_group_n <= 50) or (near_perfect >= 2)
+                    )
+                )
+                or (scoring == "accuracy" and near_perfect >= 1 and min_group_n <= 30)
             ):
                 warning_text = (
                     "Permutation importance may be unreliable here because the groups look very easy to separate, "
@@ -2301,9 +2301,12 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
                     return pd.Series(np.nan, index=group_a.columns, dtype=float)
 
                 current_scoring = scoring
-                if self._is_degenerate_permutation_importance(
-                    importances, current_scoring
-                ) and scoring != "neg_log_loss":
+                if (
+                    self._is_degenerate_permutation_importance(
+                        importances, current_scoring
+                    )
+                    and scoring != "neg_log_loss"
+                ):
                     fallback_importances = self._collect_permutation_importances(
                         X,
                         y,
@@ -2449,10 +2452,10 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         keep_mask = (max_a >= min_value) | (max_b >= min_value)
         return group_a.columns[keep_mask]
 
-    def _get_group_features(self, group_ids):
+    def _get_group_features(self, group_indices):
         """Return the selected group's numeric feature rows, normalized if enabled."""
         features = self._get_numeric_feature_table()
-        group = features.loc[features.index.isin(group_ids)]
+        group = features.iloc[list(group_indices)]
         if self.normalize_check.isChecked():
             return self._normalize_features(group)
         return group

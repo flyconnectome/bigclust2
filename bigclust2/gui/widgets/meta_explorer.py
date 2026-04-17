@@ -476,26 +476,23 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		self._meta.iloc[rows].to_csv(path, index=False)
 
 	def _on_select(self):
-		ids = self.selected_ids()
-		if self._figure is not None and hasattr(self._figure, "select"):
+		indices = self.selected_row_positions()
+		if self._figure is not None:
 			try:
-				self._figure.select(ids)
+				self._figure.selected = indices
 				return
 			except Exception:
 				pass
-		self.selectRequested.emit(ids)
+		self.selectRequested.emit(indices)
 
 	def _on_open_new(self):
-		ids = self.selected_ids()
+		ind = self.selected_row_positions()
 		if self._figure is not None:
-			for method_name in ("open_selection_in_new_window", "open_in_new_window", "open_new_window"):
-				if hasattr(self._figure, method_name):
-					try:
-						getattr(self._figure, method_name)(ids)
-						return
-					except Exception:
-						pass
-		self.openInNewWindowRequested.emit(ids)
+			try:
+				self._figure.open_selection_in_new_window(ind=ind)
+			except Exception:
+				pass
+		self.openInNewWindowRequested.emit(ind)
 
 
 if __name__ == "__main__":

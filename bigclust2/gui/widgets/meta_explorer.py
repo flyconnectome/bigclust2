@@ -109,6 +109,7 @@ class ColumnFilterRow(QtWidgets.QWidget):
 
 	OPERATORS = [
 		"contains",
+		"not contains",
 		"equals",
 		"not equals",
 		">",
@@ -375,6 +376,8 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 
 		if op == "contains":
 			return mask & vals.str.contains(low_value, na=False, regex=False)
+		if op == "not contains":
+			return mask & ~vals.str.contains(low_value, na=False, regex=False)
 		if op == "equals":
 			return mask & (vals == low_value)
 		if op == "not equals":

@@ -14,6 +14,7 @@ from ...embeddings import (
     make_embedding_estimator,
     prepare_embedding_input,
 )
+from ...clusters import evaluate_clustering_sample
 from ...utils import labels_to_colors, is_color_column
 
 
@@ -29,6 +30,7 @@ logger = logging.getLogger(__name__)
 CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
 CLUSTER_DATA_OPTION = "cluster (bigclust)"
 CLUSTER_DATA_COLUMN = "bigclust_cluster"
+EVALUATE_DATA_COLUMN = "bigclust_label_evaluation"
 CLUSTER_HOMOGENEOUS_LABEL_CURRENT = "Current labels"
 
 
@@ -102,10 +104,13 @@ class ScatterControls(QtWidgets.QWidget):
 
     @property
     def labels(self):
+        """Get labels for each observation."""
+        return self.figure.labels
+
+    @property
+    def labels_unique(self):
         """Get unique labels."""
-        if not hasattr(self, "_labels"):
-            self._labels = np.unique(self.figure.labels)
-        return self._labels
+        return np.unique(self.figure.labels)
 
     @property
     def selected_indices(self):
@@ -144,7 +149,7 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.searchbar.returnPressed.connect(self.find_next)
         # self.searchbar.textChanged.connect(self.figure.highlight_cluster)
-        self.searchbar_completer = QtWidgets.QCompleter(self.labels)
+        self.searchbar_completer = QtWidgets.QCompleter(self.labels_unique)
         self.searchbar_completer.setCaseSensitivity(QtCore.Qt.CaseInsensitive)
         self.searchbar.setCompleter(self.searchbar_completer)
         search_form.addRow(self.searchbar)
@@ -817,6 +822,81 @@ class ScatterControls(QtWidgets.QWidget):
             self.set_knn_edges
         )
         settings_form.addRow("Distance:", self.fidelity_knn_distance_combo_box)
+
+        # Evaluate labels
+        settings_group = QtWidgets.QGroupBox("Evaluate Labels")
+        settings_form = QtWidgets.QFormLayout()
+        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_group.setLayout(settings_form)
+        self.evaluate_labels_form = settings_form
+        self.tab6_layout.addWidget(settings_group)
+
+        self.evaluate_labels_show_check = QtWidgets.QCheckBox()
+        self.evaluate_labels_show_check.setToolTip(
+            "Enable per-sample evaluation of label assignments in the embedding."
+        )
+        self.evaluate_labels_show_check.setChecked(False)
+        self.evaluate_labels_show_check.stateChanged.connect(
+            self._on_evaluate_labels_toggle
+        )
+        settings_form.addRow("Show:", self.evaluate_labels_show_check)
+
+        self.evaluate_labels_method_combo_box = QtWidgets.QComboBox()
+        self.evaluate_labels_method_combo_box.setToolTip(
+            "Select the evaluation method for per-sample label scores."
+        )
+        self.evaluate_labels_method_combo_box.addItems(
+            ["Silhouette", "Neighbor consistency"]
+        )
+        self.evaluate_labels_method_combo_box.setItemData(
+            0,
+            "Use silhouette samples to score how well each point fits its assigned cluster.",
+            QtCore.Qt.ToolTipRole,
+        )
+        self.evaluate_labels_method_combo_box.setItemData(
+            1,
+            "Score each point by how often its nearest neighbors share the same label.",
+            QtCore.Qt.ToolTipRole,
+        )
+        self.evaluate_labels_method_combo_box.currentIndexChanged.connect(
+            self._update_evaluate_labels_controls
+        )
+        self.evaluate_labels_method_combo_box.currentIndexChanged.connect(
+            self._on_evaluate_labels_toggle
+        )
+        settings_form.addRow("Method:", self.evaluate_labels_method_combo_box)
+
+        self.evaluate_labels_metric_combo_box = QtWidgets.QComboBox()
+        self.evaluate_labels_metric_combo_box.setToolTip(
+            "Distance metric used when computing per-sample label evaluation."
+        )
+        self.evaluate_labels_metric_combo_box.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        self.evaluate_labels_metric_combo_box.setCurrentText("cosine")
+        self.evaluate_labels_metric_combo_box.currentIndexChanged.connect(
+            self._on_evaluate_labels_toggle
+        )
+        settings_form.addRow("Metric:", self.evaluate_labels_metric_combo_box)
+
+        self.evaluate_labels_k_spinbox = QtWidgets.QSpinBox()
+        self.evaluate_labels_k_spinbox.setRange(1, 200)
+        self.evaluate_labels_k_spinbox.setValue(10)
+        self.evaluate_labels_k_spinbox.setToolTip(
+            "Number of neighbors used for neighbor-consistency evaluation."
+        )
+        self.evaluate_labels_k_spinbox.valueChanged.connect(
+            self._on_evaluate_labels_toggle
+        )
+        self.evaluate_labels_k_row = QtWidgets.QWidget()
+        k_row_layout = QtWidgets.QHBoxLayout()
+        k_row_layout.setContentsMargins(0, 0, 0, 0)
+        k_row_layout.addWidget(self.evaluate_labels_k_spinbox)
+        self.evaluate_labels_k_row.setLayout(k_row_layout)
+        self.evaluate_labels_k_label = QtWidgets.QLabel("k neighbors:")
+        settings_form.addRow(self.evaluate_labels_k_label, self.evaluate_labels_k_row)
+        self.evaluate_labels_k_row.setVisible(False)
+        self.evaluate_labels_k_label.setVisible(False)
 
         # Distances edges
         settings_group = QtWidgets.QGroupBox("Distances")
@@ -2401,6 +2481,128 @@ class ScatterControls(QtWidgets.QWidget):
                 "metric": self.fidelity_knn_distance_combo_box.currentText(),
                 "distance": self.fidelity_knn_distance_combo_box.currentText(),
             }
+
+    def _on_evaluate_labels_toggle(self):
+        """React to changes in the evaluate labels checkbox."""
+        if self.evaluate_labels_show_check.isChecked():
+            self._save_current_color_settings()
+            if self._evaluate_labels():
+                self._apply_evaluate_label_color()
+            else:
+                self._restore_previous_color_settings()
+        else:
+            self._restore_previous_color_settings()
+
+    def _save_current_color_settings(self):
+        """Save the current color column and palette so we can restore them later."""
+        if not hasattr(self, "_prev_evaluate_color_col"):
+            self._prev_evaluate_color_col = self.color_combo_box.currentText()
+            self._prev_evaluate_palette = self.palette_combo_box.currentText()
+
+    def _update_evaluate_labels_controls(self):
+        """Show or hide evaluation controls depending on selected method."""
+        method_key = self.evaluate_labels_method_combo_box.currentText().lower().replace(
+            " ", "_"
+        )
+        show_k = method_key == "neighbor_consistency"
+        self.evaluate_labels_k_row.setVisible(show_k)
+        if hasattr(self, "evaluate_labels_k_label"):
+            self.evaluate_labels_k_label.setVisible(show_k)
+
+    def _apply_evaluate_label_color(self):
+        """Switch color settings to the shared evaluation result column and coolwarm palette."""
+        self.palette_combo_box.setCurrentText("matplotlib:coolwarm")
+        if self.color_combo_box.findText(EVALUATE_DATA_COLUMN) >= 0:
+            self.color_combo_box.setCurrentText(EVALUATE_DATA_COLUMN)
+
+        # Force refresh even if the color column text did not change.
+        self.set_colors()
+
+    def _restore_previous_color_settings(self):
+        """Restore the previous color column and palette after evaluation is turned off."""
+        if hasattr(self, "_prev_evaluate_color_col"):
+            self.palette_combo_box.setCurrentText(self._prev_evaluate_palette)
+            self.color_combo_box.setCurrentText(self._prev_evaluate_color_col)
+            del self._prev_evaluate_color_col
+            del self._prev_evaluate_palette
+
+    def _evaluate_labels(self):
+        """Compute per-sample evaluation scores and store them in metadata."""
+        if self.figure.metadata is None:
+            self.figure.show_message(
+                "Metadata is required for label evaluation.",
+                color="red",
+                duration=3,
+            )
+            self.evaluate_labels_show_check.blockSignals(True)
+            self.evaluate_labels_show_check.setChecked(False)
+            self.evaluate_labels_show_check.blockSignals(False)
+            return
+
+        data = self._selected_embedding_data()
+        if data is None:
+            self.figure.show_message(
+                "No embedding or distance data available for evaluation.",
+                color="red",
+                duration=3,
+            )
+            self.evaluate_labels_show_check.blockSignals(True)
+            self.evaluate_labels_show_check.setChecked(False)
+            self.evaluate_labels_show_check.blockSignals(False)
+            return
+
+        method_text = self.evaluate_labels_method_combo_box.currentText()
+        method_key = method_text.lower().replace(" ", "_")
+        if method_key not in ("silhouette", "neighbor_consistency"):
+            self.figure.show_message(
+                f"Unknown evaluation method '{method_text}'.",
+                color="red",
+                duration=3,
+            )
+            return
+
+        labels = np.asarray(self.labels, dtype=object)
+        if labels.size < 2:
+            self.figure.show_message(
+                "At least 2 samples are required for per-sample evaluation.",
+                color="red",
+                duration=3,
+            )
+            return
+
+        labels = pd.factorize(labels)[0]
+        metric = self.evaluate_labels_metric_combo_box.currentText()
+        k_neighbors = int(self.evaluate_labels_k_spinbox.value())
+        is_precomputed = is_precomputed_distance_matrix(data)
+
+        try:
+            scores = evaluate_clustering_sample(
+                data,
+                labels,
+                method=method_key,
+                is_precomputed=is_precomputed,
+                metric=metric,
+                k_neighbors=k_neighbors,
+            )
+        except Exception as exc:
+            self.figure.show_message(
+                f"Label evaluation failed: {exc}",
+                color="red",
+                duration=4,
+            )
+            return
+
+        col_name = EVALUATE_DATA_COLUMN
+        col_exists = col_name in self.figure.metadata.columns
+        self.figure.metadata[col_name] = np.asarray(scores, dtype=float)
+        self.update_label_combo_boxes()
+        if not col_exists:
+            self.figure.show_message(
+                f"Added evaluation column '{col_name}' to metadata.",
+                color="lightgreen",
+                duration=3,
+            )
+        return True
 
     def set_labels(self):
         """Set the leaf labels."""

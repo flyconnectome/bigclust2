@@ -200,8 +200,281 @@ class _SelectIdDialog(QtWidgets.QDialog):
             item.setSelected(True)
 
 
+class _ClusterEvaluationDialog(QtWidgets.QDialog):
+    """Dialog for inspecting the current group split with multiple clustering metrics."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Evaluate group split")
+        self.resize(520, 420)
+        root = QtWidgets.QVBoxLayout(self)
+
+        options_layout = QtWidgets.QFormLayout()
+        self.distance_metric_combo = QtWidgets.QComboBox()
+        self.distance_metric_combo.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        self.distance_metric_combo.setCurrentText("cosine")
+        self.distance_metric_combo.setToolTip(
+            "Distance metric used for silhouette and neighborhood-based scores."
+        )
+        self.distance_metric_combo.currentIndexChanged.connect(self._refresh_results)
+        options_layout.addRow("Distance metric", self.distance_metric_combo)
+
+        self.k_neighbors_spin = QtWidgets.QSpinBox()
+        self.k_neighbors_spin.setRange(1, 200)
+        self.k_neighbors_spin.setValue(10)
+        self.k_neighbors_spin.setToolTip(
+            "Number of neighbors used for neighbor consistency or modularity metrics."
+        )
+        self.k_neighbors_spin.valueChanged.connect(self._refresh_results)
+        options_layout.addRow("k neighbors", self.k_neighbors_spin)
+
+        self.trim_outliers_check = QtWidgets.QCheckBox("Trim outliers")
+        self.trim_outliers_check.setToolTip(
+            "Remove per-group outlier samples before computing split metrics."
+        )
+        self.trim_outliers_check.stateChanged.connect(self._on_trim_outliers_changed)
+
+        self.outlier_count_label = QtWidgets.QLabel()
+        self.outlier_count_label.setStyleSheet("color: #777; font-size: 11px;")
+        self.outlier_count_label.hide()
+
+        outlier_row = QtWidgets.QWidget()
+        outlier_row_layout = QtWidgets.QHBoxLayout(outlier_row)
+        outlier_row_layout.setContentsMargins(0, 0, 0, 0)
+        outlier_row_layout.setSpacing(8)
+        outlier_row_layout.addWidget(self.trim_outliers_check)
+        outlier_row_layout.addWidget(self.outlier_count_label)
+        outlier_row_layout.addStretch(1)
+        options_layout.addRow(outlier_row)
+
+        self.trim_outliers_threshold_label = QtWidgets.QLabel("Threshold")
+        self.trim_outliers_threshold_spin = QtWidgets.QDoubleSpinBox()
+        self.trim_outliers_threshold_spin.setRange(1.0, 10.0)
+        self.trim_outliers_threshold_spin.setSingleStep(0.1)
+        self.trim_outliers_threshold_spin.setValue(3.0)
+        self.trim_outliers_threshold_spin.setToolTip(
+            "MAD-based outlier threshold: samples above this normalized distance are removed."
+        )
+        self.trim_outliers_threshold_spin.valueChanged.connect(self._refresh_results)
+        options_layout.addRow(
+            self.trim_outliers_threshold_label, self.trim_outliers_threshold_spin
+        )
+        self.trim_outliers_threshold_label.setVisible(False)
+        self.trim_outliers_threshold_spin.setVisible(False)
+
+        self._cluster_metric_tooltips = {
+            "Silhouette": (
+                "Silhouette measures how well each sample fits its own group versus the nearest other group.\n"
+                "High values (near 1) mean clear separation; values around 0 mean overlapping groups; negative values mean poor assignment."
+            ),
+            "Davies-Bouldin": (
+                "Davies-Bouldin compares intra-group scatter to inter-group separation.\n"
+                "Lower values are better; values near 0 indicate compact, well-separated groups.\n"
+                "Best for roughly spherical clusters; non-spherical shapes can make the score misleading."
+            ),
+            "Calinski-Harabasz": (
+                "Calinski-Harabasz compares between-group variance to within-group variance.\n"
+                "Higher values indicate tighter, better-separated groups, with no fixed upper bound.\n"
+                "Designed for compact, spherical clusters — irregular cluster shapes can distort the score."
+            ),
+            "Neighbor consistency": (
+                "Neighbor consistency checks whether each sample's nearest neighbors are in the same group.\n"
+                "High values mean local neighborhoods mostly agree with grouping; low values mean neighbors are mixed."
+            ),
+            "Graph modularity": (
+                "Graph modularity measures community structure in the k-NN graph of the data.\n"
+                "Higher values mean stronger group structure; values near zero mean the grouping is no better than random."
+            ),
+        }
+
+        root.addLayout(options_layout)
+
+        self.result_hint = QtWidgets.QLabel(
+            "Results are computed for all supported split metrics using the current parameters."
+        )
+        self.result_hint.setWordWrap(True)
+        self.result_hint.setStyleSheet("color: #666; font-size: 12px;")
+        root.addWidget(self.result_hint)
+
+        self.results_table = QtWidgets.QTableWidget(0, 3)
+        self.results_table.setHorizontalHeaderLabels(
+            ["Metric", "Score", "Interpretation"]
+        )
+        self.results_table.verticalHeader().setVisible(False)
+        self.results_table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self.results_table.setSelectionMode(QtWidgets.QAbstractItemView.NoSelection)
+        self.results_table.setFocusPolicy(QtCore.Qt.NoFocus)
+        self.results_table.setAlternatingRowColors(True)
+        self.results_table.setToolTip(
+            "Each row shows a different clustering evaluation metric for the selected groups."
+        )
+        header = self.results_table.horizontalHeader()
+        header.setSectionResizeMode(QtWidgets.QHeaderView.Interactive)
+        self.results_table.setColumnWidth(0, 150)
+        self.results_table.setColumnWidth(1, 90)
+        self.results_table.setColumnWidth(2, 250)
+        root.addWidget(self.results_table, stretch=1)
+
+        self.warning_label = QtWidgets.QLabel()
+        self.warning_label.setWordWrap(True)
+        self.warning_label.setStyleSheet(
+            "color: #b02a37; background: #fff1f0; border: 1px solid #f5c2c7; padding: 6px; border-radius: 4px;"
+        )
+        self.warning_label.hide()
+        root.addWidget(self.warning_label)
+
+        buttons = QtWidgets.QWidget()
+        buttons_layout = QtWidgets.QHBoxLayout(buttons)
+        buttons_layout.setContentsMargins(0, 0, 0, 0)
+        buttons_layout.setSpacing(6)
+
+        buttons_layout.addStretch(1)
+
+        self.close_button = QtWidgets.QPushButton("Close")
+        self.close_button.clicked.connect(self.accept)
+        buttons_layout.addWidget(self.close_button)
+        root.addWidget(buttons)
+
+        self._refresh_results()
+
+    def _refresh_results(self):
+        self.warning_label.hide()
+        self.results_table.clearContents()
+        self.results_table.setRowCount(0)
+        widget = self.parent()
+        if widget is None:
+            return
+
+        try:
+            results = widget._compute_cluster_evaluation_scores(
+                self.distance_metric_combo.currentText(),
+                int(self.k_neighbors_spin.value()),
+                trim_outliers=self.trim_outliers_check.isChecked(),
+                outlier_threshold=float(self.trim_outliers_threshold_spin.value()),
+            )
+            self._update_outlier_count_label(widget)
+        except ValueError as exc:
+            self.warning_label.setText(str(exc))
+            self.warning_label.show()
+            self.outlier_count_label.hide()
+            return
+
+        for metric_name, value in results.items():
+            row = self.results_table.rowCount()
+            self.results_table.insertRow(row)
+            metric_item = QtWidgets.QTableWidgetItem(metric_name)
+            metric_item.setToolTip(self._cluster_metric_tooltips.get(metric_name, ""))
+            self.results_table.setItem(row, 0, metric_item)
+            score_text = "-"
+            interpretation = ""
+            if isinstance(value, float) and np.isfinite(value):
+                score_text = f"{value:.3f}"
+                interpretation = self._interpret_cluster_metric(metric_name, value)
+            elif isinstance(value, str):
+                interpretation = value
+            elif value is None:
+                interpretation = "Unavailable"
+
+            score_item = QtWidgets.QTableWidgetItem(score_text)
+            score_item.setTextAlignment(QtCore.Qt.AlignRight | QtCore.Qt.AlignVCenter)
+            score_item.setToolTip(self._cluster_metric_tooltips.get(metric_name, ""))
+            interpretation_item = QtWidgets.QTableWidgetItem(interpretation)
+            interpretation_item.setFlags(
+                interpretation_item.flags() & ~QtCore.Qt.ItemIsSelectable
+            )
+            interpretation_item.setToolTip(self._cluster_metric_tooltips.get(metric_name, ""))
+            self.results_table.setItem(row, 1, score_item)
+            self.results_table.setItem(row, 2, interpretation_item)
+
+    def _on_trim_outliers_changed(self, _state):
+        enabled = self.trim_outliers_check.isChecked()
+        self.trim_outliers_threshold_label.setVisible(enabled)
+        self.trim_outliers_threshold_spin.setVisible(enabled)
+        self._refresh_results()
+
+    def _update_outlier_count_label(self, widget):
+        if not self.trim_outliers_check.isChecked():
+            self.outlier_count_label.hide()
+            return
+
+        raw_features = widget._get_numeric_feature_table()
+        indices = list(widget.group_a_indices) + list(widget.group_b_indices)
+        features = raw_features.iloc[indices].copy()
+        if widget.normalize_check.isChecked():
+            features = widget._normalize_features(features)
+
+        labels = np.concatenate(
+            [np.zeros(len(widget.group_a_indices), dtype=int),
+             np.ones(len(widget.group_b_indices), dtype=int)]
+        )
+        trimmed_features, trimmed_labels = widget._trim_outliers(
+            features,
+            labels,
+            threshold=float(self.trim_outliers_threshold_spin.value()),
+        )
+        removed_a = int((labels == 0).sum() - (trimmed_labels == 0).sum())
+        removed_b = int((labels == 1).sum() - (trimmed_labels == 1).sum())
+
+        total_a = int((labels == 0).sum())
+        total_b = int((labels == 1).sum())
+        self.outlier_count_label.setText(
+            f"Outliers removed: Group A {removed_a}/{total_a}, Group B {removed_b}/{total_b}."
+        )
+        self.outlier_count_label.show()
+
+    def _interpret_cluster_metric(self, metric_name, score):
+        if metric_name == "Silhouette":
+            if score >= 0.5:
+                return "Strong separation"
+            if score >= 0.25:
+                return "Moderate separation"
+            if score >= 0.0:
+                return "Weak separation"
+            return "Poor / overlapping"
+
+        if metric_name == "Davies-Bouldin":
+            if score < 0.5:
+                return "Excellent clustering"
+            if score < 1.0:
+                return "Good clustering"
+            if score < 2.0:
+                return "Fair clustering"
+            return "Weak clustering"
+
+        if metric_name == "Calinski-Harabasz":
+            return "Higher is better; larger values imply tighter, better-separated groups."
+
+        if metric_name == "Neighbor consistency":
+            if score >= 0.8:
+                return "Very consistent neighborhoods"
+            if score >= 0.5:
+                return "Moderately consistent"
+            return "Low neighborhood consistency"
+
+        if metric_name == "Graph modularity":
+            if score >= 0.5:
+                return "Strong community structure"
+            if score >= 0.2:
+                return "Moderate community structure"
+            if score >= 0.0:
+                return "Weak community structure"
+            return "Unclear / negative structure"
+
+        return ""
+
+    def _set_warning(self, text):
+        if not text:
+            self.warning_label.hide()
+            self.warning_label.clear()
+            return
+        self.warning_label.setText(text)
+        self.warning_label.show()
+
+
 class FeatureExplorerWidget(QtWidgets.QWidget):
-    """Skeleton widget for prototyping feature ranking UI."""
+    """Explore feature ranking UI."""
 
     def __init__(
         self,
@@ -442,13 +715,26 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         group_a_row.addWidget(self.group_a_count_label)
         group_a_row.addStretch(1)
 
-        self.group_a_button = QtWidgets.QPushButton()
-        self.group_a_button.setToolTip("Select IDs for Group A")
+        self.group_a_button = QtWidgets.QPushButton("Edit")
+        self.group_a_button.setToolTip("Edit IDs for Group A")
         self.group_a_button.clicked.connect(lambda: self._open_group_selection("a"))
         group_a_row.addWidget(self.group_a_button)
         group_a_layout.addLayout(group_a_row)
         if self.figure is not None:
-            self.group_a_sync_check = _OrderedTriStateCheckBox("sync w/ figure")
+            group_a_tool_row = QtWidgets.QHBoxLayout()
+            group_a_tool_row.setContentsMargins(0, 0, 0, 0)
+            group_a_tool_row.setSpacing(6)
+
+            self.group_a_copy_selection_button = QtWidgets.QPushButton("Copy Selection")
+            self.group_a_copy_selection_button.setToolTip(
+                "Copy the current figure selection into Group A."
+            )
+            self.group_a_copy_selection_button.clicked.connect(
+                lambda: self._copy_figure_selection_to_group("a")
+            )
+            group_a_tool_row.addWidget(self.group_a_copy_selection_button)
+
+            self.group_a_sync_check = _OrderedTriStateCheckBox("sync")
             self.group_a_sync_check.setProperty("sync_target", "a")
             self.group_a_sync_check.setTristate(True)
             self.group_a_sync_check.setToolTip(
@@ -457,7 +743,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             self.group_a_sync_check.stateChanged.connect(
                 self._on_group_sync_checkbox_changed
             )
-            group_a_layout.addWidget(self.group_a_sync_check)
+            group_a_tool_row.addWidget(self.group_a_sync_check)
+            group_a_tool_row.addStretch(1)
+            group_a_layout.addLayout(group_a_tool_row)
         layout.addWidget(self.group_a_box)
 
         self.swap_groups_btn = QtWidgets.QToolButton()
@@ -496,13 +784,26 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         group_b_row.addWidget(self.group_b_count_label)
         group_b_row.addStretch(1)
 
-        self.group_b_button = QtWidgets.QPushButton()
-        self.group_b_button.setToolTip("Select IDs for Group B")
+        self.group_b_button = QtWidgets.QPushButton("Edit")
+        self.group_b_button.setToolTip("Edit IDs for Group B")
         self.group_b_button.clicked.connect(lambda: self._open_group_selection("b"))
         group_b_row.addWidget(self.group_b_button)
         group_b_layout.addLayout(group_b_row)
         if self.figure is not None:
-            self.group_b_sync_check = _OrderedTriStateCheckBox("sync w/ figure")
+            group_b_tool_row = QtWidgets.QHBoxLayout()
+            group_b_tool_row.setContentsMargins(0, 0, 0, 0)
+            group_b_tool_row.setSpacing(6)
+
+            self.group_b_copy_selection_button = QtWidgets.QPushButton("Copy Selection")
+            self.group_b_copy_selection_button.setToolTip(
+                "Copy the current figure selection into Group B."
+            )
+            self.group_b_copy_selection_button.clicked.connect(
+                lambda: self._copy_figure_selection_to_group("b")
+            )
+            group_b_tool_row.addWidget(self.group_b_copy_selection_button)
+
+            self.group_b_sync_check = _OrderedTriStateCheckBox("sync")
             self.group_b_sync_check.setProperty("sync_target", "b")
             self.group_b_sync_check.setTristate(True)
             self.group_b_sync_check.setToolTip(
@@ -511,7 +812,9 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             self.group_b_sync_check.stateChanged.connect(
                 self._on_group_sync_checkbox_changed
             )
-            group_b_layout.addWidget(self.group_b_sync_check)
+            group_b_tool_row.addWidget(self.group_b_sync_check)
+            group_b_tool_row.addStretch(1)
+            group_b_layout.addLayout(group_b_tool_row)
         layout.addWidget(self.group_b_box)
 
         self.group_feature_count_label = QtWidgets.QLabel()
@@ -520,6 +823,13 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             "Numeric feature columns surviving the current top-level and minimum-value filters for the selected groups."
         )
         layout.addWidget(self.group_feature_count_label)
+
+        self.group_split_eval_button = QtWidgets.QPushButton("Eval. separation")
+        self.group_split_eval_button.setToolTip(
+            "Open the cluster-split evaluation dialog for the current Group A / Group B selection."
+        )
+        self.group_split_eval_button.clicked.connect(self._open_cluster_evaluation_dialog)
+        layout.addWidget(self.group_split_eval_button)
 
         return box
 
@@ -840,6 +1150,107 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self._update_l1_stability_controls()
         return box
 
+    def _open_cluster_evaluation_dialog(self):
+        dialog = _ClusterEvaluationDialog(self)
+        dialog.exec()
+
+    def _compute_cluster_evaluation_scores(
+        self,
+        distance_metric,
+        k_neighbors,
+        trim_outliers=False,
+        outlier_threshold=3.0,
+    ):
+        if not self.group_a_indices or not self.group_b_indices:
+            raise ValueError("Select both Group A and Group B before evaluating.")
+
+        overlap = set(self.group_a_indices) & set(self.group_b_indices)
+        if overlap:
+            raise ValueError("Group A and Group B must not overlap.")
+
+        numeric_features = self._get_numeric_feature_table()
+        if numeric_features.shape[1] == 0:
+            raise ValueError("No numeric features are available for evaluation.")
+
+        indices = list(self.group_a_indices) + list(self.group_b_indices)
+        features = numeric_features.iloc[indices].copy()
+        if self.normalize_check.isChecked():
+            features = self._normalize_features(features)
+
+        labels = np.concatenate(
+            [np.zeros(len(self.group_a_indices), dtype=int),
+             np.ones(len(self.group_b_indices), dtype=int)]
+        )
+
+        if trim_outliers:
+            features, labels = self._trim_outliers(
+                features, labels, threshold=float(outlier_threshold)
+            )
+            group_a_n = int((labels == 0).sum())
+            group_b_n = int((labels == 1).sum())
+            if group_a_n < 2 or group_b_n < 2:
+                raise ValueError(
+                    "Trimming removed too many samples to evaluate group split."
+                )
+
+        if features.isnull().values.any():
+            features = features.fillna(0.0)
+
+        if features.shape[0] < 2:
+            raise ValueError("Need at least 2 observations to evaluate group split.")
+
+        method_map = {
+            "Silhouette": "silhouette",
+            "Davies-Bouldin": "davies_bouldin",
+            "Calinski-Harabasz": "calinski_harabasz",
+            "Neighbor consistency": "neighbor_consistency",
+            "Graph modularity": "graph_modularity",
+        }
+
+        from bigclust2.clusters import evaluate_clustering
+
+        results = {}
+        for label, method in method_map.items():
+            try:
+                score = evaluate_clustering(
+                    features.values,
+                    labels,
+                    method=method,
+                    is_precomputed=False,
+                    metric=distance_metric,
+                    k_neighbors=k_neighbors,
+                )
+                results[label] = float(score)
+            except Exception as exc:
+                results[label] = f"Error: {exc}"
+
+        return results
+
+    def _trim_outliers(self, features, labels, threshold=3.0):
+        """Drop per-group samples whose robust scaled distance exceeds threshold."""
+        if threshold <= 0 or features.shape[0] < 2:
+            return features, labels
+
+        labels = np.asarray(labels, dtype=int)
+        keep = np.ones(features.shape[0], dtype=bool)
+        values = features.values.astype(float)
+
+        for target_label in (0, 1):
+            idx = np.where(labels == target_label)[0]
+            if len(idx) <= 2:
+                continue
+
+            group = values[idx]
+            med = np.median(group, axis=0)
+            mad = np.median(np.abs(group - med), axis=0)
+            mad[mad == 0.0] = 1.0
+            z = np.sqrt(np.mean(((group - med) / mad) ** 2, axis=1))
+            keep[idx] = z <= threshold
+
+        trimmed_features = features.iloc[keep]
+        trimmed_labels = labels[keep]
+        return trimmed_features, trimmed_labels
+
     _METRIC_DESCRIPTIONS = {
         "Mean difference": (
             "Center difference between the two groups using the selected aggregation method.\n"
@@ -1036,16 +1447,19 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             self._apply_group_box_state_style(self.group_b_box, b_color)
 
         if hasattr(self, "group_a_button"):
-            self.group_a_button.setText("Select ..." if group_a_n == 0 else "Edit")
+            self.group_a_button.setText("Edit")
         if hasattr(self, "group_a_count_label"):
             self.group_a_count_label.setText(f"{group_a_n} selected")
 
         self._update_group_feature_count_label()
 
         if hasattr(self, "group_b_button"):
-            self.group_b_button.setText("Select ..." if group_b_n == 0 else "Edit")
+            self.group_b_button.setText("Edit")
         if hasattr(self, "group_b_count_label"):
             self.group_b_count_label.setText(f"{group_b_n} selected")
+
+        if hasattr(self, "group_split_eval_button"):
+            self.group_split_eval_button.setEnabled(bool(group_a_n and group_b_n))
 
         feature_shape = self.features.shape
         self.subtitle.setText(
@@ -1190,6 +1604,27 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         self._update_group_summary()
         self._populate_feature_rows()
+
+    def _copy_figure_selection_to_group(self, target):
+        """Copy the current figure selection into one group."""
+        if self.figure is None or not hasattr(self.figure, "selected"):
+            QtWidgets.QMessageBox.information(
+                self,
+                "No figure selection",
+                "Could not find current selection in the figure.",
+            )
+            return
+
+        selected_indices = getattr(self.figure, "selected", None)
+        if selected_indices is None or len(selected_indices) == 0:
+            QtWidgets.QMessageBox.information(
+                self,
+                "No figure selection",
+                "No IDs are currently selected in the figure.",
+            )
+            return
+
+        self._apply_figure_selection_to_group(target, selected_indices, invert=False)
 
     def _select_indices_dialog(self, title, preselected_indices):
         """Show a modal dialog to pick indices from metadata."""

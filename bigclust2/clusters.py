@@ -318,6 +318,256 @@ def run_clustering(
     return labels.astype(int)
 
 
+def evaluate_clustering(
+    data,
+    labels,
+    *,
+    method: str,
+    is_precomputed: bool = False,
+    metric: str = "cosine",
+    true_labels=None,
+    k_neighbors: int = 10,
+    random_state: int | None = None,
+):
+    """Evaluate cluster labels using a selected metric.
+
+    Parameters
+    ----------
+    data : array-like
+        Either a precomputed pairwise distance matrix (NxN) when
+        ``is_precomputed=True``, or a feature matrix (NxD) otherwise.
+    labels : array-like of shape (N,)
+        Cluster labels to evaluate.
+    method : str
+        One of ``"silhouette"``, ``"davies_bouldin"``, ``"calinski_harabasz"``,
+        ``"adjusted_rand_index"``, ``"adjusted_mutual_info"``,
+        ``"neighbor_consistency"``, or ``"graph_modularity"``.
+    is_precomputed : bool
+        Whether ``data`` is a precomputed pairwise distance matrix.
+    metric : str
+        Distance metric used when ``is_precomputed=False`` and for
+        neighborhood-based metrics.
+    true_labels : array-like, optional
+        Ground truth labels used for supervised metrics such as ARI/AMI.
+    k_neighbors : int
+        Number of neighbors used for neighborhood-based metrics.
+    random_state : int or None
+        Random seed for any metric that may need it.
+
+    Returns
+    -------
+    float
+        Score computed by the selected metric.
+    """
+    labels = np.asarray(labels, dtype=np.int64)
+    if labels.ndim != 1:
+        raise ValueError("`labels` must be a 1D array-like of cluster IDs.")
+    n_samples = labels.shape[0]
+    if n_samples < 2:
+        raise ValueError("Need at least 2 samples to evaluate clustering.")
+    method = str(method).strip().lower()
+    if int(k_neighbors) < 1:
+        raise ValueError("`k_neighbors` must be >= 1.")
+
+    if method in ("silhouette",):
+        if is_precomputed:
+            dmat = np.asarray(data, dtype=np.float64)
+            _check_distance_matrix(dmat)
+            from sklearn.metrics import silhouette_score
+
+            return float(silhouette_score(dmat, labels, metric="precomputed"))
+
+        feats = np.asarray(data, dtype=np.float64)
+        if feats.ndim != 2:
+            raise ValueError(
+                "`data` must be a 2D feature matrix when `is_precomputed=False`."
+            )
+        from sklearn.metrics import silhouette_score
+
+        return float(silhouette_score(feats, labels, metric=metric))
+
+    if method in ("davies_bouldin", "db"):
+        if is_precomputed:
+            raise ValueError(
+                "Davies-Bouldin score requires feature vectors, not a distance matrix."
+            )
+        feats = np.asarray(data, dtype=np.float64)
+        if feats.ndim != 2:
+            raise ValueError("`data` must be a 2D feature matrix for Davies-Bouldin.")
+        from sklearn.metrics import davies_bouldin_score
+
+        return float(davies_bouldin_score(feats, labels))
+
+    if method in ("calinski_harabasz", "ch"):
+        if is_precomputed:
+            raise ValueError(
+                "Calinski-Harabasz score requires feature vectors, not a distance matrix."
+            )
+        feats = np.asarray(data, dtype=np.float64)
+        if feats.ndim != 2:
+            raise ValueError(
+                "`data` must be a 2D feature matrix for Calinski-Harabasz."
+            )
+        from sklearn.metrics import calinski_harabasz_score
+
+        return float(calinski_harabasz_score(feats, labels))
+
+    if method in ("adjusted_rand_index", "ari"):
+        if true_labels is None:
+            raise ValueError("`true_labels` must be provided for Adjusted Rand Index.")
+        from sklearn.metrics import adjusted_rand_score
+
+        return float(adjusted_rand_score(np.asarray(true_labels), labels))
+
+    if method in ("adjusted_mutual_info", "ami"):
+        if true_labels is None:
+            raise ValueError(
+                "`true_labels` must be provided for Adjusted Mutual Information."
+            )
+        from sklearn.metrics import adjusted_mutual_info_score
+
+        return float(adjusted_mutual_info_score(np.asarray(true_labels), labels))
+
+    if method in ("neighbor_consistency", "nn_consistency"):
+        neighbor_ix = _knn_neighbors(data, int(k_neighbors), is_precomputed, metric)
+        same_label = labels[neighbor_ix] == labels[:, None]
+        return float(np.mean(same_label))
+
+    if method in ("graph_modularity", "modularity"):
+        neighbor_ix = _knn_neighbors(data, int(k_neighbors), is_precomputed, metric)
+        G = _knn_graph_from_indices(n_samples, neighbor_ix)
+        communities = [set(np.flatnonzero(labels == c)) for c in np.unique(labels)]
+        from networkx.algorithms.community.quality import modularity
+
+        return float(modularity(G, communities))
+
+    raise ValueError(
+        f"Unknown evaluation method '{method}'. "
+        "Expected one of 'silhouette', 'davies_bouldin', 'calinski_harabasz', "
+        "'adjusted_rand_index', 'adjusted_mutual_info', 'neighbor_consistency', "
+        "or 'graph_modularity'."
+    )
+
+
+def evaluate_clustering_sample(
+    data,
+    labels,
+    *,
+    method: str,
+    is_precomputed: bool = False,
+    metric: str = "euclidean",
+    k_neighbors: int = 10,
+):
+    """Compute a per-sample clustering quality score.
+
+    Parameters
+    ----------
+    data : array-like
+        Either a precomputed pairwise distance matrix (NxN) when
+        ``is_precomputed=True``, or a feature matrix (NxD) otherwise.
+    labels : array-like of shape (N,)
+        Cluster labels for each sample.
+    method : str
+        One of ``"silhouette"`` or ``"neighbor_consistency"``.
+    is_precomputed : bool
+        Whether ``data`` is a precomputed pairwise distance matrix.
+    metric : str
+        Distance metric used when ``is_precomputed=False`` and for
+        neighborhood-based metrics.
+    k_neighbors : int
+        Number of neighbors used for ``neighbor_consistency``.
+
+    Returns
+    -------
+    np.ndarray of shape (N,)
+        Per-sample quality scores.
+    """
+    labels = np.asarray(labels, dtype=np.int64)
+    if labels.ndim != 1:
+        raise ValueError("`labels` must be a 1D array-like of cluster IDs.")
+    n_samples = labels.shape[0]
+    if n_samples < 2:
+        raise ValueError("Need at least 2 samples to evaluate clustering.")
+    method = str(method).strip().lower()
+    if int(k_neighbors) < 1:
+        raise ValueError("`k_neighbors` must be >= 1.")
+
+    if method in ("silhouette", "silhouette_samples"):
+        from sklearn.metrics import silhouette_samples
+
+        if is_precomputed:
+            dmat = np.asarray(data, dtype=np.float64)
+            _check_distance_matrix(dmat)
+            return silhouette_samples(dmat, labels, metric="precomputed")
+
+        feats = np.asarray(data, dtype=np.float64)
+        if feats.ndim != 2:
+            raise ValueError(
+                "`data` must be a 2D feature matrix when `is_precomputed=False`."
+            )
+        return silhouette_samples(feats, labels, metric=metric)
+
+    if method in ("neighbor_consistency", "nn_consistency"):
+        neighbor_ix = _knn_neighbors(data, int(k_neighbors), is_precomputed, metric)
+        same_label = labels[neighbor_ix] == labels[:, None]
+        return np.mean(same_label, axis=1).astype(np.float64)
+
+    raise ValueError(
+        f"Unknown per-sample evaluation method '{method}'. "
+        "Expected one of 'silhouette' or 'neighbor_consistency'."
+    )
+
+
+def _check_distance_matrix(dmat):
+    dmat = np.asarray(dmat, dtype=np.float64)
+    if dmat.ndim != 2 or dmat.shape[0] != dmat.shape[1]:
+        raise ValueError("`data` must be a square distance matrix when `is_precomputed=True`.")
+    return dmat
+
+
+def _knn_neighbors(data, k_neighbors, is_precomputed, metric):
+    from sklearn.neighbors import NearestNeighbors
+
+    if is_precomputed:
+        dmat = _check_distance_matrix(data)
+        n_samples = dmat.shape[0]
+        n_neighbors = min(k_neighbors + 1, n_samples)
+        nn = NearestNeighbors(
+            n_neighbors=n_neighbors,
+            metric="precomputed",
+            algorithm="brute",
+        )
+        nn.fit(dmat)
+        _, neighbors = nn.kneighbors(dmat, return_distance=True)
+    else:
+        feats = np.asarray(data, dtype=np.float64)
+        if feats.ndim != 2:
+            raise ValueError(
+                "`data` must be a 2D feature matrix when `is_precomputed=False`."
+            )
+        n_samples = feats.shape[0]
+        n_neighbors = min(k_neighbors + 1, n_samples)
+        nn = NearestNeighbors(n_neighbors=n_neighbors, metric=metric)
+        nn.fit(feats)
+        _, neighbors = nn.kneighbors(feats, return_distance=True)
+
+    if neighbors.shape[1] <= 1:
+        return np.empty((n_samples, 0), dtype=np.int64)
+    return neighbors[:, 1:].astype(np.int64, copy=False)
+
+
+def _knn_graph_from_indices(n_samples, neighbor_ix):
+    G = nx.Graph()
+    G.add_nodes_from(range(n_samples))
+    edges = []
+    for i, neighbors in enumerate(neighbor_ix):
+        for j in neighbors:
+            if i != int(j):
+                edges.append((int(i), int(j)))
+    G.add_edges_from(edges)
+    return G
+
+
 def is_good(v, n_unique_ds):
     """Check if composition of labels.
 

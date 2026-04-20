@@ -472,9 +472,7 @@ class MainWidget(QWidget):
         viewer_controls_scroll.setFrameShape(QFrame.NoFrame)
         viewer_controls_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         viewer_controls_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-        self.viewer_controls.setSizePolicy(
-            QSizePolicy.Expanding, QSizePolicy.Preferred
-        )
+        self.viewer_controls.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
         viewer_controls_scroll.setWidget(self.viewer_controls)
 
         original_viewer_scroll_resize = viewer_controls_scroll.resizeEvent
@@ -535,7 +533,7 @@ class MainWidget(QWidget):
         left_button.clicked.connect(toggle_sidebar)
 
         # Make it so that pressing 'c' in the viewer opens/closes the controls sidebar
-        self.ngl_viewer.viewer._key_events['c'] = toggle_sidebar
+        self.ngl_viewer.viewer._key_events["c"] = toggle_sidebar
 
         # Create three square buttons for the overlay (icon buttons)
         button_size = 25
@@ -760,12 +758,14 @@ class AnnotationLogDialog(QDialog):
             fields = entry.get("fields", [])
             value = entry.get("value")
             ids = entry.get("ids", [])
-            writer.writerow([
-                dataset,
-                ";".join(str(f) for f in fields),
-                value,
-                ";".join(str(i) for i in ids),
-            ])
+            writer.writerow(
+                [
+                    dataset,
+                    ";".join(str(f) for f in fields),
+                    value,
+                    ";".join(str(i) for i in ids),
+                ]
+            )
         return buffer.getvalue().rstrip("\n")
 
 
@@ -803,14 +803,15 @@ class MainWindow(QMainWindow):
         )
         self.annotation_changed.connect(self._handle_annotation_changed)
         _OPEN_WINDOWS.append(self)
-        self.destroyed.connect(lambda _obj=None, w=self: _OPEN_WINDOWS.remove(w) if w in _OPEN_WINDOWS else None)
+        self.destroyed.connect(
+            lambda _obj=None, w=self: (
+                _OPEN_WINDOWS.remove(w) if w in _OPEN_WINDOWS else None
+            )
+        )
         self.init_ui()
 
     def eventFilter(self, obj, event):
-        if (
-            obj is self._connectivity_widget
-            and event.type() == QEvent.Close
-        ):
+        if obj is self._connectivity_widget and event.type() == QEvent.Close:
             self._unsync_connectivity_widget(obj)
         return super().eventFilter(obj, event)
 
@@ -934,7 +935,9 @@ class MainWindow(QMainWindow):
 
         set_annotations_action = QAction("Set Annotations", self)
         set_annotations_action.setShortcut(
-            QKeySequence("Meta+A") if sys.platform == "darwin" else QKeySequence("Ctrl+A")
+            QKeySequence("Meta+A")
+            if sys.platform == "darwin"
+            else QKeySequence("Ctrl+A")
         )
         set_annotations_action.triggered.connect(self.show_annotation_dialog)
         selection_menu.addAction(set_annotations_action)
@@ -1040,7 +1043,11 @@ class MainWindow(QMainWindow):
             return False
 
         features = self._data.get("features")
-        if features is None or not hasattr(features, "shape") or len(features.shape) != 2:
+        if (
+            features is None
+            or not hasattr(features, "shape")
+            or len(features.shape) != 2
+        ):
             return False
 
         return features.shape[0] > 0 and features.shape[1] > 0
@@ -1081,7 +1088,9 @@ class MainWindow(QMainWindow):
     def _update_view_actions(self):
         """Update View menu action states."""
         if self.connectivity_table_action is not None:
-            self.connectivity_table_action.setEnabled(self._can_open_connectivity_table())
+            self.connectivity_table_action.setEnabled(
+                self._can_open_connectivity_table()
+            )
         if self.distances_table_action is not None:
             self.distances_table_action.setEnabled(self._can_open_distances_table())
         if self.feature_explorer_action is not None:
@@ -1133,9 +1142,7 @@ class MainWindow(QMainWindow):
         widget.destroyed.connect(
             lambda _obj=None: setattr(self, "_connectivity_widget_synced", False)
         )
-        widget.destroyed.connect(
-            lambda _obj=None, w=widget: fig.unsync_widget(w)
-        )
+        widget.destroyed.connect(lambda _obj=None, w=widget: fig.unsync_widget(w))
 
     def show_feature_explorer(self):
         """Open the Feature Explorer widget for the current project."""
@@ -1280,7 +1287,9 @@ class MainWindow(QMainWindow):
             selected_meta["id"].tolist(),
             selected_meta["dataset"].tolist(),
         ):
-            records.append(SelectionRecord(neuron_id=int(neuron_id), dataset=str(dataset)))
+            records.append(
+                SelectionRecord(neuron_id=int(neuron_id), dataset=str(dataset))
+            )
         return records
 
     def _project_annotation_datasets(self):
@@ -1447,9 +1456,11 @@ class MainWindow(QMainWindow):
 
         self._distance_widgets.append(widget)
         widget.destroyed.connect(
-            lambda _obj=None, w=widget: self._distance_widgets.remove(w)
-            if w in self._distance_widgets
-            else None
+            lambda _obj=None, w=widget: (
+                self._distance_widgets.remove(w)
+                if w in self._distance_widgets
+                else None
+            )
         )
 
     def _normalize_recent_state(self, state):
@@ -1472,7 +1483,9 @@ class MainWindow(QMainWindow):
 
         source_type = str(state.get("source_type", "")).strip().lower()
         if source_type not in ("local", "remote"):
-            source_type = "remote" if path.startswith(("http://", "https://")) else "local"
+            source_type = (
+                "remote" if path.startswith(("http://", "https://")) else "local"
+            )
 
         return {
             "path": path,
@@ -1530,7 +1543,11 @@ class MainWindow(QMainWindow):
             return
 
         recent = self.load_recent_projects()
-        recent = [r for r in recent if self._recent_state_key(r) != self._recent_state_key(normalized)]
+        recent = [
+            r
+            for r in recent
+            if self._recent_state_key(r) != self._recent_state_key(normalized)
+        ]
         recent.insert(0, normalized)
         recent = recent[: self.MAX_RECENT_PROJECTS]
         self.save_recent_projects(recent)
@@ -1750,21 +1767,21 @@ class MainWindow(QMainWindow):
                             selected_indices, selected_indices
                         ].copy()
                     else:
-                        selected_distances = pd.DataFrame(
-                            np.asarray(source_distances)[
-                                np.ix_(selected_indices, selected_indices)
-                            ],
-                            index=selected_ids,
-                            columns=selected_ids,
+                        raise ValueError(
+                            "Expected distances matrix to be a DataFrame with metadata-aligned index and columns for selection export"
                         )
 
                 if source_features is not None:
                     if isinstance(source_features, pd.DataFrame):
-                        selected_features = source_features.iloc[selected_indices].copy()
+                        selected_features = source_features.iloc[selected_indices]
+
+                        # Drop empty columns
+                        selected_features = selected_features.loc[
+                            :, (selected_features.values.max(axis=0) > 0)
+                        ].copy()
                     else:
-                        selected_features = pd.DataFrame(
-                            np.asarray(source_features)[selected_indices],
-                            index=selected_ids,
+                        raise ValueError(
+                            "Expected features matrix to be a DataFrame with metadata-aligned index for selection export"
                         )
 
             window = MainWindow()
@@ -1819,7 +1836,9 @@ class MainWindow(QMainWindow):
                     if neuropil_mesh is not None:
                         main_widget.ngl_viewer.set_neuropil_mesh(
                             neuropil_mesh,
-                            neuropil_source=getattr(src_viewer, "neuropil_source", None),
+                            neuropil_source=getattr(
+                                src_viewer, "neuropil_source", None
+                            ),
                         )
             except Exception as e:
                 logger.debug(
@@ -2090,6 +2109,7 @@ def main(dataset=None):
     window.show()
     if dataset is not None:
         from PySide6.QtCore import QTimer
+
         QTimer.singleShot(0, lambda: _load_dataset_from_arg(window, dataset))
     sys.exit(app.exec())
 
@@ -2110,6 +2130,7 @@ def _load_dataset_from_arg(window, dataset):
             else:
                 # Multiple projects: show a quick selection dialog
                 from PySide6.QtWidgets import QInputDialog
+
                 names = [p.name for p in projects]
                 name, ok = QInputDialog.getItem(
                     window,
@@ -2126,4 +2147,5 @@ def _load_dataset_from_arg(window, dataset):
     except Exception as e:
         logger.error(f"Failed to load dataset '{dataset}': {e}")
         from PySide6.QtWidgets import QMessageBox
+
         QMessageBox.critical(window, "Load Error", f"Could not load dataset:\n{e}")

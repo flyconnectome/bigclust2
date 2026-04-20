@@ -358,15 +358,21 @@ class ScatterFigure(BaseFigure):
             self.selected_ids = ids
 
         window = self.canvas.window()
-        while window is not None and not hasattr(window, "on_open_selection_in_new_window"):
+        while window is not None and not hasattr(
+            window, "on_open_selection_in_new_window"
+        ):
             window = window.parent()
 
         if window is None:
-            raise RuntimeError("Unable to find parent window to open selection in a new window.")
+            raise RuntimeError(
+                "Unable to find parent window to open selection in a new window."
+            )
 
         window.on_open_selection_in_new_window()
 
-        self.selected = curr_sel  # restore the current selection after opening the new window
+        self.selected = (
+            curr_sel  # restore the current selection after opening the new window
+        )
 
     @property
     def selected_ids_dataset(self):
@@ -977,9 +983,7 @@ class ScatterFigure(BaseFigure):
 
             if self.label_visuals[ix] is None:
                 label_color = (
-                    self._label_colors[ix]
-                    if self._label_colors is not None
-                    else "w"
+                    self._label_colors[ix] if self._label_colors is not None else "w"
                 )
                 if label_color is None:
                     label_color = "w"
@@ -1384,9 +1388,7 @@ class ScatterFigure(BaseFigure):
         if not hasattr(self, "synced_widgets"):
             return
 
-        self.synced_widgets = [
-            (w, cb) for w, cb in self.synced_widgets if w != widget
-        ]
+        self.synced_widgets = [(w, cb) for w, cb in self.synced_widgets if w != widget]
 
     def set_colors(self, colors, sync_to_viewer=True):
         """Set the colors for the points in the scatterplot.

@@ -1,15 +1,83 @@
 # BigClust 2.0
 
-> [!CAUTION]
-> `bigclust2` is work in progress. Currently, this is just a prototype to test out the new data structure and GUI. We have not published this version on PyPI yet but you can install it directly from GitHub (see below).
+> [!NOTE]
+> `bigclust2` is work in progress. It's still under active development but it works and you can already use it to explore your clustering datasets. If you have any feedback or suggestions, please open an issue or reach out to us on Slack.
 
 ![BigClust 2.0 GUI](./_static/screenshot.png)
 
 ## Overview
 A new GUI for BigClust built with PySide6. This update also fundamentally changes how data is represented:
-previously, data had to be manually loaded and passed to BigClust widgets. For this new version, we have
-switched to a Neuroglancer-like approach where data sources are whole directories (local or remote)
-containing both the data itself and metadata files describing the setup. Here is a simple example structure:
+previously, data artifacts (distances, features, etc.) had to be manually loaded and passed to BigClust widgets.
+For this new version, we have switched to a Neuroglancer-like approach where data sources are whole directories
+(local or remote) containing both the data itself and metadata files describing the setup. Here is a simple
+example structure:
+
+```
+/my_clustering/
+    info                <- JSON-formatted settings for the dataset
+    meta.parquet        <- per-neuron metadata in Parquet (recommended) or Apache Arrow Feather format
+    distances.parquet   <- pairwise distances in Parquet (recommended) or Apache Arrow Feather format (optional)
+    embeddings.parquet  <- low-dimensional embeddings in Parquet (recommended) or Apache Arrow Feather format (optional)
+    features.parquet    <- high-dimensional features in Parquet (recommended) or Apache Arrow Feather format (optional)
+```
+
+See the [Data Format](#data-format) section below for details on the expected files and how to set up your project.
+
+## Usage
+
+You can start the BigClust 2.0 app using [`uv`](https://docs.astral.sh/uv/). First make sure you have `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/) and then run:
+
+```bash
+uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
+```
+
+This will install the latest released version of `bigclust2` from this repository and start the GUI.
+
+> [!TIP]
+> Note the `@main` in above command? This is asking `uvx` to always use the latest version of `bigclust2`.
+> Because of how `uvx` works, this can lead to slow start-up times when there are new releases. You can
+> avoid this by pinning to a specific version (e.g. `@0.1.0`) or a specific commit (e.g. `@02ea911`).
+
+### Controls
+
+Most GUI elements are hopefully self-explanatory - when in doubt look for the tooltip.
+
+#### Scatterplot
+
+Use the left click + hold to move the view and shift + left click + hold to draw a
+selection box around points.
+
+- `ESC` to deselect all points
+- `C` to toggle the control panel
+- `L` to toggle labels
+- left/right arrows increase/decrease font size of labels
+- up/down arrows increase/decrease marker size
+- double-click on a label to highlight points with the same label
+- shift + double-click on a label to select points with the same label
+- CMD/control + shift + double-click on a label to add points with the same label to the current selection
+
+#### 3D Viewer
+
+Use the left click + hold to rotate the view, middle button + hold to pan and scroll to zoom in and out.
+
+- `C` to toggle the legend
+- to align the view: `1` (front), `2` (side), `3` (top)
+
+## Troubleshooting
+
+| Error  | Solution |
+| ------ | -------  |
+| Running `uvx ...` fails with an error containing `realpath: command not found` | If you're on Mac, make sure your OS version is at least 13.x |
+
+## Development
+
+1. Clone this repository
+2. `cd bigclust2` to change into this directory
+3. `uv run run.py --debug` to start the GUI
+
+## Data Format
+
+Example directory structure for a single dataset:
 
 ```
 /my_clustering/
@@ -111,63 +179,3 @@ The top-level `info` file would look like this:
 - [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
 - [ ] Fine-control over hover info
 - [x] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
-
-
-## Usage
-
-You can start the BigClust 2.0 GUI using [`uv`](https://docs.astral.sh/uv/). First make sure you have `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/) and then run:
-
-```bash
-uvx bigclust2
-```
-
-This will install the latest released version of `bigclust2` from PyPI and start the GUI. Please
-see [UV's documentation on tools](https://docs.astral.sh/uv/concepts/tools/#tool-versions) for information about to update to the latest version or to install a specific version of `bigclust2`.
-
-For the latest development version, you can install directly from GitHub:
-
-```bash
-uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
-```
-
-> [!TIP]
-> Note the `@main` in above command? We're asking `uvx` to always use the latest version of `bigclust2` but we could also point it at a specific release using e.g. `@02ea911`.
-
-### Controls
-
-Most GUI elements are hopefully self-explanatory - when in doubt look for the tooltip.
-
-#### Scatterplot
-
-Use the left click + hold to move the view and shift + left click + hold to draw a
-selection box around points.
-
-- `ESC` to deselect all points
-- `C` to toggle the control panel
-- `L` to toggle labels
-- left/right arrows increase/decrease font size of labels
-- up/down arrows increase/decrease marker size
-- double-click on a label to highlight points with the same label
-- shift + double-click on a label to select points with the same label
-- CMD/control + shift + double-click on a label to add points with the same label to the current selection
-
-#### 3D Viewer
-
-Use the left click + hold to rotate the view, middle button + hold to pan and scroll to zoom in and out.
-
-- `C` to toggle the legend
-- to align the view: `1` (front), `2` (side), `3` (top)
-
-
-## Troubleshooting
-
-| Error  | Solution |
-| ------ | -------  |
-| Running `uvx ...` fails with an error containing `realpath: command not found` | If you're on Mac, make sure your OS version is at least 13.x |
-
-
-## Development
-
-1. Clone this repository
-2. `cd bigclust2` to change into this directory
-3. `uv run run.py --debug` to start the GUI

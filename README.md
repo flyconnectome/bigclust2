@@ -1,7 +1,7 @@
 # BigClust 2.0
 
 > [!NOTE]
-> `bigclust2` is work in progress. It's still under active development but it works and you can already use it to explore your clustering datasets. If you have any feedback or suggestions, please open an issue or reach out to us on Slack.
+> `bigclust2` is under active development but it already works and you can already use it to explore your clustering datasets. If you have any feedback or suggestions, please open an issue or reach out to us on Slack.
 
 ![BigClust 2.0 GUI](./_static/screenshot.png)
 

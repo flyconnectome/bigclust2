@@ -1,15 +1,24 @@
 # BigClust 2.0
 
 > [!NOTE]
-> `bigclust2` is under active development but it already works and you can already use it to explore your clustering datasets. If you have any feedback or suggestions, please open an issue or reach out to us on Slack.
+> This project is under active development but you can already use it to explore your clustering datasets. If you have any feedback or questions, please open an issue here on GitHub.
+
+`bigclust2` is a re-design of [`bigclust`](https://github.com/flyconnectome/bigclust), a graphical interface for interactively exploring clusterings of high-dimensional connectomic data.
+Typically this means morphological or connectivity-based embeddings but it can be used for any kind of distances or features.
+
+Highlights:
+- **Interactive 2D scatter plots**: Explore large clusterings interactively with zoom, pan, and selection.
+- **Neuroglancer-like 3D viewer**: Visualize neuron morphology in a 3D viewer.
+- **Widgets for days**: All the tools you need to explore and cluster your data: cluster methods, dimensionality reduction, fidelity metrics, feature selection, connectivity explorer, etc.
+- **Annotations**: Push annotation straight to supported backends (e.g. Clio or SeaTable) or export them as CSV/Parquet files.
 
 ![BigClust 2.0 GUI](./_static/screenshot.png)
 
-## Overview
-A new GUI for BigClust built with PySide6. This update also fundamentally changes how data is represented:
+## Version 2.0 Notes
+A totally reworked GUI aside, this new version also fundamentally changes how data is represented:
 previously, data artifacts (distances, features, etc.) had to be manually loaded and passed to BigClust widgets.
 For this new version, we have switched to a Neuroglancer-like approach where data sources are whole directories
-(local or remote) containing both the data itself and metadata files describing the setup. Here is a simple
+(local or remote) containing both the data itself as well as metadata files describing the setup. Here is a simple
 example structure:
 
 ```
@@ -25,7 +34,7 @@ See the [Data Format](#data-format) section below for details on the expected fi
 
 ## Usage
 
-You can start the BigClust 2.0 app using [`uv`](https://docs.astral.sh/uv/). First make sure you have `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/) and then run:
+First make sure you have the Python package manager `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/). Then run:
 
 ```bash
 uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
@@ -58,8 +67,9 @@ selection box around points.
 
 #### 3D Viewer
 
-Use the left click + hold to rotate the view, middle button + hold to pan and scroll to zoom in and out.
-
+- left click + hold to rotate the view
+- middle button + hold to pan
+- scroll to zoom in and out
 - `C` to toggle the legend
 - to align the view: `1` (front), `2` (side), `3` (top)
 
@@ -87,6 +97,8 @@ Example directory structure for a single dataset:
     embeddings.parquet  <- low-dimensional embeddings in Parquet (recommended) or Apache Arrow Feather format (optional)
     features.parquet    <- high-dimensional features in Parquet (recommended) or Apache Arrow Feather format (optional)
 ```
+
+### `info` File (required)
 
 The `info` file contains information about the dataset, including which files are present and how to interpret them:
 
@@ -137,12 +149,27 @@ The `info` file contains information about the dataset, including which files ar
 }
 ```
 
+### `meta` File (required)
+
 The metadata file contains information about each observation (e.g. neuron) in the dataset:
 - `id` (required): unique identifier for each observation (e.g. neuron)
 - `label` (required): labels to use for the scatter plot
 - `dataset` (required): which dataset the observation belongs to (e.g. "hemibrain", "FAFB", etc.); this is used for markers in the scatter plot but also for neuroglancer sources and updating/pushing annotation
 - `color` (optional): colors used for markers in the scatter plot and for meshes in the 3D viewer
+- `source` (optional): URLs or identifiers for the source of the observation (used for loading morphology in the 3D viewer)
+- `x` / `y` (optional): pre-computed low-dimensional embeddings for the scatter plot (if not provided in a separate `embeddings` file)
 
+The optional columns have to be explicitly specified in the `info` file (see above) so that BigClust knows how to use them!
+
+Any additional columns are loaded and can be used for coloring, filtering, etc. in the GUI.
+
+### `distances` File (optional)
+
+The distances file contains pairwise distances between observations (e.g. neurons) in the dataset. This is optional but can be used for computing fidelity metrics and for feature selection. The file should be in Parquet (recommended) or Apache Arrow Feather format and contain a square matrix of shape `(n_observations, n_observations)`. Index and column names should be IDs matching the order of the `id` column in the `meta` file.
+
+### `features` File (optional)
+
+The features file contains high-dimensional features for each observation (e.g. neuron) in the dataset. This is optional but can be used for feature selection and for exploring the relationship between features and embeddings. The file should be in Parquet (recommended) or Apache Arrow Feather format and contain a matrix of shape `(n_observations, n_features)`. The index should be integers matching the order of the `id` column in the `meta` file. You can use Multi-Index columns to organize features into groups (e.g. upstream vs downstream connections).
 
 ### Multiple Datasets
 
@@ -170,12 +197,14 @@ The top-level `info` file would look like this:
 
 
 ### Ideas / TODOs
-- [ ] Add more detailed documentation about data formats and structure
-- [ ] Caching system for remote data sources for faster start-up times
 - [x] Enable multiple embeddings per dataset (with a dropdown to select embedding)
+- [x] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)
+- [x] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
+- [ ] Add support for Graph Exploration
 - [ ] Allow users to change project settings (e.g. neuroglancer sources) before or after loading
 - [ ] Support loading up-to-date annotations when opening a project (e.g. from Clio or Neuprint)
-- [x] Support pushing updated annotations back to annotation backends (e.g. Clio/FlyTable)
+- [ ] Add more detailed documentation about data formats and structure
+- [ ] Caching system for remote data sources for faster start-up times
+  - this turns out to not really be a problem from the client side; could still implement to reduce traffic on the server side
 - [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
 - [ ] Fine-control over hover info
-- [x] Allow selecting sets of features (e.g. upstream vs downstream or isomorphic vs dimorphic connections; this could simply use the multi-columns)

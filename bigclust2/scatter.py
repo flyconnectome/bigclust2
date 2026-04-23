@@ -636,7 +636,7 @@ class ScatterFigure(BaseFigure):
         visuals = []
 
         if self.markers is None:
-            markers = np.full(len(self), "circle")
+            self._marker_symbols = np.full(len(self), "circle")
         else:
             assert len(self.markers) == len(
                 self
@@ -647,35 +647,35 @@ class ScatterFigure(BaseFigure):
                 AVAILABLE_MARKERS
             ), "Only 10 unique types are supported."
             marker_map = dict(zip(unique_types, AVAILABLE_MARKERS))
-            markers = np.array([marker_map[t] for t in self.markers])
+            self._marker_symbols = np.array([marker_map[t] for t in self.markers])
 
         # Create the visuals
-        for m in np.unique(markers):
+        for m in np.unique(self._marker_symbols):
             color = "w"
             if mask is None:
-                ix = np.where(markers == m)[0]
+                ix = np.where(self._marker_symbols == m)[0]
                 this_meta = self.metadata.iloc[ix]
                 this_pos = self.positions[ix]
                 if self.colors is not None:
                     color = np.array(
-                        [tuple(cmap.Color(c).rgba) for c in self.colors[markers == m]]
+                        [tuple(cmap.Color(c).rgba) for c in self.colors[self._marker_symbols == m]]
                     )
                 this_size = self.point_size
             else:
-                this_meta = self.metadata.iloc[mask & (markers == m)]
-                this_pos = self.positions[mask & (markers == m)]
-                ix = np.where(mask & (markers == m))[0]
+                this_meta = self.metadata.iloc[mask & (self._marker_symbols == m)]
+                this_pos = self.positions[mask & (self._marker_symbols == m)]
+                ix = np.where(mask & (self._marker_symbols == m))[0]
                 if self.colors is not None:
                     color = np.array(
                         [
                             tuple(cmap.Color(c).rgba)
-                            for c in self.colors[mask & (markers == m)]
+                            for c in self.colors[mask & (self._marker_symbols == m)]
                         ]
                     )
                 if isinstance(self.point_size, (int, float)):
                     this_size = self.point_size
                 else:
-                    this_size = self.point_size[mask & (markers == m)]
+                    this_size = self.point_size[mask & (self._marker_symbols == m)]
             if this_meta.empty:
                 continue
 

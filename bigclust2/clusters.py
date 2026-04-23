@@ -39,6 +39,11 @@ def run_clustering(
     kmeans_n_clusters: int = 10,
     kmeans_n_init: int = 10,
     kmeans_max_iter: int = 300,
+    spectral_n_clusters: int = 10,
+    spectral_affinity: str = "nearest_neighbors",
+    spectral_gamma: float | None = None,
+    spectral_n_neighbors: int = 10,
+    spectral_n_init: int = 10,
     random_state: int | None = 42,
     allow_singletons: bool = False,
 ):
@@ -50,7 +55,8 @@ def run_clustering(
         Either a precomputed pairwise distance matrix (N×N) when
         ``is_precomputed=True``, or a feature matrix (N×D) otherwise.
     method : str
-        One of ``"HDBSCAN"``, ``"Agglomerative"``, ``"K-Means"``.
+        One of ``"HDBSCAN"``, ``"Agglomerative"``, ``"K-Means"``,
+        or ``"Spectral"``.
     is_precomputed : bool
         Whether ``data`` is a precomputed pairwise distance matrix.
     metric : str
@@ -104,8 +110,18 @@ def run_clustering(
         Number of random initialisations (K-Means).
     kmeans_max_iter : int
         Maximum iterations per run (K-Means).
+    spectral_n_clusters : int
+        Number of clusters (Spectral).
+    spectral_affinity : str
+        Affinity used by Spectral clustering. One of ``"nearest_neighbors"`` or ``"rbf"``.
+    spectral_gamma : float or None
+        Kernel scale for spectral affinity. Defaults to 1.0 when needed.
+    spectral_n_neighbors : int
+        Number of neighbors used with ``affinity='nearest_neighbors'``.
+    spectral_n_init : int
+        Number of initializations for Spectral clustering.
     random_state : int or None
-        Random seed for reproducible K-Means results.
+        Random seed for reproducible K-Means and Spectral results.
     allow_singletons : bool
         If False, treat single-observation clusters as noise (i.e. assign
         label ``-1``).
@@ -285,6 +301,43 @@ def run_clustering(
             clusterer = AgglomerativeClustering(**kwargs)
             labels = clusterer.fit_predict(arr)
 
+    elif method == "Spectral":
+        from sklearn.cluster import SpectralClustering
+
+        affinity = str(spectral_affinity)
+        if is_precomputed:
+            dmat = np.asarray(arr, dtype=np.float64)
+            if dmat.ndim != 2 or dmat.shape[0] != dmat.shape[1]:
+                raise ValueError(
+                    "Spectral clustering requires a square precomputed distance matrix "
+                    "when is_precomputed=True."
+                )
+            gamma = 1.0 if spectral_gamma is None else float(spectral_gamma)
+            affinity_matrix = np.exp(-gamma * dmat)
+            clusterer = SpectralClustering(
+                n_clusters=int(spectral_n_clusters),
+                affinity="precomputed",
+                n_init=int(spectral_n_init),
+                random_state=random_state,
+            )
+            labels = clusterer.fit_predict(affinity_matrix)
+        else:
+            if affinity not in ("nearest_neighbors", "rbf"):
+                raise ValueError(
+                    "Spectral affinity must be either 'nearest_neighbors' or 'rbf'."
+                )
+            kwargs = {
+                "n_clusters": int(spectral_n_clusters),
+                "affinity": affinity,
+                "n_init": int(spectral_n_init),
+                "n_neighbors": int(spectral_n_neighbors),
+                "random_state": random_state,
+            }
+            if affinity == "rbf":
+                kwargs["gamma"] = 1.0 if spectral_gamma is None else float(spectral_gamma)
+            clusterer = SpectralClustering(**kwargs)
+            labels = clusterer.fit_predict(arr)
+
     elif method == "K-Means":
         if is_precomputed:
             raise ValueError(
@@ -304,7 +357,7 @@ def run_clustering(
     else:
         raise ValueError(
             f"Unknown clustering method '{method}'. "
-            "Expected 'HDBSCAN', 'Agglomerative', or 'K-Means'."
+            "Expected 'HDBSCAN', 'Agglomerative', 'K-Means', or 'Spectral'."
         )
 
     if not allow_singletons:
@@ -316,6 +369,218 @@ def run_clustering(
             labels[np.isin(labels, singleton_labels)] = -1
 
     return labels.astype(int)
+
+
+def find_k(
+    data,
+    *,
+    method: str,
+    is_precomputed: bool = False,
+    metric: str = "euclidean",
+    k_min: int = 2,
+    k_max: int | str = "auto",
+    score_method: str = "silhouette",
+    spectral_affinity: str = "nearest_neighbors",
+    spectral_gamma: float | None = None,
+    spectral_n_neighbors: int = 10,
+    spectral_n_init: int = 10,
+    kmeans_n_init: int = 10,
+    kmeans_max_iter: int = 300,
+    random_state: int | None = 42,
+    progress_callback=None,
+):
+    """Find an optimal number of clusters for K-Means or Spectral clustering.
+
+    Parameters
+    ----------
+    data : array-like
+        Either a precomputed pairwise distance matrix (NxN) when
+        ``is_precomputed=True``, or a feature matrix (NxD) otherwise.
+    method : str
+        One of ``"K-Means"`` or ``"Spectral"``.
+    is_precomputed : bool
+        Whether ``data`` is a precomputed pairwise distance matrix.
+    metric : str
+        Distance metric used when ``is_precomputed=False``.
+    k_min : int
+        Minimum number of clusters to consider.
+    k_max : int | "auto"
+        Maximum number of clusters to consider. If "auto", a heuristic based on the number
+        of samples is used to set a reasonable upper bound.
+    score_method : str
+        One of ``"silhouette"``, ``"calinski_harabasz"``, or
+        ``"davies_bouldin"``.
+    spectral_affinity : str
+        Affinity used by Spectral clustering. One of
+        ``"nearest_neighbors"`` or ``"rbf"``.
+    spectral_gamma : float or None
+        Gamma scale for RBF affinity.
+    spectral_n_neighbors : int
+        Number of neighbors for spectral nearest-neighbors affinity.
+    spectral_n_init : int
+        Number of initializations for Spectral clustering.
+    kmeans_n_init : int
+        Number of initializations for K-Means.
+    kmeans_max_iter : int
+        Maximum iterations for K-Means.
+    random_state : int or None
+        Random seed.
+    progress_callback : callable, optional
+        Optional callback called on each candidate k iteration with
+        ``progress_callback(k, k_max)``.
+
+    Returns
+    -------
+    int
+        Estimated optimal number of clusters.
+    """
+    method = str(method)
+    if method not in ("K-Means", "Spectral"):
+        raise ValueError("find_k supports only 'K-Means' or 'Spectral'.")
+
+    if k_min < 2:
+        raise ValueError("k_min must be >= 2.")
+
+    score_method = str(score_method).strip().lower()
+    if score_method not in ("silhouette", "calinski_harabasz", "davies_bouldin"):
+        raise ValueError(
+            "score_method must be one of 'silhouette', 'calinski_harabasz', or 'davies_bouldin'."
+        )
+
+    arr = np.asarray(data, dtype=np.float64)
+    n_samples = arr.shape[0]
+    if n_samples < 2:
+        raise ValueError("Need at least 2 samples to choose k.")
+
+    auto_max = False
+    if isinstance(k_max, str):
+        if k_max.lower() != "auto":
+            raise ValueError("k_max must be an integer or 'auto'.")
+        auto_max = True
+        if n_samples <= 50:
+            k_max = max(k_min, n_samples - 1)
+        else:
+            k_max = min(
+                n_samples - 1,
+                max(k_min, int(np.sqrt(n_samples) * 2)),
+            )
+
+    k_max = int(k_max)
+    if k_max < k_min:
+        raise ValueError("k_min must be >= 2 and k_max must be >= k_min.")
+    if is_precomputed and method == "K-Means":
+        raise ValueError("K-Means requires feature vectors, not a precomputed distance matrix.")
+
+    if is_precomputed and score_method in ("calinski_harabasz", "davies_bouldin"):
+        raise ValueError(
+            f"Score method '{score_method}' requires feature vectors, not precomputed distances."
+        )
+
+    from sklearn.metrics import (
+        silhouette_score,
+        calinski_harabasz_score,
+        davies_bouldin_score,
+    )
+
+    best_k = None
+    best_score = -np.inf if score_method in ("silhouette", "calinski_harabasz") else np.inf
+    better = (
+        (lambda new, old: new > old)
+        if score_method in ("silhouette", "calinski_harabasz")
+        else (lambda new, old: new < old)
+    )
+
+    initial_k_max = k_max
+    if progress_callback is not None:
+        try:
+            progress_callback(0, initial_k_max)
+        except Exception:
+            pass
+
+    k = k_min
+    current_limit = initial_k_max
+    while k <= current_limit:
+        if progress_callback is not None:
+            try:
+                progress_callback(k, current_limit)
+            except Exception:
+                pass
+
+        try:
+            labels = run_clustering(
+                arr,
+                method=method,
+                is_precomputed=is_precomputed,
+                metric=metric,
+                kmeans_n_clusters=k,
+                kmeans_n_init=kmeans_n_init,
+                kmeans_max_iter=kmeans_max_iter,
+                spectral_n_clusters=k,
+                spectral_affinity=spectral_affinity,
+                spectral_gamma=spectral_gamma,
+                spectral_n_neighbors=spectral_n_neighbors,
+                spectral_n_init=spectral_n_init,
+                random_state=random_state,
+                allow_singletons=True,
+            )
+        except Exception:
+            if auto_max and k == n_samples and best_k == initial_k_max:
+                raise ValueError(
+                    "Could not determine an optimal number of clusters; "
+                    "search reached k == n_samples."
+                )
+            k += 1
+            continue
+
+        unique_labels = np.unique(labels[labels >= 0])
+        if unique_labels.size < 2:
+            if auto_max and k == n_samples and best_k == initial_k_max:
+                raise ValueError(
+                    "Could not determine an optimal number of clusters; "
+                    "search reached k == n_samples."
+                )
+            k += 1
+            continue
+
+        try:
+            if score_method == "silhouette":
+                score = silhouette_score(arr, labels, metric="precomputed" if is_precomputed else metric)
+            elif score_method == "calinski_harabasz":
+                score = calinski_harabasz_score(arr, labels)
+            else:
+                score = davies_bouldin_score(arr, labels)
+        except Exception:
+            if auto_max and k == n_samples and best_k == initial_k_max:
+                raise ValueError(
+                    "Could not determine an optimal number of clusters; "
+                    "search reached k == n_samples."
+                )
+            k += 1
+            continue
+
+        if best_k is None or better(score, best_score):
+            best_score = score
+            best_k = k
+        elif auto_max and k > initial_k_max:
+            break
+
+        if auto_max and k == initial_k_max and best_k == initial_k_max:
+            current_limit = n_samples
+
+        k += 1
+
+    if auto_max and best_k == n_samples:
+        raise ValueError(
+            "Could not determine an optimal number of clusters; "
+            "search reached k == n_samples."
+        )
+
+    if best_k is None:
+        raise ValueError(
+            "Could not determine an optimal number of clusters for the given data and parameters."
+        )
+
+    return best_k
 
 
 def evaluate_clustering(

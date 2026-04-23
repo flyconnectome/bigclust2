@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import numpy as np
 import pandas as pd
+import pyqtgraph as pg
 
 from pathlib import Path
 
@@ -14,6 +15,9 @@ from sklearn.feature_selection import mutual_info_classif as _mutual_info_classi
 from sklearn.inspection import permutation_importance as _permutation_importance
 
 from PySide6 import QtCore, QtGui, QtWidgets
+
+# Suppress noisy pointer-dispatch warnings emitted by Qt when events occur outside a target window.
+QtCore.QLoggingCategory.setFilterRules("qt.pointer.dispatch=false")
 
 
 class _SortableNumberItem(QtWidgets.QTableWidgetItem):
@@ -42,6 +46,62 @@ class _OrderedTriStateCheckBox(QtWidgets.QCheckBox):
             self.setCheckState(QtCore.Qt.PartiallyChecked)
         else:
             self.setCheckState(QtCore.Qt.Unchecked)
+
+
+class _FeatureScatterPlotItem(pg.ScatterPlotItem):
+    """Scatter plot item that shows hover tooltips for individual spots."""
+
+    def __init__(
+        self,
+        *args,
+        hover_tip_formatter=None,
+        hover_line_callback=None,
+        double_click_callback=None,
+        **kwargs,
+    ):
+        super().__init__(*args, **kwargs)
+        self._hover_tip_formatter = hover_tip_formatter
+        self._hover_line_callback = hover_line_callback
+        self._double_click_callback = double_click_callback
+        self.setAcceptHoverEvents(True)
+
+    def hoverEvent(self, ev):
+        if ev is None:
+            return
+        if ev.isExit():
+            QtWidgets.QToolTip.hideText()
+            if self._hover_line_callback is not None:
+                self._hover_line_callback(None)
+            super().hoverEvent(ev)
+            return
+
+        points = self.pointsAt(ev.pos())
+        if len(points) > 0:
+            point = points[0]
+            data = point.data()
+            if self._hover_tip_formatter is not None:
+                tip = self._hover_tip_formatter(data)
+            else:
+                tip = str(data)
+            if tip:
+                QtWidgets.QToolTip.showText(ev.screenPos().toPoint(), tip)
+            if self._hover_line_callback is not None:
+                self._hover_line_callback(data)
+        else:
+            # Do not clear hover lines here: another overlapping scatter may
+            # still be responsible for the currently visible line.
+            # Only clear on an explicit hover exit event.
+            QtWidgets.QToolTip.hideText()
+
+        super().hoverEvent(ev)
+
+    def mouseDoubleClickEvent(self, ev):
+        points = self.pointsAt(ev.pos())
+        if len(points) > 0 and self._double_click_callback is not None:
+            self._double_click_callback(points[0].data())
+            ev.accept()
+            return
+        super().mouseDoubleClickEvent(ev)
 
 
 class _SelectIdDialog(QtWidgets.QDialog):
@@ -623,15 +683,24 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.table.setAlternatingRowColors(True)
         self.table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QtWidgets.QAbstractItemView.NoEditTriggers)
+        self._tab_widget = QtWidgets.QTabWidget()
+        root.addWidget(self._tab_widget, stretch=1)
+
+        self._tab_table = QtWidgets.QWidget()
+        self._tab_widget.addTab(self._tab_table, "Table")
+        table_layout = QtWidgets.QVBoxLayout(self._tab_table)
+        table_layout.setContentsMargins(0, 0, 0, 0)
+        table_layout.setSpacing(0)
+
         self.table.setSortingEnabled(True)
         self.table.cellClicked.connect(self._on_feature_clicked)
-        root.addWidget(self.table, stretch=1)
+        table_layout.addWidget(self.table, stretch=1)
 
         self.table_hint_label = QtWidgets.QLabel(
             "Hint: click a row to open the feature distribution plot."
         )
         self.table_hint_label.setStyleSheet("color: #777; font-size: 11px;")
-        root.addWidget(self.table_hint_label)
+        table_layout.addWidget(self.table_hint_label)
 
         footer = QtWidgets.QHBoxLayout()
         footer.addWidget(QtWidgets.QLabel("Show Top N:"))
@@ -688,6 +757,74 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         footer.addWidget(self.export_btn)
 
         root.addLayout(footer)
+
+        self._tab_graph = QtWidgets.QWidget()
+        self._tab_widget.addTab(self._tab_graph, "Graph")
+        graph_layout = QtWidgets.QVBoxLayout(self._tab_graph)
+        graph_layout.setContentsMargins(0, 0, 0, 0)
+        graph_layout.setSpacing(4)
+
+        self._feature_graph_widget = pg.PlotWidget()
+        self._feature_graph_widget.setBackground("w")
+        self._feature_graph_widget.setSizePolicy(
+            QtWidgets.QSizePolicy.Expanding, QtWidgets.QSizePolicy.Expanding
+        )
+        self._feature_graph_widget.showGrid(x=True, y=True, alpha=0.25)
+        bottom_axis = self._feature_graph_widget.getAxis("bottom")
+        bottom_axis.setStyle(tickTextOffset=10)
+        bottom_axis.setHeight(70)
+        graph_layout.addWidget(self._feature_graph_widget)
+
+        graph_controls = QtWidgets.QHBoxLayout()
+        graph_controls.setContentsMargins(0, 0, 0, 0)
+        graph_controls.setSpacing(10)
+        graph_controls.addWidget(QtWidgets.QLabel("Orientation:"))
+        self._transpose_graph_check = QtWidgets.QCheckBox("Transpose graph")
+        self._transpose_graph_check.setToolTip(
+            "Flip the graph axes so ranked features appear on the x-axis instead of the y-axis."
+        )
+        self._transpose_graph_check.setChecked(True)
+        self._transpose_graph_check.stateChanged.connect(self._update_feature_graph)
+        graph_controls.addWidget(self._transpose_graph_check)
+
+        graph_controls.addWidget(QtWidgets.QLabel("Feature jitter:"))
+        self._feature_jitter_spin = QtWidgets.QDoubleSpinBox()
+        self._feature_jitter_spin.setRange(0.0, 10.0)
+        self._feature_jitter_spin.setDecimals(3)
+        self._feature_jitter_spin.setSingleStep(0.1)
+        self._feature_jitter_spin.setValue(0.1)
+        self._feature_jitter_spin.setToolTip(
+            "Add a small random offset along the feature axis to separate overlapping points."
+        )
+        self._feature_jitter_spin.valueChanged.connect(self._update_feature_graph)
+        graph_controls.addWidget(self._feature_jitter_spin)
+
+        self._feature_kde_check = QtWidgets.QCheckBox("Show KDE")
+        self._feature_kde_check.setToolTip(
+            "Overlay kernel density estimates for Group A and Group B values."
+        )
+        self._feature_kde_check.setChecked(True)
+        self._feature_kde_check.stateChanged.connect(self._update_feature_graph)
+        graph_controls.addWidget(self._feature_kde_check)
+
+        self._feature_zoom_limit_check = QtWidgets.QCheckBox(
+            "Limit zoom to features axis"
+        )
+        self._feature_zoom_limit_check.setChecked(True)
+        self._feature_zoom_limit_check.setToolTip(
+            "When checked, mouse zoom/pan only changes the feature axis, not synapse count."
+        )
+        self._feature_zoom_limit_check.stateChanged.connect(self._update_feature_graph)
+        graph_controls.addWidget(self._feature_zoom_limit_check)
+
+        graph_controls.addStretch(1)
+        graph_layout.addLayout(graph_controls)
+
+        self._graph_hint_label = QtWidgets.QLabel(
+            "Blue = Group A, red = Group B. Double click points to highlight in figure."
+        )
+        self._graph_hint_label.setStyleSheet("color: #777; font-size: 11px;")
+        graph_layout.addWidget(self._graph_hint_label)
 
         self.top_n_spin.valueChanged.connect(self._populate_feature_rows)
         self.top_n_mode_combo.currentIndexChanged.connect(self._populate_feature_rows)
@@ -1350,6 +1487,543 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self.metric_combo.setToolTip(desc)
         self.metric_help_btn.setToolTip(desc)
 
+    def _format_feature_name(self, feature_name, multiline=False):
+        """Render a feature name tuple for display in the graph axis."""
+        if isinstance(feature_name, tuple):
+            separator = "\n" if multiline else " / "
+            return separator.join(str(part) for part in feature_name if str(part))
+        return str(feature_name)
+
+    def _get_displayed_feature_names(self):
+        """Return the feature names currently shown in the ranked feature table."""
+        result = []
+        for row in range(self.table.rowCount()):
+            fine_item = self.table.item(row, self._get_col_feature())
+            if fine_item is None:
+                continue
+            finest_grain = fine_item.text()
+            if self._n_hierarchy_levels > 0:
+                hierarchy = []
+                for h_idx in range(self._n_hierarchy_levels):
+                    item = self.table.item(row, h_idx + 1)
+                    hierarchy.append(item.text() if item is not None else "")
+                result.append(tuple(hierarchy + [finest_grain]))
+            else:
+                result.append(finest_grain)
+        return result
+
+    def _make_numeric_axis_ticks(self, min_value, max_value, max_ticks=5):
+        if not np.isfinite(min_value) or not np.isfinite(max_value):
+            return []
+        if min_value == max_value:
+            min_value -= 0.5
+            max_value += 0.5
+        span = max_value - min_value
+        if span <= 0:
+            return [(min_value, str(min_value))]
+
+        tick_count = min(max_ticks, 5)
+        raw_ticks = np.linspace(min_value, max_value, tick_count)
+        if np.allclose(raw_ticks, np.rint(raw_ticks), atol=1e-8):
+            labels = [str(int(round(v))) for v in raw_ticks]
+        else:
+            labels = [f"{v:.2f}".rstrip("0").rstrip(".") for v in raw_ticks]
+        return list(zip(raw_ticks, labels))
+
+    def _format_feature_point_tooltip(self, point_data):
+        if not isinstance(point_data, dict):
+            return str(point_data)
+        feature_name = point_data.get("feature", "")
+        group_name = point_data.get("group", "")
+        sample_label = point_data.get("sample_label")
+        value = point_data.get("value")
+        value_text = "-" if value is None else f"{value:.3g}"
+        sample_text = f"Sample: {sample_label}\n" if sample_label is not None else ""
+        return (
+            f"{group_name}\n"
+            f"{sample_text}"
+            f"Feature: {self._format_feature_name(feature_name, multiline=False)}\n"
+            f"Value: {value_text}"
+        )
+
+    def _on_feature_point_hovered(self, point_data):
+        if self._feature_graph_widget is None:
+            return
+
+        if getattr(self, "_feature_hover_line", None) is not None:
+            self._feature_graph_widget.removeItem(self._feature_hover_line)
+            self._feature_hover_line = None
+
+        if point_data is None:
+            return
+
+        sample_label = point_data.get("sample_label")
+        sample_index = point_data.get("sample_index")
+        sample_pos = point_data.get("sample_pos")
+        group_name = point_data.get("group")
+        if sample_label is None or group_name is None:
+            return
+
+        displayed_features = self._get_displayed_feature_names()
+        if not displayed_features:
+            return
+
+        if group_name == self.group_a_name:
+            source_group = self._get_group_features(self.group_a_indices)
+            line_color = (31, 119, 180, 180)
+        else:
+            source_group = self._get_group_features(self.group_b_indices)
+            line_color = (214, 39, 40, 180)
+
+        match_label = sample_index
+        if match_label not in source_group.index:
+            if isinstance(sample_label, str):
+                try:
+                    parsed = int(sample_label)
+                except (ValueError, TypeError):
+                    parsed = None
+                if parsed in source_group.index:
+                    match_label = parsed
+
+        if match_label not in source_group.index:
+            if isinstance(sample_pos, int) and 0 <= sample_pos < len(source_group):
+                try:
+                    values = source_group.iloc[sample_pos][displayed_features]
+                except Exception:
+                    return
+            else:
+                return
+        else:
+            try:
+                values = source_group.loc[match_label, displayed_features]
+            except Exception:
+                return
+
+        if isinstance(values, pd.DataFrame):
+            values = values.iloc[0]
+        valid = np.isfinite(values.to_numpy(dtype=float))
+        if not np.any(valid):
+            return
+
+        transposed = getattr(self, "_transpose_graph_check", None) is not None and self._transpose_graph_check.isChecked()
+        jitter = float(self._feature_jitter_spin.value()) if hasattr(self, "_feature_jitter_spin") else 0.0
+        seed = 0 if group_name == self.group_a_name else 1
+        x_vals, y_vals = self._get_hover_line_positions(
+            source_group,
+            displayed_features,
+            match_label,
+            jitter,
+            transposed,
+            seed=seed,
+        )
+        if x_vals.size == 0:
+            return
+
+        self._feature_hover_line = pg.PlotCurveItem(
+            x=x_vals,
+            y=y_vals,
+            pen=pg.mkPen(color=line_color[:3] + (255,), width=3, style=QtCore.Qt.SolidLine),
+            antialias=True,
+        )
+        self._feature_hover_line.setZValue(1000)
+        self._feature_graph_widget.addItem(self._feature_hover_line)
+        self._feature_graph_widget.update()
+
+    def _on_feature_point_double_clicked(self, point_data):
+        if point_data is None or self.figure is None:
+            return
+
+        sample_label = point_data.get("sample_label")
+        sample_index = point_data.get("sample_index")
+        label = None
+        if sample_label is not None:
+            label = str(sample_label)
+        elif sample_index is not None:
+            label = str(sample_index)
+
+        if not label:
+            return
+
+        if hasattr(self.figure, "find_label"):
+            try:
+                self.figure.find_label(label, regex=False, highlight=True, go_to_first=True, verbose=False)
+                self.figure.canvas.request_draw()
+            except Exception:
+                pass
+
+    def _format_feature_name_for_transposed(self, feature_name):
+        if isinstance(feature_name, tuple):
+            if len(feature_name) >= 2:
+                parts = [feature_name[0], feature_name[-1]]
+                return "\n".join(str(part) for part in parts if str(part))
+            return self._format_feature_name(feature_name, multiline=True)
+        return str(feature_name)
+
+    def _compute_feature_jitter_offsets(self, group, displayed_features, jitter, seed=0):
+        if jitter <= 0.0 or group.empty:
+            return [np.zeros(0, dtype=float) for _ in displayed_features]
+
+        rng = np.random.default_rng(seed)
+        offsets = []
+        for feature in displayed_features:
+            values = group[feature].to_numpy(dtype=float)
+            valid = np.isfinite(values)
+            if valid.any():
+                offsets.append(rng.uniform(-jitter, jitter, size=np.count_nonzero(valid)))
+            else:
+                offsets.append(np.zeros(0, dtype=float))
+        return offsets
+
+    def _get_hover_line_positions(
+        self,
+        source_group,
+        displayed_features,
+        match_label,
+        jitter,
+        transposed,
+        seed=0,
+    ):
+        positions = np.arange(len(displayed_features), 0, -1, dtype=float)
+        if transposed:
+            positions = np.arange(1, len(displayed_features) + 1, dtype=float)
+
+        jitter_offsets = self._compute_feature_jitter_offsets(
+            source_group, displayed_features, jitter, seed=seed
+        )
+
+        x_vals = []
+        y_vals = []
+        for idx, feature in enumerate(displayed_features):
+            if feature not in source_group.columns:
+                continue
+            values = source_group[feature].to_numpy(dtype=float)
+            valid = np.isfinite(values)
+            if not valid.any():
+                continue
+            valid_labels = source_group.index[valid]
+            match_pos = np.flatnonzero(valid_labels == match_label)
+            if match_pos.size != 1:
+                continue
+            feature_value = float(values[valid][match_pos[0]])
+            offset = float(jitter_offsets[idx][match_pos[0]]) if jitter > 0.0 else 0.0
+            if transposed:
+                x_vals.append(positions[idx] + offset)
+                y_vals.append(feature_value)
+            else:
+                x_vals.append(feature_value)
+                y_vals.append(positions[idx] + offset)
+
+        return np.asarray(x_vals, dtype=float), np.asarray(y_vals, dtype=float)
+
+    def _pyqtgraph_marker_for_figure_marker(self, marker):
+        marker_map = {
+            "circle": "o",
+            "square": "s",
+            "diamond": "d",
+            "plus": "+",
+            "cross": "x",
+            "asterix": "star",
+            "tick": "|",
+            "tick_left": "arrow_left",
+            "tick_right": "arrow_right",
+            "triangle_up": "t1",
+            "triangle_down": "t",
+            "triangle_left": "t3",
+            "triangle_right": "t2",
+            "heart": "star",
+            "spade": "star",
+            "club": "star",
+            "pin": "t",
+            "custom": "o",
+        }
+        return marker_map.get(str(marker), "o")
+
+    def _update_feature_graph(self):
+        if not hasattr(self, "_feature_graph_widget"):
+            return
+
+        self._feature_graph_widget.clear()
+        self._feature_graph_widget.setTitle("")
+        displayed_features = self._get_displayed_feature_names()
+        if len(displayed_features) == 0:
+            self._feature_graph_widget.setTitle("No ranked features to plot")
+            return
+
+        group_a = self._get_group_features(self.group_a_indices).reindex(
+            columns=displayed_features, copy=False
+        )
+        group_b = self._get_group_features(self.group_b_indices).reindex(
+            columns=displayed_features, copy=False
+        )
+
+        if group_a.empty and group_b.empty:
+            self._feature_graph_widget.setTitle("No group feature values available")
+            return
+
+        transposed = getattr(self, "_transpose_graph_check", None) is not None and self._transpose_graph_check.isChecked()
+        if transposed:
+            self._feature_graph_widget.setLabel("bottom", "")
+            self._feature_graph_widget.setLabel("left", "Synapse count")
+        else:
+            self._feature_graph_widget.setLabel("bottom", "Synapse count")
+            self._feature_graph_widget.setLabel("left", "Ranked features")
+        self._feature_graph_widget.showGrid(x=True, y=True, alpha=0.25)
+
+        num_features = len(displayed_features)
+        positions = np.arange(num_features, 0, -1, dtype=float)
+        if transposed:
+            positions = np.arange(1, num_features + 1, dtype=float)
+
+        jitter = 0.0
+        if hasattr(self, "_feature_jitter_spin"):
+            jitter = float(self._feature_jitter_spin.value())
+
+        jitter_offsets_a = self._compute_feature_jitter_offsets(group_a, displayed_features, jitter, seed=0)
+        jitter_offsets_b = self._compute_feature_jitter_offsets(group_b, displayed_features, jitter, seed=1)
+
+        marker_symbols_a = None
+        marker_symbols_b = None
+        if self.figure is not None and hasattr(self.figure, "_marker_symbols"):
+            try:
+                all_markers = np.asarray(self.figure._marker_symbols, dtype=object)
+                marker_symbols_a = all_markers[np.asarray(self.group_a_indices, dtype=int)]
+                marker_symbols_b = all_markers[np.asarray(self.group_b_indices, dtype=int)]
+            except Exception:
+                marker_symbols_a = None
+                marker_symbols_b = None
+
+        x_a = np.array([], dtype=float)
+        y_a = np.array([], dtype=float)
+        spots_a = []
+        for idx, feature in enumerate(displayed_features):
+            values = group_a.iloc[:, idx].to_numpy(dtype=float)
+            if values.size:
+                valid = np.isfinite(values)
+                if valid.any():
+                    values = values[valid]
+                    if transposed:
+                        x_vals = np.full(values.shape, positions[idx])
+                        if jitter > 0.0:
+                            x_vals = x_vals + jitter_offsets_a[idx]
+                        y_vals = values
+                    else:
+                        x_vals = values
+                        y_vals = np.full(values.shape, positions[idx])
+                        if jitter > 0.0:
+                            y_vals = y_vals + jitter_offsets_a[idx]
+                    x_a = np.concatenate([x_a, x_vals]) if x_a.size else x_vals
+                    y_a = np.concatenate([y_a, y_vals])
+                    sample_indices = np.flatnonzero(valid)
+                    sample_labels = group_a.index[valid]
+                    symbol_values = None
+                    if marker_symbols_a is not None:
+                        symbol_values = np.asarray(
+                            [
+                                self._pyqtgraph_marker_for_figure_marker(m)
+                                for m in marker_symbols_a[valid]
+                            ],
+                            dtype=object,
+                        )
+                    for x_val, y_val, raw_val, sample_pos, sample_label, symbol in zip(
+                        x_vals,
+                        y_vals,
+                        values,
+                        sample_indices,
+                        sample_labels,
+                        symbol_values if symbol_values is not None else [None] * len(values),
+                    ):
+                        spot = {
+                            "pos": (x_val, y_val),
+                            "data": {
+                                "feature": feature,
+                                "group": self.group_a_name,
+                                "sample_pos": int(sample_pos),
+                                "sample_index": sample_label,
+                                "sample_label": str(sample_label),
+                                "value": float(raw_val),
+                            },
+                        }
+                        if symbol is not None:
+                            spot["symbol"] = symbol
+                        spots_a.append(spot)
+
+        x_b = np.array([], dtype=float)
+        y_b = np.array([], dtype=float)
+        spots_b = []
+        for idx, feature in enumerate(displayed_features):
+            values = group_b.iloc[:, idx].to_numpy(dtype=float)
+            if values.size:
+                valid = np.isfinite(values)
+                if valid.any():
+                    values = values[valid]
+                    if transposed:
+                        x_vals = np.full(values.shape, positions[idx])
+                        if jitter > 0.0:
+                            x_vals = x_vals + jitter_offsets_b[idx]
+                        y_vals = values
+                    else:
+                        x_vals = values
+                        y_vals = np.full(values.shape, positions[idx])
+                        if jitter > 0.0:
+                            y_vals = y_vals + jitter_offsets_b[idx]
+                    x_b = np.concatenate([x_b, x_vals]) if x_b.size else x_vals
+                    y_b = np.concatenate([y_b, y_vals])
+                    sample_indices = np.flatnonzero(valid)
+                    sample_labels = group_b.index[valid]
+                    symbol_values = None
+                    if marker_symbols_b is not None:
+                        symbol_values = np.asarray(
+                            [
+                                self._pyqtgraph_marker_for_figure_marker(m)
+                                for m in marker_symbols_b[valid]
+                            ],
+                            dtype=object,
+                        )
+                    for x_val, y_val, raw_val, sample_pos, sample_label, symbol in zip(
+                        x_vals,
+                        y_vals,
+                        values,
+                        sample_indices,
+                        sample_labels,
+                        symbol_values if symbol_values is not None else [None] * len(values),
+                    ):
+                        spot = {
+                            "pos": (x_val, y_val),
+                            "data": {
+                                "feature": feature,
+                                "group": self.group_b_name,
+                                "sample_pos": int(sample_pos),
+                                "sample_index": sample_label,
+                                "sample_label": str(sample_label),
+                                "value": float(raw_val),
+                            },
+                        }
+                        if symbol is not None:
+                            spot["symbol"] = symbol
+                        spots_b.append(spot)
+
+        show_kde = getattr(self, "_feature_kde_check", None) is not None and self._feature_kde_check.isChecked()
+        zoom_limited = getattr(self, "_feature_zoom_limit_check", None) is not None and self._feature_zoom_limit_check.isChecked()
+        view_box = self._feature_graph_widget.getViewBox()
+        if zoom_limited:
+            if transposed:
+                view_box.setMouseEnabled(x=True, y=False)
+            else:
+                view_box.setMouseEnabled(x=False, y=True)
+        else:
+            view_box.setMouseEnabled(x=True, y=True)
+
+        if show_kde:
+            KDE_WIDTH = 0.20
+            for idx, feature in enumerate(displayed_features):
+                for values, color, direction in (
+                    (group_a.iloc[:, idx].to_numpy(dtype=float), (31, 119, 180), -1),
+                    (group_b.iloc[:, idx].to_numpy(dtype=float), (214, 39, 40), 1),
+                ):
+                    if values.size:
+                        valid = np.isfinite(values)
+                        if valid.any():
+                            values = values[valid]
+                            if values.size < 2:
+                                continue
+                            try:
+                                kde = _scipy_stats.gaussian_kde(values)
+                            except Exception:
+                                continue
+                            x_min = float(np.min(values))
+                            x_max = float(np.max(values))
+                            if x_min == x_max:
+                                x_min -= 0.5
+                                x_max += 0.5
+                            x_grid = np.linspace(x_min, x_max, 128)
+                            density = kde(x_grid)
+                            if np.max(density) <= 0:
+                                continue
+                            density = density / np.max(density)
+                            if transposed:
+                                x_vals = positions[idx] + density * KDE_WIDTH * direction
+                                y_vals = x_grid
+                            else:
+                                x_vals = x_grid
+                                y_vals = positions[idx] + density * KDE_WIDTH * direction
+                            kde_item = pg.PlotDataItem(
+                                x=x_vals,
+                                y=y_vals,
+                                pen=pg.mkPen(color=color + (200,), width=1.5),
+                                antialias=True,
+                            )
+                            self._feature_graph_widget.addItem(kde_item)
+
+        if spots_a:
+            scatter_a = _FeatureScatterPlotItem(
+                spots=spots_a,
+                pen=pg.mkPen(color=(31, 119, 180), width=1),
+                brush=(31, 119, 180, 150),
+                size=6,
+                symbol="o",
+                hoverable=True,
+                hoverPen=pg.mkPen("w", width=2),
+                hover_tip_formatter=self._format_feature_point_tooltip,
+                hover_line_callback=self._on_feature_point_hovered,
+                double_click_callback=self._on_feature_point_double_clicked,
+            )
+            scatter_a.setZValue(1)
+            self._feature_graph_widget.addItem(scatter_a)
+
+        if spots_b:
+            scatter_b = _FeatureScatterPlotItem(
+                spots=spots_b,
+                pen=pg.mkPen(color=(214, 39, 40), width=1),
+                brush=(214, 39, 40, 150),
+                size=6,
+                symbol="t",
+                hoverable=True,
+                hoverPen=pg.mkPen("w", width=2),
+                hover_tip_formatter=self._format_feature_point_tooltip,
+                hover_line_callback=self._on_feature_point_hovered,
+                double_click_callback=self._on_feature_point_double_clicked,
+            )
+            scatter_b.setZValue(2)
+            self._feature_graph_widget.addItem(scatter_b)
+
+        if transposed:
+            ticks = [
+                (positions[idx], self._format_feature_name_for_transposed(feature))
+                for idx, feature in enumerate(displayed_features)
+            ]
+            self._feature_graph_widget.getAxis("bottom").setTicks([ticks])
+            all_y = np.concatenate([y_a, y_b]) if (y_a.size or y_b.size) else np.array([0.0])
+            if all_y.size > 0:
+                y_min = float(np.nanmin(all_y))
+                y_max = float(np.nanmax(all_y))
+                if y_min == y_max:
+                    y_min -= 0.5
+                    y_max += 0.5
+                y_ticks = self._make_numeric_axis_ticks(y_min, y_max)
+                self._feature_graph_widget.getAxis("left").setTicks([y_ticks])
+                self._feature_graph_widget.setYRange(y_min, y_max)
+            else:
+                self._feature_graph_widget.getAxis("left").setTicks([])
+            self._feature_graph_widget.setXRange(0.5, float(num_features) + 0.5)
+        else:
+            ticks = [
+                (positions[idx], self._format_feature_name(feature))
+                for idx, feature in enumerate(displayed_features)
+            ]
+            self._feature_graph_widget.getAxis("left").setTicks([ticks])
+            all_x = np.concatenate([x_a, x_b]) if (x_a.size or x_b.size) else np.array([0.0])
+            if all_x.size > 0:
+                x_min = float(np.nanmin(all_x))
+                x_max = float(np.nanmax(all_x))
+                if x_min == x_max:
+                    x_min -= 0.5
+                    x_max += 0.5
+                x_ticks = self._make_numeric_axis_ticks(x_min, x_max)
+                self._feature_graph_widget.getAxis("bottom").setTicks([x_ticks])
+            else:
+                self._feature_graph_widget.getAxis("bottom").setTicks([])
+            self._feature_graph_widget.setYRange(0.5, float(num_features) + 0.5)
+
     def _set_metric_item_tooltips(self):
         """Set dropdown hover tooltips for each metric option."""
         for i in range(self.metric_combo.count()):
@@ -1487,13 +2161,13 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         self._update_group_summary()
         self._populate_feature_rows()
 
-    def _group_name_from_ids(self, ids, fallback):
+    def _group_name_from_ids(self, indices, fallback):
         """Infer group display name from selected IDs and metadata labels."""
-        if not ids or self.meta.empty or "label" not in self.meta.columns:
+        if indices is None or not len(indices) or self.meta.empty or "label" not in self.meta.columns:
             return fallback
 
         selected_labels = (
-            self.meta.loc[self.meta["id"].isin(ids), "label"]
+            self.meta.iloc[indices].label
             .dropna()
             .astype(str)
             .unique()
@@ -1515,10 +2189,10 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         if target == "a":
             self.group_a_indices = selected_indices
-            self.group_a_name = self._group_name_from_ids(selected_indices, "Group A")
+            self.group_a_name = self._group_name_from_ids(selected_indices, "mixed")
         else:
             self.group_b_indices = selected_indices
-            self.group_b_name = self._group_name_from_ids(selected_indices, "Group B")
+            self.group_b_name = self._group_name_from_ids(selected_indices, "mixed")
 
         self._update_group_summary()
         self._populate_feature_rows()
@@ -1595,12 +2269,12 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             if new_indices == self.group_a_indices:
                 return
             self.group_a_indices = new_indices
-            self.group_a_name = self._group_name_from_ids(new_indices, "Group A")
+            self.group_a_name = self._group_name_from_ids(new_indices, "mixed")
         else:
             if new_indices == self.group_b_indices:
                 return
             self.group_b_indices = new_indices
-            self.group_b_name = self._group_name_from_ids(new_indices, "Group B")
+            self.group_b_name = self._group_name_from_ids(new_indices, "mixed")
 
         self._update_group_summary()
         self._populate_feature_rows()
@@ -1693,6 +2367,8 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         finally:
             self.status_label.hide()
             QtWidgets.QApplication.restoreOverrideCursor()
+
+        self._update_feature_graph()
 
     def _do_populate_feature_rows(self):
         was_sorting_enabled = self.table.isSortingEnabled()
@@ -2051,45 +2727,91 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
             (vals_a, self.group_a_name, "#5b9bd5"),
             (vals_b, self.group_b_name, "#ed7d31"),
         ]
-        for idx, (vals, label, color) in enumerate(groups, start=1):
-            if len(vals) >= 3:
-                vp = ax.violinplot(
-                    vals,
-                    positions=[idx],
-                    showmedians=True,
-                    showextrema=False,
-                    widths=0.55,
-                )
-                for pc in vp["bodies"]:
-                    pc.set_facecolor(color)
-                    pc.set_alpha(0.45)
-                    pc.set_edgecolor("none")
-                vp["cmedians"].set_color(color)
-                vp["cmedians"].set_linewidth(2)
-            jitter = rng.uniform(-0.12, 0.12, size=len(vals))
-            ax.scatter(
-                np.full(len(vals), idx) + jitter,
-                vals,
-                color=color,
-                s=22,
-                alpha=0.7,
-                linewidths=0,
-                label=f"{label} (n={len(vals)})",
-            )
 
-        ax.set_xticks([1, 2])
-        ax.set_xticklabels([self.group_a_name, self.group_b_name])
-        ax.set_ylabel(
-            "Normalized value" if self.normalize_check.isChecked() else "Synapse count"
-        )
-        ax.set_title(str(feature_name), fontsize=10)
-        ax.spines[["top", "right"]].set_visible(False)
-        ax.set_xlim(0.4, 2.6)
+        def _render_distribution(show_kde: bool):
+            ax.clear()
+            for idx, (vals, label, color) in enumerate(groups, start=1):
+                if len(vals) >= 3:
+                    vp = ax.violinplot(
+                        vals,
+                        positions=[idx],
+                        showmedians=True,
+                        showextrema=False,
+                        widths=0.55,
+                    )
+                    for pc in vp["bodies"]:
+                        pc.set_facecolor(color)
+                        pc.set_alpha(0.45)
+                        pc.set_edgecolor("none")
+                    vp["cmedians"].set_color(color)
+                    vp["cmedians"].set_linewidth(2)
+
+                jitter = rng.uniform(-0.12, 0.12, size=len(vals))
+                ax.scatter(
+                    np.full(len(vals), idx) + jitter,
+                    vals,
+                    color=color,
+                    s=22,
+                    alpha=0.7,
+                    linewidths=0,
+                    label=f"{label} (n={len(vals)})",
+                )
+
+                if show_kde and len(vals) >= 2:
+                    try:
+                        kde = _scipy_stats.gaussian_kde(vals)
+                        x_min = float(np.min(vals))
+                        x_max = float(np.max(vals))
+                        if x_min == x_max:
+                            x_min -= 0.5
+                            x_max += 0.5
+                        x_grid = np.linspace(x_min, x_max, 256)
+                        density = kde(x_grid)
+                        if np.max(density) > 0:
+                            density = density / np.max(density)
+                            kde_x = np.full_like(x_grid, idx) + density * 0.20
+                            ax.plot(
+                                kde_x,
+                                x_grid,
+                                color=color,
+                                linewidth=1.75,
+                                alpha=0.85,
+                            )
+                    except Exception:
+                        pass
+
+            ax.set_xticks([1, 2])
+            ax.set_xticklabels([self.group_a_name, self.group_b_name])
+            ax.set_ylabel(
+                "Normalized value" if self.normalize_check.isChecked() else "Synapse count"
+            )
+            ax.set_title(str(feature_name), fontsize=10)
+            ax.spines[["top", "right"]].set_visible(False)
+            ax.set_xlim(0.4, 2.6)
+            canvas.draw_idle()
 
         canvas = _FigureCanvas(fig)
+
+        controls = QtWidgets.QHBoxLayout()
+        controls.setContentsMargins(0, 0, 0, 0)
+        controls.setSpacing(8)
+        show_kde_checkbox = QtWidgets.QCheckBox("Show KDE")
+        show_kde_checkbox.setToolTip(
+            "Toggle kernel density estimates for each group's value distribution."
+        )
+        show_kde_checkbox.stateChanged.connect(
+            lambda _: _render_distribution(show_kde_checkbox.isChecked())
+        )
+        controls.addWidget(show_kde_checkbox)
+        controls.addStretch(1)
+
         layout = QtWidgets.QVBoxLayout(dlg)
         layout.setContentsMargins(4, 4, 4, 4)
+        layout.addLayout(controls)
         layout.addWidget(canvas)
+
+        _render_distribution(False)
+
         self._distribution_dialogs.append(dlg)
         dlg.destroyed.connect(
             lambda: (

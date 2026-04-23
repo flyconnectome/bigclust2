@@ -555,9 +555,11 @@ class SingleProjectLoader(BaseProjectLoader):
                     id_col = "id"
                 elif "index" in cols:
                     id_col = "index"
+                elif "__index_level_0__" in cols:
+                    id_col = "__index_level_0__"
                 else:
                     raise ValueError(
-                        "Distance file must have either an 'id' or 'index' column to filter on."
+                        "Distance file must have either an 'id', 'index' or '__index_level_0__' column to filter on."
                     )
 
                 col_mask = np.zeros(len(cols), dtype=bool)
@@ -571,7 +573,7 @@ class SingleProjectLoader(BaseProjectLoader):
                     col_mask[ind] = True
                 else:
                     raise ValueError(
-                        "Distance file must have the 'id' or 'index' column as the first or last column for correct filtering, "
+                        "Distance file must have the 'id', 'index' or '__index_level_0__' column as the first or last column for correct filtering, "
                         f" but got: index {cols.index(id_col)} of {len(cols)} columns"
                     )
 
@@ -620,7 +622,7 @@ class SingleProjectLoader(BaseProjectLoader):
                     id_col = "__index_level_0__"
                 else:
                     raise ValueError(
-                        "Features must have either an 'id', 'index' or '__index_level_0__' column to filter on."
+                        "Features file must have either an 'id', 'index' or '__index_level_0__' column to filter on."
                     )
 
                 features = (

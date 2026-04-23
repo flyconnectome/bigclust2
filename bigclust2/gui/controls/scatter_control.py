@@ -6,7 +6,7 @@ import pyperclip
 import pandas as pd
 import numpy as np
 
-from PySide6 import QtWidgets, QtCore
+from PySide6 import QtWidgets, QtCore, QtGui
 from concurrent.futures import ThreadPoolExecutor
 
 from ...embeddings import (
@@ -238,6 +238,9 @@ class ScatterControls(QtWidgets.QWidget):
         # Set the action for the color combo box
         self.color_combo_box.currentIndexChanged.connect(self.set_colors)
         self.palette_combo_box.currentIndexChanged.connect(self.set_colors)
+        self.label_combo_box.currentIndexChanged.connect(
+            self._maybe_recompute_evaluation
+        )
 
         ########
         # Selection behavior
@@ -831,15 +834,30 @@ class ScatterControls(QtWidgets.QWidget):
         self.evaluate_labels_form = settings_form
         self.tab6_layout.addWidget(settings_group)
 
+        self.add_tooltip(
+            settings_group,
+            "Evaluate how well groups defined by the currently shown labels (e.g. from clustering) represent the structure of high-dimensional space.",
+            anchor="group_label",
+        )
+
         self.evaluate_labels_show_check = QtWidgets.QCheckBox()
         self.evaluate_labels_show_check.setToolTip(
-            "Enable per-sample evaluation of label assignments in the embedding."
+            "Enable per-sample evaluation of label assignments based on given metric."
         )
         self.evaluate_labels_show_check.setChecked(False)
         self.evaluate_labels_show_check.stateChanged.connect(
             self._on_evaluate_labels_toggle
         )
         settings_form.addRow("Show:", self.evaluate_labels_show_check)
+
+        self.evaluate_labels_data_combo_box = QtWidgets.QComboBox()
+        self.evaluate_labels_data_combo_box.setToolTip(
+            "Select the data source used for label evaluation."
+        )
+        self.evaluate_labels_data_combo_box.currentIndexChanged.connect(
+            self._on_evaluate_labels_toggle
+        )
+        settings_form.addRow("Data:", self.evaluate_labels_data_combo_box)
 
         self.evaluate_labels_method_combo_box = QtWidgets.QComboBox()
         self.evaluate_labels_method_combo_box.setToolTip(
@@ -878,6 +896,16 @@ class ScatterControls(QtWidgets.QWidget):
             self._on_evaluate_labels_toggle
         )
         settings_form.addRow("Metric:", self.evaluate_labels_metric_combo_box)
+
+        self.evaluate_labels_sync_check = QtWidgets.QCheckBox("Sync w/ labels")
+        self.evaluate_labels_sync_check.setToolTip(
+            "Automatically recompute per-sample evaluation when the displayed labels change."
+        )
+        self.evaluate_labels_sync_check.setChecked(False)
+        self.evaluate_labels_sync_check.stateChanged.connect(
+            self._maybe_recompute_evaluation
+        )
+        settings_form.addRow(self.evaluate_labels_sync_check)
 
         self.evaluate_labels_k_spinbox = QtWidgets.QSpinBox()
         self.evaluate_labels_k_spinbox.setRange(1, 200)
@@ -1009,7 +1037,9 @@ class ScatterControls(QtWidgets.QWidget):
         algo_layout.addLayout(algo_form)
 
         self.cluster_method_combo_box = QtWidgets.QComboBox()
-        self.cluster_method_combo_box.addItems(["HDBSCAN", "Agglomerative", "K-Means"])
+        self.cluster_method_combo_box.addItems(
+            ["HDBSCAN", "Agglomerative", "K-Means", "Spectral"]
+        )
         self.cluster_method_combo_box.setToolTip("Select the clustering algorithm.")
         self.cluster_method_combo_box.currentIndexChanged.connect(
             self._update_cluster_method_settings
@@ -1058,10 +1088,10 @@ class ScatterControls(QtWidgets.QWidget):
         hdbscan_form.addRow("Selection method:", self.cluster_hdbscan_method_combo)
 
         self.cluster_hdbscan_label_noise_check = QtWidgets.QCheckBox(
-            "Relabel noise points"
+            "Force noise point assignment"
         )
         self.cluster_hdbscan_label_noise_check.setToolTip(
-            "Assign HDBSCAN noise points (-1) to the nearest non-noise cluster."
+            "Assign noise points (-1) to the nearest non-noise cluster."
         )
         self.cluster_hdbscan_label_noise_check.setChecked(False)
         self.cluster_hdbscan_label_noise_check.stateChanged.connect(
@@ -1125,7 +1155,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_agg_n_clusters.setRange(2, 10000)
         self.cluster_agg_n_clusters.setValue(10)
         self.cluster_agg_n_clusters.setToolTip("Number of clusters to find.")
-        agg_form.addRow("N clusters:", self.cluster_agg_n_clusters)
+        agg_form.addRow("N clusters (k):", self.cluster_agg_n_clusters)
 
         self.cluster_agg_distance_threshold = QtWidgets.QDoubleSpinBox()
         self.cluster_agg_distance_threshold.setRange(0.0, 1_000_000.0)
@@ -1208,12 +1238,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_kmeans_widget.setLayout(kmeans_form)
         algo_layout.addWidget(self.cluster_kmeans_widget)
 
-        self.cluster_kmeans_n_clusters = QtWidgets.QSpinBox()
-        self.cluster_kmeans_n_clusters.setRange(2, 10000)
-        self.cluster_kmeans_n_clusters.setValue(10)
-        self.cluster_kmeans_n_clusters.setToolTip("Number of clusters.")
-        kmeans_form.addRow("N clusters:", self.cluster_kmeans_n_clusters)
-
         self.cluster_kmeans_n_init = QtWidgets.QSpinBox()
         self.cluster_kmeans_n_init.setRange(1, 100)
         self.cluster_kmeans_n_init.setValue(10)
@@ -1227,6 +1251,126 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_kmeans_max_iter.setValue(300)
         self.cluster_kmeans_max_iter.setToolTip("Maximum iterations per run.")
         kmeans_form.addRow("Max iterations:", self.cluster_kmeans_max_iter)
+
+        option_row = QtWidgets.QWidget()
+        option_layout = QtWidgets.QHBoxLayout()
+        option_layout.setContentsMargins(0, 0, 0, 0)
+        option_layout.setSpacing(4)
+        option_row.setLayout(option_layout)
+
+        self.cluster_kmeans_n_clusters = QtWidgets.QSpinBox()
+        self.cluster_kmeans_n_clusters.setRange(2, 10000)
+        self.cluster_kmeans_n_clusters.setValue(10)
+        self.cluster_kmeans_n_clusters.setToolTip("Number of clusters.")
+        option_layout.addWidget(self.cluster_kmeans_n_clusters)
+
+        self.cluster_kmeans_choose_k_button = QtWidgets.QToolButton()
+        self.cluster_kmeans_choose_k_button.setText("Find k")
+        self.cluster_kmeans_choose_k_button.setToolTip(
+            "Click to choose a score method and automatically select the number of K-Means clusters."
+        )
+        self.cluster_kmeans_choose_k_button.setPopupMode(
+            QtWidgets.QToolButton.InstantPopup
+        )
+
+        self.cluster_kmeans_score_menu = QtWidgets.QMenu(self)
+        self.cluster_kmeans_score_group = QtGui.QActionGroup(self)
+        self.cluster_kmeans_score_group.setExclusive(True)
+
+        for score_name in ["Silhouette", "Calinski-Harabasz", "Davies-Bouldin"]:
+            action = self.cluster_kmeans_score_menu.addAction(score_name)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked, score=score_name: self._choose_k_for_kmeans(score)
+            )
+            self.cluster_kmeans_score_group.addAction(action)
+
+        self.cluster_kmeans_score_group.actions()[0].setChecked(True)
+        self.cluster_kmeans_choose_k_button.setMenu(self.cluster_kmeans_score_menu)
+        option_layout.addWidget(self.cluster_kmeans_choose_k_button)
+
+        kmeans_form.addRow("N clusters:", option_row)
+
+        # --- Spectral settings ---
+        self.cluster_spectral_widget = QtWidgets.QWidget()
+        spectral_form = QtWidgets.QFormLayout()
+        spectral_form.setContentsMargins(0, 0, 0, 0)
+        self.cluster_spectral_widget.setLayout(spectral_form)
+        algo_layout.addWidget(self.cluster_spectral_widget)
+
+        self.cluster_spectral_n_clusters = QtWidgets.QSpinBox()
+        self.cluster_spectral_n_clusters.setRange(2, 10000)
+        self.cluster_spectral_n_clusters.setValue(10)
+        self.cluster_spectral_n_clusters.setToolTip(
+            "Number of clusters to find with Spectral clustering."
+        )
+
+        spectral_option_row = QtWidgets.QWidget()
+        spectral_option_layout = QtWidgets.QHBoxLayout()
+        spectral_option_layout.setContentsMargins(0, 0, 0, 0)
+        spectral_option_layout.setSpacing(4)
+        spectral_option_row.setLayout(spectral_option_layout)
+        spectral_option_layout.addWidget(self.cluster_spectral_n_clusters)
+
+        self.cluster_spectral_choose_k_button = QtWidgets.QToolButton()
+        self.cluster_spectral_choose_k_button.setText("Find k")
+        self.cluster_spectral_choose_k_button.setToolTip(
+            "Click to choose a score method and automatically select the number of Spectral clusters."
+        )
+        self.cluster_spectral_choose_k_button.setPopupMode(
+            QtWidgets.QToolButton.InstantPopup
+        )
+
+        self.cluster_spectral_score_menu = QtWidgets.QMenu(self)
+        self.cluster_spectral_score_group = QtGui.QActionGroup(self)
+        self.cluster_spectral_score_group.setExclusive(True)
+
+        for score_name in ["Silhouette", "Calinski-Harabasz", "Davies-Bouldin"]:
+            action = self.cluster_spectral_score_menu.addAction(score_name)
+            action.setCheckable(True)
+            action.triggered.connect(
+                lambda checked, score=score_name: self._choose_k_for_spectral(score)
+            )
+            self.cluster_spectral_score_group.addAction(action)
+
+        self.cluster_spectral_score_group.actions()[0].setChecked(True)
+        self.cluster_spectral_choose_k_button.setMenu(self.cluster_spectral_score_menu)
+        spectral_option_layout.addWidget(self.cluster_spectral_choose_k_button)
+
+        spectral_form.addRow("N clusters:", spectral_option_row)
+
+        self.cluster_spectral_affinity_combo = QtWidgets.QComboBox()
+        self.cluster_spectral_affinity_combo.addItems(["nearest_neighbors", "rbf"])
+        self.cluster_spectral_affinity_combo.setToolTip(
+            "Spectral affinity to use. 'nearest_neighbors' uses a graph affinity, 'rbf' uses a kernel affinity."
+        )
+        spectral_form.addRow("Affinity:", self.cluster_spectral_affinity_combo)
+
+        self.cluster_spectral_gamma = QtWidgets.QDoubleSpinBox()
+        self.cluster_spectral_gamma.setRange(0.001, 1000.0)
+        self.cluster_spectral_gamma.setSingleStep(0.1)
+        self.cluster_spectral_gamma.setDecimals(3)
+        self.cluster_spectral_gamma.setValue(1.0)
+        self.cluster_spectral_gamma.setToolTip(
+            "Gamma value for RBF affinity. Only used when affinity is 'rbf'."
+        )
+        spectral_form.addRow("Gamma:", self.cluster_spectral_gamma)
+
+        self.cluster_spectral_n_neighbors = QtWidgets.QSpinBox()
+        self.cluster_spectral_n_neighbors.setRange(1, 1000)
+        self.cluster_spectral_n_neighbors.setValue(10)
+        self.cluster_spectral_n_neighbors.setToolTip(
+            "Number of neighbors to use for nearest_neighbors affinity."
+        )
+        spectral_form.addRow("N neighbors:", self.cluster_spectral_n_neighbors)
+
+        self.cluster_spectral_n_init = QtWidgets.QSpinBox()
+        self.cluster_spectral_n_init.setRange(1, 100)
+        self.cluster_spectral_n_init.setValue(10)
+        self.cluster_spectral_n_init.setToolTip(
+            "Number of initializations for Spectral clustering."
+        )
+        spectral_form.addRow("N init:", self.cluster_spectral_n_init)
 
         # Output group
         output_group = QtWidgets.QGroupBox("Output")
@@ -1415,6 +1559,14 @@ class ScatterControls(QtWidgets.QWidget):
         arr = self._selected_clustering_data()
         is_precomputed = arr is not None and is_precomputed_distance_matrix(arr)
         self.cluster_metric_combo_box.setEnabled(not is_precomputed)
+        if hasattr(self, "cluster_kmeans_choose_k_button"):
+            self.cluster_kmeans_choose_k_button.setEnabled(
+                not is_precomputed and self.cluster_method_combo_box.currentText() == "K-Means"
+            )
+        if hasattr(self, "cluster_spectral_choose_k_button"):
+            self.cluster_spectral_choose_k_button.setEnabled(
+                self.cluster_method_combo_box.currentText() == "Spectral"
+            )
 
     def _update_cluster_method_settings(self):
         """Show/hide method-specific settings widgets."""
@@ -1422,7 +1574,9 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_hdbscan_widget.setVisible(method == "HDBSCAN")
         self.cluster_agg_widget.setVisible(method == "Agglomerative")
         self.cluster_kmeans_widget.setVisible(method == "K-Means")
+        self.cluster_spectral_widget.setVisible(method == "Spectral")
         self._update_agg_controls()
+        self._update_cluster_input_controls()
 
     def _update_agg_controls(self):
         """Enable Agglomerative fields for the selected stop criterion."""
@@ -1464,6 +1618,128 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_hdbscan_noise_threshold_check.setEnabled(relabel_noise)
         self.cluster_hdbscan_noise_threshold_row.setEnabled(relabel_noise)
         self.cluster_hdbscan_noise_threshold.setEnabled(use_threshold)
+
+    def _choose_k_for_kmeans(self, score_method=None):
+        """Automatically choose k for K-Means using the current data and score method."""
+        if self.cluster_method_combo_box.currentText() != "K-Means":
+            self.figure.show_message(
+                "Choose K is only available for K-Means.", color="orange", duration=3
+            )
+            return
+
+        arr = self._selected_clustering_data()
+        if arr is None:
+            self.figure.show_message(
+                "No data available for choosing k", color="red", duration=3
+            )
+            return
+
+        arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
+        if is_precomputed_distance_matrix(arr_np):
+            self.figure.show_message(
+                "K-Means requires feature vectors, not a precomputed distance matrix.",
+                color="red",
+                duration=4,
+            )
+            return
+
+        from ...clusters import find_k
+
+        if score_method is None:
+            checked_action = self.cluster_kmeans_score_group.checkedAction()
+            score_method = (
+                checked_action.text() if checked_action is not None else "Silhouette"
+            )
+        score_method = score_method.lower().replace("-", "_").replace(" ", "_")
+
+        def progress_callback(k, max_k):
+            self.figure.show_message(
+                f"Searching k: {k}/{max_k}", color="lightblue", duration=None
+            )
+            QtWidgets.QApplication.processEvents()
+
+        try:
+            k = find_k(
+                arr_np,
+                method="K-Means",
+                is_precomputed=False,
+                metric=self.cluster_metric_combo_box.currentText(),
+                k_min=2,
+                k_max="auto",
+                score_method=score_method,
+                kmeans_n_init=self.cluster_kmeans_n_init.value(),
+                kmeans_max_iter=self.cluster_kmeans_max_iter.value(),
+                random_state=42,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            self.figure.show_message(
+                f"Could not choose k: {exc}", color="red", duration=5
+            )
+            return
+
+        self.cluster_kmeans_n_clusters.setValue(int(k))
+        self.figure.show_message(
+            f"Selected k={k} for K-Means.", color="lightgreen", duration=4
+        )
+
+    def _choose_k_for_spectral(self, score_method=None):
+        """Automatically choose k for Spectral clustering using the current data and score method."""
+        if self.cluster_method_combo_box.currentText() != "Spectral":
+            self.figure.show_message(
+                "Choose K is only available for Spectral.", color="orange", duration=3
+            )
+            return
+
+        arr = self._selected_clustering_data()
+        if arr is None:
+            self.figure.show_message(
+                "No data available for choosing k", color="red", duration=3
+            )
+            return
+
+        arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
+        from ...clusters import find_k
+
+        if score_method is None:
+            checked_action = self.cluster_spectral_score_group.checkedAction()
+            score_method = (
+                checked_action.text() if checked_action is not None else "Silhouette"
+            )
+        score_method = score_method.lower().replace("-", "_").replace(" ", "_")
+
+        def progress_callback(k, max_k):
+            self.figure.show_message(
+                f"Searching k: {k}/{max_k}", color="lightblue", duration=None
+            )
+            QtWidgets.QApplication.processEvents()
+
+        try:
+            k = find_k(
+                arr_np,
+                method="Spectral",
+                is_precomputed=is_precomputed_distance_matrix(arr_np),
+                metric=self.cluster_metric_combo_box.currentText(),
+                k_min=2,
+                k_max="auto",
+                score_method=score_method,
+                spectral_affinity=self.cluster_spectral_affinity_combo.currentText(),
+                spectral_gamma=self.cluster_spectral_gamma.value(),
+                spectral_n_neighbors=self.cluster_spectral_n_neighbors.value(),
+                spectral_n_init=self.cluster_spectral_n_init.value(),
+                random_state=42,
+                progress_callback=progress_callback,
+            )
+        except Exception as exc:
+            self.figure.show_message(
+                f"Could not choose k: {exc}", color="red", duration=5
+            )
+            return
+
+        self.cluster_spectral_n_clusters.setValue(int(k))
+        self.figure.show_message(
+            f"Selected k={k} for Spectral.", color="lightgreen", duration=4
+        )
 
     def _run_clustering(self):
         """Run clustering with the current settings and colour points by cluster."""
@@ -1558,6 +1834,11 @@ class ScatterControls(QtWidgets.QWidget):
                 kmeans_n_clusters=self.cluster_kmeans_n_clusters.value(),
                 kmeans_n_init=self.cluster_kmeans_n_init.value(),
                 kmeans_max_iter=self.cluster_kmeans_max_iter.value(),
+                spectral_n_clusters=self.cluster_spectral_n_clusters.value(),
+                spectral_affinity=self.cluster_spectral_affinity_combo.currentText(),
+                spectral_gamma=self.cluster_spectral_gamma.value(),
+                spectral_n_neighbors=self.cluster_spectral_n_neighbors.value(),
+                spectral_n_init=self.cluster_spectral_n_init.value(),
             )
         except Exception as e:
             logger.error(f"Clustering failed: {e}")
@@ -2139,6 +2420,7 @@ class ScatterControls(QtWidgets.QWidget):
                 box.blockSignals(True)
                 box.clear()
                 box.blockSignals(False)
+            self.update_evaluate_labels_data_options()
             return
 
         self.tabs.setTabEnabled(fidelity_tab_index, True)
@@ -2177,6 +2459,8 @@ class ScatterControls(QtWidgets.QWidget):
                 box.setCurrentIndex(0)
 
             box.setEnabled(len(options) > 1)
+
+        self.update_evaluate_labels_data_options()
 
     def _selected_embedding_data(self):
         """Return the currently selected distance/feature matrix."""
@@ -2518,6 +2802,50 @@ class ScatterControls(QtWidgets.QWidget):
         # Force refresh even if the color column text did not change.
         self.set_colors()
 
+    def _evaluate_labels_data_options(self):
+        """Return the available high-dimensional data options for label evaluation."""
+        options = []
+
+        positions = getattr(self.figure, "positions", None)
+        if positions is not None and len(np.asarray(positions)) > 0:
+            options.append("Embedding")
+
+        if getattr(self.figure, "feats", None) is not None:
+            options.append("Features")
+
+        dists = getattr(self.figure, "dists", None)
+        if dists is not None:
+            if isinstance(dists, dict) and "distances" in dists:
+                options.append("Precomputed distances")
+            elif is_precomputed_distance_matrix(dists):
+                options.append("Precomputed distances")
+
+        return options
+
+    def update_evaluate_labels_data_options(self):
+        """Refresh the Evaluate Labels data source dropdown."""
+        if not hasattr(self, "evaluate_labels_data_combo_box"):
+            return
+
+        options = self._evaluate_labels_data_options()
+        current_text = self.evaluate_labels_data_combo_box.currentText()
+
+        self.evaluate_labels_data_combo_box.blockSignals(True)
+        self.evaluate_labels_data_combo_box.clear()
+        if options:
+            self.evaluate_labels_data_combo_box.addItems(options)
+            self.evaluate_labels_data_combo_box.setEnabled(True)
+            self.evaluate_labels_show_check.setEnabled(True)
+            if current_text in options:
+                self.evaluate_labels_data_combo_box.setCurrentText(current_text)
+            else:
+                self.evaluate_labels_data_combo_box.setCurrentIndex(0)
+        else:
+            self.evaluate_labels_data_combo_box.addItem("No high-dimensional data available")
+            self.evaluate_labels_data_combo_box.setEnabled(False)
+            self.evaluate_labels_show_check.setEnabled(False)
+        self.evaluate_labels_data_combo_box.blockSignals(False)
+
     def _restore_previous_color_settings(self):
         """Restore the previous color column and palette after evaluation is turned off."""
         if hasattr(self, "_prev_evaluate_color_col"):
@@ -2525,6 +2853,17 @@ class ScatterControls(QtWidgets.QWidget):
             self.color_combo_box.setCurrentText(self._prev_evaluate_color_col)
             del self._prev_evaluate_color_col
             del self._prev_evaluate_palette
+
+    def _maybe_recompute_evaluation(self, _=None):
+        """Recompute evaluation when labels change and sync is enabled."""
+        if (
+            getattr(self, "evaluate_labels_show_check", None)
+            and getattr(self, "evaluate_labels_sync_check", None)
+            and self.evaluate_labels_show_check.isChecked()
+            and self.evaluate_labels_sync_check.isChecked()
+        ):
+            if self._evaluate_labels():
+                self._apply_evaluate_label_color()
 
     def _evaluate_labels(self):
         """Compute per-sample evaluation scores and store them in metadata."""
@@ -2539,10 +2878,27 @@ class ScatterControls(QtWidgets.QWidget):
             self.evaluate_labels_show_check.blockSignals(False)
             return
 
-        data = self._selected_embedding_data()
+        choice = self.evaluate_labels_data_combo_box.currentText()
+        if choice == "Embedding":
+            data = getattr(self.figure, "positions", None)
+            is_precomputed = False
+        elif choice == "Features":
+            data = getattr(self.figure, "feats", None)
+            is_precomputed = False
+        elif choice == "Precomputed distances":
+            dists = getattr(self.figure, "dists", None)
+            if isinstance(dists, dict):
+                data = dists.get("distances")
+            else:
+                data = dists
+            is_precomputed = True
+        else:
+            data = None
+            is_precomputed = False
+
         if data is None:
             self.figure.show_message(
-                "No embedding or distance data available for evaluation.",
+                "No high-dimensional data available for evaluation.",
                 color="red",
                 duration=3,
             )
@@ -2573,7 +2929,6 @@ class ScatterControls(QtWidgets.QWidget):
         labels = pd.factorize(labels)[0]
         metric = self.evaluate_labels_metric_combo_box.currentText()
         k_neighbors = int(self.evaluate_labels_k_spinbox.value())
-        is_precomputed = is_precomputed_distance_matrix(data)
 
         try:
             scores = evaluate_clustering_sample(

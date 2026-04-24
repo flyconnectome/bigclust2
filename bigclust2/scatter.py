@@ -174,7 +174,7 @@ class ScatterFigure(BaseFigure):
 
     @property
     def font_size(self):
-        return int(self._font_size * 100)
+        return self._font_size * 100
 
     @font_size.setter
     @update_figure
@@ -744,7 +744,11 @@ class ScatterFigure(BaseFigure):
         return widget
 
     def _format_hover_text(self, hover_value):
-        """Format hover content into a compact multi-line string."""
+        """Format hover content into a compact multi-line string.
+
+        We typically expect the input to be a single string with newlines
+        but we're adding some extra handling for other data types.
+        """
         if isinstance(hover_value, pd.Series):
             hover_value = hover_value.to_dict()
 

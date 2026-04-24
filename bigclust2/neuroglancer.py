@@ -231,6 +231,17 @@ class NglViewer:
         datasets :  iterable, optional
                     If provided, only show neurons where ID and dataset match.
                     Must be of the same length as `ids`.
+        lod :       int, optional
+                    Level of detail to load for meshes. If not provided, will load
+                    the highest level of detail available.
+        add_as_group : bool | str, optional
+                    Whether to add the neurons as a group (i.e. with the same name) or
+                    as individual objects:
+                     - If True, all neurons in the same call to `show` will be added
+                       as a group with the name "group_{first_id}" where {first_id} is
+                       the ID of the first neuron in the call to `show`.
+                     - If string, will add as a group with the provided string as name.
+
         kwargs :    dict
                     Keyword arguments to pass to the viewer.
 
@@ -290,6 +301,8 @@ class NglViewer:
             # What name will we use?
             if not add_as_group:
                 name = f"{row.id}"
+            elif isinstance(add_as_group, str):
+                name = add_as_group
             else:
                 first_id = to_show.index.values[0][0]  # remember this is a multiindex
                 name = f"group_{first_id}"

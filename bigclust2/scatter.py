@@ -282,10 +282,30 @@ class ScatterFigure(BaseFigure):
 
         if hasattr(self, "ngl_viewer"):
             if len(self._selected) > 0:
+                if not getattr(self, "_add_as_group", False):
+                    group_name = None
+                else:
+                    # Find a sensible name for the group based on selected labels
+                    selected_labels = list(set(self.selected_labels))
+                    if len(selected_labels) == 1:
+                        group_name = selected_labels[0]
+                    elif len(selected_labels) <= 3:
+                        group_name = "+".join(selected_labels)
+                    else:
+                        group_name = "mixed"
+
+                    # But we also want to make sure that if there is already a group
+                    # with this name, we don't add to it but rather make a new group
+                    # with a unique name.
+                    i = 1
+                    final_group_name = group_name
+                    while final_group_name in self.ngl_viewer.viewer.objects:
+                        final_group_name = group_name + f" - #{i}"
+
                 self.ngl_viewer.show(
                     self.ids[self.selected],
                     datasets=self.datasets[self._selected],
-                    add_as_group=getattr(self, "_add_as_group", False),
+                    add_as_group=final_group_name,
                 )
             else:
                 self.ngl_viewer.clear()

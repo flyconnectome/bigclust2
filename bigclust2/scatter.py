@@ -78,10 +78,10 @@ class ScatterFigure(BaseFigure):
             self.canvas.request_draw()
 
         self.key_events["ArrowLeft"] = lambda: setattr(
-            self, "font_size", max(self.font_size - 1, 1)
+            self, "font_size", max(self.font_size - 1, 1) if self.font_size > 1 else max(self.font_size - .1, 0.1)
         )
         self.key_events["ArrowRight"] = lambda: setattr(
-            self, "font_size", self.font_size + 1
+            self, "font_size", self.font_size + 1 if self.font_size >= 1 else self.font_size + .1
         )
         self.key_events["ArrowDown"] = lambda: setattr(
             self, "point_scale", max(self.point_scale * 0.9, 0.01)

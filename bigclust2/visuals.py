@@ -58,7 +58,7 @@ def text2gfx(
 
     vis = gfx.Text(
         **defaults,
-        material=gfx.TextMaterial(color=color, pick_write=pickable),
+        material=gfx.TextMaterial(color=color, pick_write=pickable, aa=True),
     )
     vis.local.position = position
     vis._text = text  # track the actual text

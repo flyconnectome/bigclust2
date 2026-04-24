@@ -286,6 +286,30 @@ class BaseFigure:
 
         return pos_world
 
+    def world_to_screen(self, pos_world):
+        """Translate world coordinates to screen position."""
+        viewport = gfx.Viewport.from_viewport_or_renderer(self.renderer)
+
+        # Project world position into clip space
+        # (i.e. apply view-projection matrix)
+        pos_clip = la.vec_transform(pos_world, self.camera.camera_matrix)
+
+        # Perspective divide → NDC
+        w = pos_clip[3] if len(pos_clip) > 3 else 1.0
+        if w == 0:
+            return None
+
+        x_ndc = pos_clip[0] / w
+        y_ndc = pos_clip[1] / w
+
+        # Convert NDC → viewport coordinates
+        vs = viewport.logical_size
+
+        x_screen = (x_ndc + 1) * 0.5 * vs[0] + viewport.rect[0]
+        y_screen = (1 - (y_ndc + 1) * 0.5) * vs[1] + viewport.rect[1]
+
+        return (x_screen, y_screen)
+
     @update_figure
     def show_message(
         self, message, position="top-center", font_size=20, color=None, duration=None

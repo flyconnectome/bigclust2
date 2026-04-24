@@ -1,4 +1,5 @@
 import re
+import textwrap
 import cmap
 import inspect
 
@@ -658,7 +659,10 @@ class ScatterFigure(BaseFigure):
                 this_pos = self.positions[ix]
                 if self.colors is not None:
                     color = np.array(
-                        [tuple(cmap.Color(c).rgba) for c in self.colors[self._marker_symbols == m]]
+                        [
+                            tuple(cmap.Color(c).rgba)
+                            for c in self.colors[self._marker_symbols == m]
+                        ]
                     )
                 this_size = self.point_size
             else:
@@ -695,38 +699,240 @@ class ScatterFigure(BaseFigure):
 
         return visuals
 
-    def make_hover_widget(self, color=(1, 1, 1, 0.5), font_color=(0, 0, 0, 1)):
+    def make_hover_widget(self, color=(0, 0, 0, 0.75), font_color=(1, 1, 1, 1)):
         """Generate a widget for hover info.
 
-        The widget will be added to the overlay scene which uses a NDC camera
-        which means the coordinates will be in the range [-1, 1] regardless of
-        the actual size of the scene/window.
-
+        The widget is rendered in the overlay scene, so coordinates are in NDC
+        space and range from [-1, 1] in both dimensions.
         """
         widget = gfx.Group()
         widget.visible = False
-        width = 2 / 6
-        left = 1 - width / 2
-        widget.local.position = (left, 0, 0)
 
-        widget.add(
-            gfx.Mesh(
-                gfx.plane_geometry(width, 2),  # full screen height, 1/6 width
-                gfx.MeshBasicMaterial(color=color, alpha_mode="blend"),
-            )
+        text = text2gfx(
+            "",
+            position=(0, 0, 0),
+            color=(1, 1, 1, 1),
+            font_size=12,
+            anchor="top-left",
+            screen_space=True,
         )
-        widget.add(
-            text2gfx(
-                "Hover info",
-                position=(-(width / 2) + 0.025, 0, 0),
-                color=font_color,
-                font_size=12,  # fix font size
-                anchor="middle-left",
-                screen_space=True,  # without this the text would be scewed
-            )
-        )
+        widget.add(text)
+        widget._text = text
+        widget._border = None
+        widget._patch = None
 
         return widget
+
+    def _format_hover_text(self, hover_value):
+        """Format hover content into a compact multi-line string."""
+        if isinstance(hover_value, pd.Series):
+            hover_value = hover_value.to_dict()
+
+        if isinstance(hover_value, dict):
+            lines = [f"{k}: {v}" for k, v in hover_value.items()]
+        elif isinstance(hover_value, (list, tuple, np.ndarray)):
+            lines = [str(item) for item in hover_value]
+        else:
+            lines = str(hover_value).splitlines()
+
+        wrapped = []
+        for line in lines:
+            if len(line) <= 40:
+                wrapped.append(line)
+            else:
+                wrapped.extend(textwrap.wrap(line, width=40))
+
+        return "\n".join(wrapped)
+
+    def _screen_to_ndc(self, pos):
+        """Convert a screen coordinate to normalized device coordinates."""
+        width, height = self.size
+        if width == 0 or height == 0:
+            return 0, 0
+
+        x = pos[0] / width * 2 - 1
+        y = -(pos[1] / height * 2 - 1)
+        return x, y
+
+    def _update_hover_widget(self, hover_value, screen_pos_event, screen_pos_point):
+        """Update hover widget content and place it near the screen position."""
+        text = self._format_hover_text(hover_value)
+        self.hover_widget._text.set_text(text)
+        outline, patch = self.draw_bounding_box_around_text(self.hover_widget._text)
+
+        if self.hover_widget._border:
+            self.hover_widget.remove(self.hover_widget._border)
+        if self.hover_widget._patch:
+            self.hover_widget.remove(self.hover_widget._patch)
+
+        if patch:
+            self.hover_widget._patch = patch
+            self.hover_widget.add(patch)
+
+        if outline:
+            self.hover_widget._border = outline
+            self.hover_widget.add(outline)
+
+        # We can get the dimensions of the widget from the lines geometry
+        bounds = (
+            outline.get_geometry_bounding_box()
+        )  # [[min_x, min_y, min_z], [max_x, max_y, max_z]] in NDC space
+        widget_width = bounds[1, 0] - bounds[0, 0]
+        widget_height = bounds[1, 1] - bounds[0, 1]
+
+        # Convert the screen position to NDC space. Remember, in NDC:
+        # - (0, 0) = center of the screen
+        # - (-1, -1) = bottom-left corner
+        # - (1, 1) = top-right corner
+        ndc_x, ndc_y = self._screen_to_ndc(screen_pos_point)
+
+        # By default we will anchor the widget to the top-left corner of the cursor position.
+        # However, if that would put it outside the screen, we will change the anchor to keep it inside.
+        move_above = (ndc_y - widget_height) < -1
+        move_left = (ndc_x + widget_width) > 1
+        if move_above:
+            ndc_y += widget_height
+        if move_left:
+            ndc_x -= widget_width
+
+        self.hover_widget.local.position = (ndc_x, ndc_y, 0)
+
+        if move_above and not move_left:
+            anchor = "bottom-left"
+        elif not move_above and move_left:
+            anchor = "top-right"
+        elif move_above and move_left:
+            anchor = "bottom-right"
+        else:
+            anchor = "top-left"
+
+        # Update the connector line to point from the widget to the cursor position
+        self.udpate_connector_line(anchor, widget_width, widget_height)
+
+    def udpate_connector_line(
+        self, anchor, width, height, edge_color=(1, 1, 1, 0.25), offset=0.01
+    ):
+        """Update the little line connecting the hover widget to the point."""
+        # Remove the existing line if it exists
+        if (
+            hasattr(self.hover_widget, "_connector_line")
+            and self.hover_widget._connector_line
+        ):
+            self.hover_widget.remove(self.hover_widget._connector_line)
+            del self.hover_widget._connector_line
+
+        # Current position of the widget
+        current_pos = np.array(self.hover_widget.local.position)
+
+        # Add line and offset at the appropriate position
+        if anchor == "top-left":
+            start = (0, 0, 0)
+            end = (-offset, offset, 0)
+            new_pos = current_pos + np.array([offset, -offset, 0])
+        elif anchor == "top-right":
+            start = (width, 0, 0)
+            end = (width + offset, offset, 0)
+            new_pos = current_pos + np.array([-offset, -offset, 0])
+        elif anchor == "bottom-left":
+            start = (0, -height, 0)
+            end = (-offset, -height - offset, 0)
+            new_pos = current_pos + np.array([offset, offset, 0])
+        elif anchor == "bottom-right":
+            start = (width, -height, 0)
+            end = (width + offset, -height - offset, 0)
+            new_pos = current_pos + np.array([-offset, offset, 0])
+        else:
+            raise ValueError(f"Invalid anchor: {anchor}")
+
+        line = lines2gfx(
+            np.array([start, end], dtype=np.float32),
+            color=edge_color,
+            linewidth=2,
+        )
+        self.hover_widget._connector_line = line
+        self.hover_widget.add(line)
+        self.hover_widget.local.position = new_pos  # add the offset to the widget position to account for the connector line
+
+    def draw_bounding_box_around_text(
+        self,
+        text,
+        edge_color=(1, 1, 1, 0.25),
+        bg_color=(0, 0, 0, 0.9),
+        round_corners=True,
+    ):
+        """Draw a bounding box around a given text object.
+
+        This function makes the following assumptions:
+        - text is in screen space (i.e. `text.screen_space == True`)
+        - text is top-left anchored (i.e. `text.anchor == "top-left"`)
+        - renderer is using an NDC camera (i.e. `camera` is an instance of `gfx.NDCCamera`)
+
+        """
+        # Calculate the bounding box of the text in screen space (i.e. in pixels)
+        blocks = text._text_blocks
+        positions = text.geometry.positions.data
+        left = np.inf
+        right = -np.inf
+        top = -np.inf
+        bottom = np.inf
+        for i, block in enumerate(blocks):
+            pos_x, pos_y, _ = positions[i]
+            left = min(left, pos_x + block._rect.left)
+            right = max(right, pos_x + block._rect.right)
+            top = max(top, pos_y + block._rect.top)
+            bottom = min(bottom, pos_y + block._rect.bottom)
+
+        # Convert the bounding box from screen space (pixels) to world space (NDC)
+        canvas_width, canvas_height = (
+            self.canvas.size().width(),
+            self.canvas.size().height(),
+        )
+        left_screen = (left / canvas_width) * 2 - 1
+        right_screen = (right / canvas_width) * 2 - 1
+        top_screen = 1 - (top / canvas_height) * 2
+        bottom_screen = 1 - (bottom / canvas_height) * 2
+        width = right_screen - left_screen
+        height = top_screen - bottom_screen
+
+        if not round_corners:
+            positions = np.array(
+                [
+                    [0, 0, 0],
+                    [width, 0, 0],
+                    [width, height, 0],
+                    [0, height, 0],
+                    [0, 0, 0],
+                ],
+                dtype=np.float32,
+            )
+        else:
+            positions = _round_corners(width, 0, 0, height, radius=0.01, num_points=10)
+
+        lines = None
+        if edge_color is not None:
+            lines = gfx.Line(
+                gfx.Geometry(positions=positions),
+                gfx.LineMaterial(color=edge_color, thickness=2),
+            )
+            lines.local.position = text.local.position
+
+        patch = None
+        if bg_color is not None:
+            delaunay = Delaunay(positions[:, :2])
+            vertices, faces = delaunay.points, delaunay.simplices
+            vertices = np.append(
+                vertices, np.zeros((vertices.shape[0], 1), dtype=np.float32), axis=1
+            )
+            patch = gfx.Mesh(
+                gfx.Geometry(
+                    positions=vertices.astype(np.float32),
+                    indices=faces.astype(np.int32),
+                ),
+                gfx.MeshBasicMaterial(color=bg_color, alpha_mode="blend"),
+            )
+            patch.local.position = text.local.position
+
+        return lines, patch
 
     def make_label_lines(self):
         """Generate the polygons around each unique label."""
@@ -1302,40 +1508,23 @@ class ScatterFigure(BaseFigure):
         if hover_info is not None:
 
             def hover(event):
-                # Note: we could use e.g. shift-hover to show
-                # more/different info?
-                if event.type == "pointer_enter":
-                    # Translate position to world coordinates
+                # Note: we could use e.g. shift-hover to show more/different info?
+                if event.type == "pointer_enter" and not getattr(
+                    self, "_hide_hover", False
+                ):
                     pos = self.screen_to_world((event.x, event.y))
-
-                    # Find the closest leaf
                     vis = event.current_target
                     coords = vis.geometry.positions.data
                     dist = np.linalg.norm(coords[:, :2] - pos[:2], axis=1)
                     closest = np.argmin(dist)
                     point_ix = vis._point_ix[closest]
 
-                    # Position and show the hover widget
-                    # self._hover_widget.local.position = coords[closest]
                     self.hover_widget.visible = True
-
-                    # Set the text
-                    # N.B. there is some funny behaviour where repeatedly setting the same
-                    # text will cause the bounding box to increase every time. To avoid this
-                    # we have to reset the text to anything but an empty string.
-                    self.hover_widget.children[1].set_text("asdfgasdfasdfsdafsfasdfasg")
-                    self.hover_widget.children[1].set_text(str(hover_info[point_ix]))
-
-                    # Scale the background to fit the text
-                    # bb = self._hover_widget.children[1].get_world_bounding_box()
-                    # extent = bb[1] - bb[0]
-
-                    # The text bounding box is currently not very accurate. For example,
-                    # a single-line text has no height. Hence, we need to add some padding:
-                    # extent = (extent + [0, 1.2, 0]) * 1.2
-                    # self._hover_widget.children[0].local.scale_x = extent[0]
-                    # self._hover_widget.children[0].local.scale_y = extent[1]
-
+                    self._update_hover_widget(
+                        hover_info[point_ix],
+                        (event.x, event.y),
+                        self.world_to_screen(coords[closest]),
+                    )
                 elif self.hover_widget.visible:
                     self.hover_widget.visible = False
 
@@ -1794,3 +1983,47 @@ class LabelSearch:
         self.scatter.camera.local.y = self.scatter.positions[self.indices[self.ix], 1]
 
         self.scatter._render_stale = True
+
+
+def _round_corners(left, right, top, bottom, radius, num_points=10):
+    """Round the corners of a bounding box defined by left, right, top and bottom coordinates.
+
+    Returns
+    -------
+    numpy array defining the positions of the vertices of the rounded bounding box, inclusive of the last vertex which is the same as the first vertex to close the loop.
+    """
+    # If the rectangle is much larger than it is wider or vice versa, we get corners that are elongated along the longer axis.
+    # To prevent this, we will scale the radius for x- and y- axis separately
+    ratio = (max(left, right) - min(left, right)) / (
+        max(top, bottom) - min(top, bottom)
+    )
+
+    radius_y = radius / ratio if ratio > 1 else radius
+    radius_x = radius * ratio if ratio < 1 else radius
+
+    # Define the center points of the rounded corners
+    corner_centers = np.array(
+        [
+            [left + radius_x, top - radius_y, 0],
+            [right - radius_x, top - radius_y, 0],
+            [right - radius_x, bottom + radius_y, 0],
+            [left + radius_x, bottom + radius_y, 0],
+        ],
+        dtype=np.float32,
+    )
+
+    # Generate the vertices for the rounded corners
+    vertices = []
+    for i in range(4):
+        start_angle = i * np.pi / 2
+        end_angle = start_angle + np.pi / 2
+        angles = np.linspace(start_angle, end_angle, num=num_points)
+        for angle in angles:
+            vertex = corner_centers[i] + np.array(
+                [radius_x * np.cos(angle), radius_y * np.sin(angle), 0],
+                dtype=np.float32,
+            )
+            vertices.append(vertex)
+    vertices.append(vertices[0])
+
+    return np.array(vertices, dtype=np.float32)

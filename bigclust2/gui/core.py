@@ -918,6 +918,18 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(toggle_viewer_controls_action)
 
+        self.show_hoverinfo_action = QAction("Show Hoverinfo", self)
+        self.show_hoverinfo_action.setCheckable(True)
+        self.show_hoverinfo_action.setChecked(True)
+        self.show_hoverinfo_action.toggled.connect(
+            lambda checked: setattr(
+                self.centralWidget().fig_scatter,
+                "_hide_hover",
+                not checked,
+            )
+        )
+        view_menu.addAction(self.show_hoverinfo_action)
+
         # The view menu automatically contains an item to toggle fullscreen mode
         # This separator keeps it visually separate from the custom view actions we added above.
         view_menu.addSeparator()

@@ -301,6 +301,7 @@ class ScatterFigure(BaseFigure):
                     final_group_name = group_name
                     while final_group_name in self.ngl_viewer.viewer.objects:
                         final_group_name = group_name + f" - #{i}"
+                        i += 1
 
                 self.ngl_viewer.show(
                     self.ids[self.selected],

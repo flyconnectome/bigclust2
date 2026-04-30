@@ -477,7 +477,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_method_combo_box.setToolTip(
             "Select the method to use for dimensionality reduction."
         )
-        for item in ("UMAP", "MDS"):
+        for item in ("UMAP", "MDS", "t-SNE"):
             self.umap_method_combo_box.addItem(item)
         if getattr(self.figure, "feats", None) is not None:
             self.umap_method_combo_box.addItem("PaCMAP")
@@ -687,6 +687,37 @@ class ScatterControls(QtWidgets.QWidget):
             self.umap_dens_lambda_spinbox,
         )
         self._update_densmap_controls()
+
+        self.tsne_settings_widget = QtWidgets.QWidget()
+        self.tsne_settings_layout = QtWidgets.QFormLayout()
+        self.tsne_settings_layout.setContentsMargins(0, 0, 0, 0)
+        self.tsne_settings_widget.setLayout(self.tsne_settings_layout)
+        settings_layout.addWidget(self.tsne_settings_widget)
+
+        self.tsne_perplexity_slider = QtWidgets.QDoubleSpinBox()
+        self.tsne_perplexity_slider.setRange(1.0, 200.0)
+        self.tsne_perplexity_slider.setSingleStep(1.0)
+        self.tsne_perplexity_slider.setDecimals(1)
+        self.tsne_perplexity_slider.setValue(30.0)
+        self.tsne_perplexity_slider.valueChanged.connect(self.calculate_embeddings_maybe)
+        self.tsne_settings_layout.addRow("Perplexity:", self.tsne_perplexity_slider)
+
+        self.tsne_learning_rate_slider = QtWidgets.QDoubleSpinBox()
+        self.tsne_learning_rate_slider.setRange(10.0, 1000.0)
+        self.tsne_learning_rate_slider.setSingleStep(10.0)
+        self.tsne_learning_rate_slider.setDecimals(1)
+        self.tsne_learning_rate_slider.setValue(200.0)
+        self.tsne_learning_rate_slider.valueChanged.connect(self.calculate_embeddings_maybe)
+        self.tsne_settings_layout.addRow(
+            "Learning rate:", self.tsne_learning_rate_slider
+        )
+
+        self.tsne_n_iter_slider = QtWidgets.QSpinBox()
+        self.tsne_n_iter_slider.setRange(250, 10000)
+        self.tsne_n_iter_slider.setSingleStep(50)
+        self.tsne_n_iter_slider.setValue(1000)
+        self.tsne_n_iter_slider.valueChanged.connect(self.calculate_embeddings_maybe)
+        self.tsne_settings_layout.addRow("Iterations:", self.tsne_n_iter_slider)
 
         self.mds_settings_widget = QtWidgets.QWidget()
         self.mds_settings_layout = QtWidgets.QFormLayout()
@@ -3093,6 +3124,9 @@ class ScatterControls(QtWidgets.QWidget):
             mds_n_init=self.mds_n_init_slider.value(),
             mds_max_iter=self.mds_max_iter_slider.value(),
             mds_eps=self.mds_eps_slider.value(),
+            tsne_perplexity=self.tsne_perplexity_slider.value(),
+            tsne_learning_rate=self.tsne_learning_rate_slider.value(),
+            tsne_n_iter=self.tsne_n_iter_slider.value(),
         )
 
         if self.umap_selection_only.isChecked():
@@ -3307,14 +3341,22 @@ class ScatterControls(QtWidgets.QWidget):
         if method == "UMAP":
             self.umap_settings_widget.show()
             self.mds_settings_widget.hide()
+            self.tsne_settings_widget.hide()
             self.umap_button.setText("Run UMAP")
         elif method == "MDS":
             self.umap_settings_widget.hide()
             self.mds_settings_widget.show()
+            self.tsne_settings_widget.hide()
             self.umap_button.setText("Run MDS")
+        elif method == "t-SNE":
+            self.umap_settings_widget.hide()
+            self.mds_settings_widget.hide()
+            self.tsne_settings_widget.show()
+            self.umap_button.setText("Run t-SNE")
         else:
             self.umap_settings_widget.hide()
             self.mds_settings_widget.hide()
+            self.tsne_settings_widget.hide()
             self.umap_button.setText(f"Run {method}")
 
         self.calculate_embeddings_maybe()

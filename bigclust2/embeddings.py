@@ -61,10 +61,14 @@ def make_embedding_estimator(
     mds_n_init=4,
     mds_max_iter=300,
     mds_eps=0.001,
+    tsne_perplexity=30.0,
+    tsne_learning_rate=200.0,
+    tsne_n_iter=1000,
 ):
     """Create an embedding estimator instance from standardized settings."""
-    method = str(method)
-    if method == "UMAP":
+    method = str(method).strip()
+    method_key = method.replace("-", "").upper()
+    if method_key == "UMAP":
         import umap
 
         return umap.UMAP(
@@ -79,7 +83,7 @@ def make_embedding_estimator(
             random_state=random_state,
         )
 
-    if method == "MDS":
+    if method_key == "MDS":
         from sklearn.manifold import MDS
 
         return MDS(
@@ -91,12 +95,24 @@ def make_embedding_estimator(
             random_state=random_state,
         )
 
-    if method == "PCA":
+    if method_key == "PCA":
         from sklearn.decomposition import KernelPCA
 
         return KernelPCA(n_components=2, kernel=metric)
 
-    if method == "PaCMAP":
+    if method_key == "TSNE":
+        from sklearn.manifold import TSNE
+
+        return TSNE(
+            n_components=2,
+            perplexity=float(tsne_perplexity),
+            learning_rate=float(tsne_learning_rate),
+            max_iter=int(tsne_n_iter),
+            metric="precomputed" if is_precomputed else metric,
+            random_state=random_state,
+        )
+
+    if method_key == "PACMAP":
         import pacmap
 
         return pacmap.PaCMAP(n_components=2, n_neighbors=10, MN_ratio=0.5, FP_ratio=2.0)

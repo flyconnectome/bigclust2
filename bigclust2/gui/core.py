@@ -785,6 +785,7 @@ class MainWindow(QMainWindow):
         self.connectivity_table_action = None
         self.distances_table_action = None
         self.feature_explorer_action = None
+        self.sync_viewer_action = None
         self._current_project_loader = None
         self._connectivity_widget = None
         self._connectivity_widget_synced = False
@@ -917,6 +918,22 @@ class MainWindow(QMainWindow):
             lambda: self.centralWidget().toggle_viewer_controls()
         )
         view_menu.addAction(toggle_viewer_controls_action)
+
+        self.sync_viewer_action = QAction("Synchronize Viewer", self)
+        self.sync_viewer_action.setCheckable(True)
+        self.sync_viewer_action.setChecked(True)
+        self.sync_viewer_action.setToolTip(
+            "When enabled, scatter selections are synchronized to the 3D viewer."
+        )
+        self.sync_viewer_action.setStatusTip(
+            "Toggle synchronization from scatter selection to 3D viewer"
+        )
+        self.sync_viewer_action.toggled.connect(
+            lambda checked: self.centralWidget().fig_scatter.set_viewer_sync(
+                checked, sync_now=checked
+            )
+        )
+        view_menu.addAction(self.sync_viewer_action)
 
         self.show_hoverinfo_action = QAction("Show Hoverinfo", self)
         self.show_hoverinfo_action.setCheckable(True)

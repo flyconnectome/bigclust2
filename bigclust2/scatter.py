@@ -50,6 +50,7 @@ class ScatterFigure(BaseFigure):
         self._points_scale = 1  # used for scaling points uniformly
         self.label_vis_limit = 400  # number of labels shown at once before hiding all
         self.label_refresh_rate = 30  # update labels every n frames
+        self._viewer_sync_enabled = True
 
         # Add the selection gizmo
         self.selection_gizmo = SelectionGizmo(
@@ -280,36 +281,7 @@ class ScatterFigure(BaseFigure):
         # if hasattr(self, "_controls"):
         #     self._controls.update_ann_combo_box()
 
-        if hasattr(self, "ngl_viewer"):
-            if len(self._selected) > 0:
-                if not getattr(self, "_add_as_group", False):
-                    group_name = None
-                else:
-                    # Find a sensible name for the group based on selected labels
-                    selected_labels = list(set(self.selected_labels))
-                    if len(selected_labels) == 1:
-                        group_name = selected_labels[0]
-                    elif len(selected_labels) <= 3:
-                        group_name = "+".join(selected_labels)
-                    else:
-                        group_name = "mixed"
-
-                    # But we also want to make sure that if there is already a group
-                    # with this name, we don't add to it but rather make a new group
-                    # with a unique name.
-                    i = 1
-                    final_group_name = group_name
-                    while final_group_name in self.ngl_viewer.viewer.objects:
-                        final_group_name = group_name + f" - #{i}"
-                        i += 1
-
-                self.ngl_viewer.show(
-                    self.ids[self.selected],
-                    datasets=self.datasets[self._selected],
-                    add_as_group=final_group_name,
-                )
-            else:
-                self.ngl_viewer.clear()
+        self._sync_selection_to_viewer()
 
         if hasattr(self, "synced_widgets"):
             for w, func in self.synced_widgets:
@@ -1572,6 +1544,54 @@ class ScatterFigure(BaseFigure):
         # Activate the neuroglancer controls tab
         if hasattr(self, "controls"):
             self.controls.tabs.setTabEnabled(2, True)
+
+    @property
+    def viewer_sync_enabled(self):
+        """Whether scatter selection updates are synced to the 3D viewer."""
+        return self._viewer_sync_enabled
+
+    @viewer_sync_enabled.setter
+    def viewer_sync_enabled(self, enabled):
+        self._viewer_sync_enabled = bool(enabled)
+
+    def set_viewer_sync(self, enabled, sync_now=False):
+        """Enable/disable viewer sync and optionally sync current selection once."""
+        self.viewer_sync_enabled = enabled
+        if self.viewer_sync_enabled and sync_now:
+            self._sync_selection_to_viewer()
+
+    def _sync_selection_to_viewer(self):
+        """Push the current scatter selection to the synced viewer."""
+        if not hasattr(self, "ngl_viewer") or not self.viewer_sync_enabled:
+            return
+
+        selected = self._selected if self._selected is not None else np.array([], dtype=int)
+        if len(selected) > 0:
+            final_group_name = None
+            if getattr(self, "_add_as_group", False):
+                # Find a sensible name for the group based on selected labels.
+                selected_labels = list(set(self.selected_labels.astype(str)))
+                if len(selected_labels) == 1:
+                    group_name = selected_labels[0]
+                elif len(selected_labels) <= 3:
+                    group_name = "+".join(selected_labels)
+                else:
+                    group_name = "mixed"
+
+                # Ensure a unique group name in the viewer.
+                i = 1
+                final_group_name = group_name
+                while final_group_name in self.ngl_viewer.viewer.objects:
+                    final_group_name = group_name + f" - #{i}"
+                    i += 1
+
+            self.ngl_viewer.show(
+                self.ids[selected],
+                datasets=self.datasets[selected],
+                add_as_group=final_group_name,
+            )
+        else:
+            self.ngl_viewer.clear()
 
     def sync_widget(self, widget, callback=None):
         """Connect a widget to the figure.

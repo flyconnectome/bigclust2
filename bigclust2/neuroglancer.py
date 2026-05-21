@@ -555,9 +555,10 @@ class NglViewer:
             s.add_layers(layer)
 
         if self.neuropil_source is not None:
-            id, source = self.neuropil_source.split("@")
+            ids, source = self.neuropil_source.split("@")
+            ids = [int(id) for id in ids.split(",")]
             layer = ngl.SegmentationLayer(source, name="neuropil")
-            layer["segments"] = [int(id)]
+            layer["segments"] = ids
             layer["segmentDefaultColor"] = "#ffffff"
             layer["meshSilhouetteRendering"] = 3
             layer["objectAlpha"] = 0.4

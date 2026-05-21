@@ -29,6 +29,7 @@ dependencies = [
     "networkx>=3.4.2",
     "clio-py",
     "sea-serpent>=0.4.4",
+    "plotly>=6.7.0",
 ]
 
 [project.scripts]

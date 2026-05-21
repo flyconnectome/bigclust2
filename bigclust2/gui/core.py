@@ -1006,6 +1006,20 @@ class MainWindow(QMainWindow):
         export_meta_csv_action.triggered.connect(self.on_export_meta_to_csv)
         export_meta_menu.addAction(export_meta_csv_action)
 
+        export_embedding_menu = export_menu.addMenu("Embedding")
+
+        export_embedding_plotly_action = QAction("To Plotly", self)
+        export_embedding_plotly_action.triggered.connect(
+            self.on_export_embedding_to_plotly_html
+        )
+        export_embedding_menu.addAction(export_embedding_plotly_action)
+
+        export_embedding_plotly_dashboard_action = QAction("To Dashboard", self)
+        export_embedding_plotly_dashboard_action.triggered.connect(
+            self.on_export_embedding_to_plotly_dashboard_html
+        )
+        export_embedding_menu.addAction(export_embedding_plotly_dashboard_action)
+
         # Window menu with Zoom and Minimize
         window_menu = menu_bar.addMenu("Window")
 
@@ -1960,6 +1974,83 @@ class MainWindow(QMainWindow):
             logger.info(f"Exported full project metadata to {file_path}")
         except Exception as e:
             logger.error(f"Failed to export project metadata to CSV: {e}")
+
+    def on_export_embedding_to_plotly_html(self):
+        """Export the current embedding to an interactive Plotly HTML file."""
+        fig = self.centralWidget().fig_scatter
+
+        if getattr(fig, "positions", None) is None or len(fig) == 0:
+            logger.info("No embedding available to export")
+            return
+
+        default_name = "embedding_plotly.html"
+        project = getattr(self, "_current_project_loader", None)
+        if project is not None and getattr(project, "name", None):
+            default_name = f"{project.name}_embedding_plotly.html"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Embedding to Plotly HTML",
+            default_name,
+            "HTML Files (*.html);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".html"):
+            file_path = f"{file_path}.html"
+
+        try:
+            plotly_fig = fig.to_plotly()
+            plotly_fig.write_html(file_path, include_plotlyjs="cdn", full_html=True)
+            logger.info(f"Exported embedding to Plotly HTML: {file_path}")
+            fig.show_message("Exported Plotly HTML", color="green", duration=2)
+        except ImportError:
+            logger.error(
+                "Plotly is not installed. Install plotly to export interactive HTML."
+            )
+            fig.show_message("Plotly is not installed", color="red", duration=3)
+        except Exception as e:
+            logger.error(f"Failed to export embedding to Plotly HTML: {e}")
+            fig.show_message("Export failed", color="red", duration=3)
+
+    def on_export_embedding_to_plotly_dashboard_html(self):
+        """Export a compact multi-panel Plotly dashboard HTML file."""
+        fig = self.centralWidget().fig_scatter
+
+        if getattr(fig, "positions", None) is None or len(fig) == 0:
+            logger.info("No embedding available to export")
+            return
+
+        default_name = "embedding_dashboard_plotly.html"
+        project = getattr(self, "_current_project_loader", None)
+        if project is not None and getattr(project, "name", None):
+            default_name = f"{project.name}_embedding_dashboard_plotly.html"
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "Export Embedding Dashboard to Plotly HTML",
+            default_name,
+            "HTML Files (*.html);;All Files (*)",
+        )
+        if not file_path:
+            return
+
+        if not file_path.lower().endswith(".html"):
+            file_path = f"{file_path}.html"
+
+        try:
+            fig.write_plotly_dashboard_html(file_path)
+            logger.info(f"Exported embedding dashboard to Plotly HTML: {file_path}")
+            fig.show_message("Exported Plotly dashboard", color="green", duration=2)
+        except ImportError:
+            logger.error(
+                "Plotly is not installed. Install plotly to export interactive HTML."
+            )
+            fig.show_message("Plotly is not installed", color="red", duration=3)
+        except Exception as e:
+            logger.error(f"Failed to export embedding dashboard to Plotly HTML: {e}")
+            fig.show_message("Export failed", color="red", duration=3)
 
     def show_open_project_dialog(self):
         """Show the open project dialog and load the selected project."""

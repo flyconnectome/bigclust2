@@ -1915,6 +1915,69 @@ class ScatterFigure(BaseFigure):
             rank=rank,
         )
 
+    def to_plotly(
+        self,
+        include_selected=True,
+        selected_size=10,
+        unselected_opacity=0.85,
+        marker_line_width=0,
+    ):
+        """Export the current 2D embedding to an interactive Plotly figure.
+
+        Parameters
+        ----------
+        include_selected : bool, optional
+            If True, selected points are rendered as a separate highlighted trace.
+        selected_size : int, optional
+            Marker size used for the selected-points highlight trace.
+        unselected_opacity : float, optional
+            Opacity of the main scatter trace.
+        marker_line_width : float, optional
+            Outline width for markers in both traces.
+
+        Returns
+        -------
+        plotly.graph_objects.Figure
+            Interactive figure containing the current embedding.
+        """
+        from .plotly_export import scatter_to_plotly_figure
+
+        return scatter_to_plotly_figure(
+            self,
+            include_selected=include_selected,
+            selected_size=selected_size,
+            unselected_opacity=unselected_opacity,
+            marker_line_width=marker_line_width,
+        )
+
+    def to_plotly_dashboard(self, top_n=20, include_selected=True):
+        """Export a compact multi-panel Plotly dashboard figure."""
+        from .plotly_export import scatter_to_dashboard_figure
+
+        return scatter_to_dashboard_figure(
+            self,
+            top_n=top_n,
+            include_selected=include_selected,
+        )
+
+    def write_plotly_dashboard_html(
+        self,
+        file_path,
+        top_n=20,
+        include_selected=True,
+        include_plotlyjs="cdn",
+    ):
+        """Write a standalone multi-panel Plotly dashboard HTML file."""
+        from .plotly_export import write_scatter_dashboard_html
+
+        return write_scatter_dashboard_html(
+            self,
+            file_path=file_path,
+            top_n=top_n,
+            include_selected=include_selected,
+            include_plotlyjs=include_plotlyjs,
+        )
+
 
 class LabelSearch:
     """Class to search for and iterate over point labels.

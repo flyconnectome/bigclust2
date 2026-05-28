@@ -628,10 +628,9 @@ class ConnectivityTable(QtWidgets.QWidget):
         # - setting colors (perhaps based on dendrogram)
         # - toggle for normalized weight
 
-        # Now that we are done, we need to check if the figure has already
-        # something connected
-        if not isinstance(self._figure.selected_ids, type(None)) and len(self._figure.selected_ids) > 0:
-            self.select(self._figure.selected_ids)
+        # Now that we are done, we need to check if the figure has already something selected
+        if not isinstance(self._figure.selected, type(None)) and len(self._figure.selected) > 0:
+            self.select(self._figure.selected)
 
         self.update_cell_size()
 

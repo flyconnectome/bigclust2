@@ -3,6 +3,7 @@ import logging
 import warnings
 import pyperclip
 
+import cmap as _cmap
 import pandas as pd
 import numpy as np
 
@@ -34,6 +35,326 @@ EVALUATE_DATA_COLUMN = "bigclust_label_evaluation"
 CLUSTER_HOMOGENEOUS_LABEL_CURRENT = "Current labels"
 
 
+_DIVERGING_PALETTES = frozenset({
+    "matplotlib:coolwarm",
+    "colorbrewer:RdBu_r",
+    "matplotlib:seismic",
+})
+
+
+def _make_palette_pixmap(palette_name, width=100, height=14):
+    """Return a QPixmap showing a gradient swatch for the given cmap palette."""
+    colormap = _cmap.Colormap(palette_name)
+    colors = list(colormap.iter_colors(width))
+    pixmap = QtGui.QPixmap(width, height)
+    painter = QtGui.QPainter(pixmap)
+    for i, color in enumerate(colors):
+        r, g, b, a = color.rgba
+        painter.fillRect(i, 0, 1, height, QtGui.QColor.fromRgbF(r, g, b, a))
+    painter.end()
+    return pixmap
+
+
+class _MultiHandleSlider(QtWidgets.QWidget):
+    """Horizontal slider with 2 (min/max) or 3 (min/center/max) draggable handles.
+
+    Emits ``valuesChanged(vmin, vcenter, vmax)`` whenever any handle moves.
+    The centre handle is hidden unless ``set_diverging(True)`` is called.
+    """
+
+    valuesChanged = QtCore.Signal(float, float, float)
+
+    _HANDLE_R = 6      # handle radius in px
+    _TRACK_H = 4       # track height in px
+    _H_MARGIN = 14     # left margin (≥ handle radius + a few px)
+    _H_MARGIN_RIGHT = 28  # right margin — wider to accommodate the reset button
+    _LABEL_AREA = 16   # px below the track reserved for value labels
+    _MIN_H = 46        # total widget height
+    _RESET_BTN_SIZE = 16  # reset button side length in px
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._lo: float = 0.0
+        self._hi: float = 1.0
+        self._vmin: float = 0.0
+        self._vcenter: float = 0.5
+        self._vmax: float = 1.0
+        self._show_center: bool = False
+        self._active: "str | None" = None   # 'min' | 'center' | 'max'
+        self._hover: "str | None" = None
+        self.setMinimumHeight(self._MIN_H)
+        self.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.setMouseTracking(True)
+        self.setFocusPolicy(QtCore.Qt.FocusPolicy.NoFocus)
+
+        # Small reset button — positioned in resizeEvent
+        self._reset_btn = QtWidgets.QToolButton(self)
+        self._reset_btn.setText("↺")
+        self._reset_btn.setFixedSize(self._RESET_BTN_SIZE, self._RESET_BTN_SIZE)
+        self._reset_btn.setToolTip("Reset range to full data extent")
+        self._reset_btn.setAutoRaise(True)
+        self._reset_btn.setStyleSheet(
+            "QToolButton { border: none; padding: 0px; font-size: 11px; color: palette(mid); }"
+            "QToolButton:hover { color: palette(text); }"
+        )
+        self._reset_btn.clicked.connect(self.reset)
+
+        # Debounce timer: emit valuesChanged only after a short pause while dragging
+        self._emit_timer = QtCore.QTimer(self)
+        self._emit_timer.setSingleShot(True)
+        self._emit_timer.setInterval(120)  # ms — adjust to taste
+        self._emit_timer.timeout.connect(self._flush_emit)
+
+    # ── public API ────────────────────────────────────────────────────────────
+
+    @property
+    def vmin(self) -> float:
+        return self._vmin
+
+    @property
+    def vcenter(self) -> float:
+        return self._vcenter
+
+    @property
+    def vmax(self) -> float:
+        return self._vmax
+
+    @property
+    def show_center(self) -> bool:
+        return self._show_center
+
+    def set_data_range(self, lo: float, hi: float) -> None:
+        """Update the track bounds. Does not emit."""
+        self._lo = float(lo)
+        self._hi = float(hi) if hi != lo else float(lo) + 1.0
+        self.update()
+
+    def set_values(self, vmin: float, vcenter: float, vmax: float) -> None:
+        """Set all three handle positions. Does not emit."""
+        self._vmin = float(vmin)
+        self._vcenter = float(vcenter)
+        self._vmax = float(vmax)
+        self.update()
+
+    def set_diverging(self, diverging: bool) -> None:
+        """Show or hide the centre handle."""
+        self._show_center = bool(diverging)
+        self.update()
+
+    def reset(self) -> None:
+        """Reset handles to the full data range and emit valuesChanged."""
+        self._vmin = self._lo
+        self._vmax = self._hi
+        self._vcenter = (self._lo + self._hi) / 2.0
+        self.update()
+        self.valuesChanged.emit(self._vmin, self._vcenter, self._vmax)
+
+    # ── coordinate helpers ────────────────────────────────────────────────────
+
+    def _track_y(self) -> int:
+        usable = self.height() - self._LABEL_AREA
+        return max(self._HANDLE_R + 2, usable // 2)
+
+    def _track_left(self) -> int:
+        return self._H_MARGIN
+
+    def _track_right(self) -> int:
+        return self.width() - self._H_MARGIN_RIGHT
+
+    def _track_width(self) -> int:
+        return max(1, self._track_right() - self._track_left())
+
+    def _val_to_x(self, val: float) -> int:
+        span = self._hi - self._lo
+        ratio = (val - self._lo) / span if span else 0.0
+        return self._track_left() + int(ratio * self._track_width())
+
+    def _x_to_val(self, x: int) -> float:
+        tw = self._track_width()
+        ratio = (x - self._track_left()) / tw if tw else 0.0
+        return self._lo + max(0.0, min(1.0, ratio)) * (self._hi - self._lo)
+
+    def _handles(self) -> "list[tuple[str, int, float]]":
+        result = [
+            ("min", self._val_to_x(self._vmin), self._vmin),
+            ("max", self._val_to_x(self._vmax), self._vmax),
+        ]
+        if self._show_center:
+            result.append(("center", self._val_to_x(self._vcenter), self._vcenter))
+        return result
+
+    def _hit_test(self, pos: QtCore.QPoint) -> "str | None":
+        cy = self._track_y()
+        r = self._HANDLE_R + 4
+        best: "str | None" = None
+        best_dist = r + 1.0
+        for name, hx, _ in self._handles():
+            dist = ((pos.x() - hx) ** 2 + (pos.y() - cy) ** 2) ** 0.5
+            if dist <= r and dist < best_dist:
+                best = name
+                best_dist = dist
+        return best
+
+    # ── layout ───────────────────────────────────────────────────────────────
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        # Keep the reset button at the top-right corner
+        s = self._RESET_BTN_SIZE
+        self._reset_btn.setGeometry(self.width() - s - 1, 1, s, s)
+
+    # ── events ────────────────────────────────────────────────────────────────
+
+    def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton:
+            hit = self._hit_test(event.position().toPoint())
+            if hit:
+                self._active = hit
+                self._apply_drag(event.position().toPoint().x())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event: QtGui.QMouseEvent) -> None:
+        pt = event.position().toPoint()
+        if self._active and (event.buttons() & QtCore.Qt.MouseButton.LeftButton):
+            self._apply_drag(pt.x())
+            event.accept()
+            return
+        old_hover = self._hover
+        self._hover = self._hit_test(pt)
+        if self._hover != old_hover:
+            self.update()
+        self.setCursor(
+            QtGui.QCursor(QtCore.Qt.CursorShape.SizeHorCursor)
+            if self._hover
+            else QtGui.QCursor(QtCore.Qt.CursorShape.ArrowCursor)
+        )
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event: QtGui.QMouseEvent) -> None:
+        if event.button() == QtCore.Qt.MouseButton.LeftButton and self._active:
+            self._active = None
+            # Flush any pending debounced emit immediately on mouse-up
+            if self._emit_timer.isActive():
+                self._emit_timer.stop()
+                self._flush_emit()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+    def leaveEvent(self, event) -> None:
+        if self._hover:
+            self._hover = None
+            self.update()
+        super().leaveEvent(event)
+
+    def _apply_drag(self, x: int) -> None:
+        val = self._x_to_val(x)
+        if self._active == "min":
+            new_min = min(val, self._vmax)
+            if self._show_center:
+                span = self._vmax - self._vmin
+                ratio = (self._vcenter - self._vmin) / span if span else 0.5
+                self._vcenter = new_min + ratio * (self._vmax - new_min)
+            self._vmin = new_min
+        elif self._active == "max":
+            new_max = max(val, self._vmin)
+            if self._show_center:
+                span = self._vmax - self._vmin
+                ratio = (self._vcenter - self._vmin) / span if span else 0.5
+                self._vcenter = self._vmin + ratio * (new_max - self._vmin)
+            self._vmax = new_max
+        elif self._active == "center":
+            self._vcenter = max(self._vmin, min(val, self._vmax))
+        self.update()
+        self._emit_timer.start()  # restarts the timer if already running
+
+    def _flush_emit(self) -> None:
+        self.valuesChanged.emit(self._vmin, self._vcenter, self._vmax)
+
+    # ── painting ──────────────────────────────────────────────────────────────
+
+    def paintEvent(self, event: QtGui.QPaintEvent) -> None:
+        painter = QtGui.QPainter(self)
+        painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
+
+        pal = self.palette()
+        cy = self._track_y()
+        tl = self._track_left()
+        tr_r = self._track_right()
+        th = self._TRACK_H
+
+        # Groove
+        groove = QtCore.QRectF(tl, cy - th / 2, tr_r - tl, th)
+        painter.setPen(QtCore.Qt.PenStyle.NoPen)
+        painter.setBrush(pal.color(QtGui.QPalette.ColorRole.Mid))
+        painter.drawRoundedRect(groove, th / 2, th / 2)
+
+        # Filled range between vmin and vmax
+        x_min = self._val_to_x(self._vmin)
+        x_max = self._val_to_x(self._vmax)
+        if x_max > x_min:
+            fill = QtCore.QRectF(x_min, cy - th / 2, x_max - x_min, th)
+            painter.setBrush(pal.color(QtGui.QPalette.ColorRole.Highlight))
+            painter.drawRoundedRect(fill, th / 2, th / 2)
+
+        # Handles + labels
+        font = painter.font()
+        label_font = QtGui.QFont(font)
+        label_font.setPointSizeF(max(7.0, font.pointSizeF() - 1.5))
+
+        for name, hx, val in self._handles():
+            is_active = name == self._active
+            is_hover = name == self._hover
+            is_center = name == "center"
+
+            if is_active:
+                brush = pal.color(QtGui.QPalette.ColorRole.Highlight)
+                pen_col = pal.color(QtGui.QPalette.ColorRole.Dark)
+            elif is_hover:
+                brush = pal.color(QtGui.QPalette.ColorRole.Light)
+                pen_col = pal.color(QtGui.QPalette.ColorRole.Dark)
+            elif is_center:
+                brush = pal.color(QtGui.QPalette.ColorRole.AlternateBase)
+                pen_col = pal.color(QtGui.QPalette.ColorRole.Dark)
+            else:
+                brush = pal.color(QtGui.QPalette.ColorRole.Button)
+                pen_col = pal.color(QtGui.QPalette.ColorRole.Dark)
+
+            r = self._HANDLE_R
+            painter.setPen(QtGui.QPen(pen_col, 1.5))
+            painter.setBrush(brush)
+            painter.drawEllipse(QtCore.QPointF(hx, cy), r, r)
+
+            # Value label below the handle
+            label = _MultiHandleSlider._fmt(val)
+            label_rect = QtCore.QRectF(hx - 28, cy + r + 2, 56, self._LABEL_AREA - 2)
+            painter.setPen(pal.color(QtGui.QPalette.ColorRole.Text))
+            painter.setFont(label_font)
+            painter.drawText(
+                label_rect,
+                QtCore.Qt.AlignmentFlag.AlignHCenter | QtCore.Qt.AlignmentFlag.AlignTop,
+                label,
+            )
+            painter.setFont(font)
+            painter.setPen(QtGui.QPen(pen_col, 1.5))
+
+        painter.end()
+
+    @staticmethod
+    def _fmt(v: float) -> str:
+        if v == 0.0:
+            return "0"
+        mag = abs(v)
+        if 0.001 <= mag < 10_000:
+            return f"{v:.4g}"
+        return f"{v:.2e}"
+
+
 def requires_selection(func):
     """Decorator to check if a selection is required."""
 
@@ -44,6 +365,178 @@ def requires_selection(func):
         return func(self, *args, **kwargs)
 
     return wrapper
+
+
+class _FilterableComboBox(QtWidgets.QComboBox):
+    """A QComboBox whose popup has a filter text field at the top.
+
+    All standard QComboBox API (addItem, removeItem, findText, setCurrentText,
+    currentText, currentIndexChanged, blockSignals, etc.) works unchanged.
+    Only the visual popup is replaced with a custom frame containing a
+    QLineEdit for filtering and a QListView for the matching items.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+        # Build the custom popup frame (parented to None so it floats freely)
+        self._popup = QtWidgets.QFrame(
+            None,
+            QtCore.Qt.WindowType.Popup | QtCore.Qt.WindowType.FramelessWindowHint,
+        )
+        self._popup.setFrameShape(QtWidgets.QFrame.Shape.StyledPanel)
+        popup_layout = QtWidgets.QVBoxLayout(self._popup)
+        popup_layout.setContentsMargins(4, 4, 4, 4)
+        popup_layout.setSpacing(2)
+
+        self._filter_edit = QtWidgets.QLineEdit()
+        self._filter_edit.setPlaceholderText("Filter…")
+        self._filter_edit.setClearButtonEnabled(True)
+        popup_layout.addWidget(self._filter_edit)
+
+        self._list_view = QtWidgets.QListView()
+        self._list_view.setEditTriggers(
+            QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers
+        )
+        self._list_view.setHorizontalScrollBarPolicy(
+            QtCore.Qt.ScrollBarPolicy.ScrollBarAlwaysOff
+        )
+        popup_layout.addWidget(self._list_view)
+
+        # Proxy model for filtering — wraps this combo's own model
+        self._proxy = QtCore.QSortFilterProxyModel(self)
+        self._proxy.setFilterCaseSensitivity(QtCore.Qt.CaseSensitivity.CaseInsensitive)
+        self._proxy.setFilterKeyColumn(0)
+        self._list_view.setModel(self._proxy)
+
+        # Connections
+        self._filter_edit.textChanged.connect(self._on_filter_text_changed)
+        self._list_view.clicked.connect(self._on_item_clicked)
+        self._filter_edit.installEventFilter(self)
+        self._list_view.installEventFilter(self)
+
+    # ------------------------------------------------------------------
+    # Filtering
+    # ------------------------------------------------------------------
+
+    def _on_filter_text_changed(self, text: str) -> None:
+        escaped = QtCore.QRegularExpression.escape(text)
+        self._proxy.setFilterRegularExpression(
+            QtCore.QRegularExpression(escaped, QtCore.QRegularExpression.PatternOption.CaseInsensitiveOption)
+        )
+        # Select the first visible item in the list so Enter works immediately
+        first = self._proxy.index(0, 0)
+        if first.isValid():
+            self._list_view.setCurrentIndex(first)
+        else:
+            self._list_view.clearSelection()
+
+    # ------------------------------------------------------------------
+    # Popup lifecycle
+    # ------------------------------------------------------------------
+
+    def showPopup(self) -> None:
+        # Refresh the proxy source in case the underlying model was replaced
+        self._proxy.setSourceModel(self.model())
+
+        # Clear any previous filter text
+        self._filter_edit.blockSignals(True)
+        self._filter_edit.clear()
+        self._filter_edit.blockSignals(False)
+        self._proxy.setFilterRegularExpression(QtCore.QRegularExpression())
+
+        # Size the popup
+        min_width = max(self.width(), 200)
+        row_height = self._list_view.sizeHintForRow(0)
+        if row_height < 1:
+            row_height = 22
+        list_height = max(80, min(300, self.count() * row_height))
+        self._list_view.setFixedHeight(list_height)
+        self._popup.setFixedWidth(min_width)
+        self._popup.adjustSize()
+
+        # Position directly below the combo button
+        global_pos = self.mapToGlobal(QtCore.QPoint(0, self.height()))
+        self._popup.move(global_pos)
+        self._popup.show()
+
+        # Pre-select the item that is currently active in the combo
+        current_source_idx = self.model().index(self.currentIndex(), 0)
+        proxy_idx = self._proxy.mapFromSource(current_source_idx)
+        if proxy_idx.isValid():
+            self._list_view.setCurrentIndex(proxy_idx)
+            self._list_view.scrollTo(
+                proxy_idx, QtWidgets.QAbstractItemView.ScrollHint.PositionAtCenter
+            )
+        else:
+            first = self._proxy.index(0, 0)
+            if first.isValid():
+                self._list_view.setCurrentIndex(first)
+
+        self._filter_edit.setFocus(QtCore.Qt.FocusReason.PopupFocusReason)
+
+    def hidePopup(self) -> None:
+        self._popup.hide()
+        super().hidePopup()
+
+    # ------------------------------------------------------------------
+    # Item selection from list view
+    # ------------------------------------------------------------------
+
+    def _on_item_clicked(self, proxy_index: QtCore.QModelIndex) -> None:
+        source_index = self._proxy.mapToSource(proxy_index)
+        if source_index.isValid():
+            self.setCurrentIndex(source_index.row())
+        self._popup.hide()
+
+    def _select_current_and_close(self) -> None:
+        """Select the currently highlighted list item and close the popup."""
+        proxy_index = self._list_view.currentIndex()
+        if not proxy_index.isValid():
+            # Fall back to first visible item
+            proxy_index = self._proxy.index(0, 0)
+        if proxy_index.isValid():
+            source_index = self._proxy.mapToSource(proxy_index)
+            if source_index.isValid():
+                self.setCurrentIndex(source_index.row())
+        self._popup.hide()
+
+    # ------------------------------------------------------------------
+    # Keyboard navigation
+    # ------------------------------------------------------------------
+
+    def eventFilter(self, obj, event) -> bool:
+        if event.type() == QtCore.QEvent.Type.KeyPress:
+            key = event.key()
+            if obj is self._filter_edit:
+                if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                    self._select_current_and_close()
+                    return True
+                if key == QtCore.Qt.Key.Key_Escape:
+                    self._popup.hide()
+                    return True
+                if key == QtCore.Qt.Key.Key_Down:
+                    cur = self._list_view.currentIndex()
+                    next_row = cur.row() + 1 if cur.isValid() else 0
+                    next_idx = self._proxy.index(next_row, 0)
+                    if next_idx.isValid():
+                        self._list_view.setCurrentIndex(next_idx)
+                    return True
+                if key == QtCore.Qt.Key.Key_Up:
+                    cur = self._list_view.currentIndex()
+                    prev_row = max(0, cur.row() - 1) if cur.isValid() else 0
+                    prev_idx = self._proxy.index(prev_row, 0)
+                    if prev_idx.isValid():
+                        self._list_view.setCurrentIndex(prev_idx)
+                    return True
+            elif obj is self._list_view:
+                if key in (QtCore.Qt.Key.Key_Return, QtCore.Qt.Key.Key_Enter):
+                    self._select_current_and_close()
+                    return True
+                if key == QtCore.Qt.Key.Key_Escape:
+                    self._popup.hide()
+                    return True
+        return super().eventFilter(obj, event)
 
 
 class ScatterControls(QtWidgets.QWidget):
@@ -57,6 +550,8 @@ class ScatterControls(QtWidgets.QWidget):
 
         # Build gui
         self.tab_layout = QtWidgets.QVBoxLayout()
+        self.tab_layout.setContentsMargins(0, 0, 0, 0)
+        self.tab_layout.setSpacing(0)
         self.setLayout(self.tab_layout)
 
         self.tabs = QtWidgets.QTabWidget()
@@ -77,6 +572,12 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab5_layout = QtWidgets.QVBoxLayout()
         self.tab6_layout = QtWidgets.QVBoxLayout()
         self.tab7_layout = QtWidgets.QVBoxLayout()
+        for _tl in (
+            self.tab1_layout, self.tab4_layout, self.tab5_layout,
+            self.tab6_layout, self.tab7_layout,
+        ):
+            _tl.setContentsMargins(4, 4, 4, 4)
+            _tl.setSpacing(4)
         self.tab1.setLayout(self.tab1_layout)
         self.tab4.setLayout(self.tab4_layout)
         self.tab5.setLayout(self.tab5_layout)
@@ -184,7 +685,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab1_layout.addWidget(label_group)
 
         # Add dropdown to choose leaf labels
-        self.label_combo_box = QtWidgets.QComboBox()
+        self.label_combo_box = _FilterableComboBox()
         label_form.addRow(QtWidgets.QLabel("Labels:"), self.label_combo_box)
         self.label_combo_box.currentIndexChanged.connect(self.set_labels)
         self._current_leaf_labels = self.label_combo_box.currentText()
@@ -218,26 +719,54 @@ class ScatterControls(QtWidgets.QWidget):
 
         # Add dropdowns to choose color mode
 
-        self.color_combo_box = QtWidgets.QComboBox()
+        self.color_combo_box = _FilterableComboBox()
         color_form.addRow("Color by:", self.color_combo_box)
         self.palette_combo_box = QtWidgets.QComboBox()
         color_form.addRow("Palette:", self.palette_combo_box)
         self.palette_combo_box.setToolTip(
             "The color palette to use when coloring by labels. Ignored if column contains colors or if coloring by clusters."
         )
-        self.palette_combo_box.addItems(
-            [
-                "seaborn:tab20",
-                "vispy:husl",
-                "matplotlib:coolwarm",
-                "matplotlib:viridis",
-                "glasbey:glasbey",
-            ]
+        _palettes = [
+            # Categorical / qualitative
+            "seaborn:tab10",
+            "seaborn:tab20",
+            "vispy:husl",
+            "colorbrewer:Set1",
+            "colorbrewer:Set2",
+            "colorbrewer:Paired",
+            "glasbey:glasbey",
+            # Sequential
+            "matplotlib:viridis",
+            "matplotlib:plasma",
+            "matplotlib:inferno",
+            "matplotlib:magma",
+            "google:turbo",
+            # Diverging
+            "matplotlib:coolwarm",
+            "colorbrewer:RdBu_r",
+            "matplotlib:seismic",
+        ]
+        for _p in _palettes:
+            self.palette_combo_box.addItem(
+                QtGui.QIcon(_make_palette_pixmap(_p)), _p
+            )
+        self.palette_combo_box.setIconSize(QtCore.QSize(100, 14))
+
+        # Range slider — visible only when coloring by a numerical column.
+        # Shows min/max handles; a third centre handle appears for diverging palettes.
+        self.color_range_slider = _MultiHandleSlider()
+        self.color_range_slider.setVisible(False)
+        self.color_range_slider.setToolTip(
+            "Drag the handles to set the colour-scale range.\n"
+            "For diverging palettes a centre handle is also shown."
         )
+        color_form.addRow(self.color_range_slider)
+
+        self.color_range_slider.valuesChanged.connect(lambda *_: self.set_colors())
 
         # Set the action for the color combo box
-        self.color_combo_box.currentIndexChanged.connect(self.set_colors)
-        self.palette_combo_box.currentIndexChanged.connect(self.set_colors)
+        self.color_combo_box.currentIndexChanged.connect(self._on_color_column_changed)
+        self.palette_combo_box.currentIndexChanged.connect(self._on_palette_changed)
         self.label_combo_box.currentIndexChanged.connect(
             self._maybe_recompute_evaluation
         )
@@ -469,7 +998,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Input group
         input_group = QtWidgets.QGroupBox("Input")
         input_form = QtWidgets.QFormLayout()
-        input_form.setContentsMargins(8, 6, 8, 6)
+        input_form.setContentsMargins(6, 4, 6, 4)
+        input_form.setVerticalSpacing(6)
         input_group.setLayout(input_form)
         self.tab5_layout.addWidget(input_group)
 
@@ -504,7 +1034,7 @@ class ScatterControls(QtWidgets.QWidget):
         # Optional sub-selection of top-level feature groups for MultiIndex columns.
         self.umap_feature_subset_group = QtWidgets.QGroupBox("Feature Subset")
         feature_subset_layout = QtWidgets.QVBoxLayout()
-        feature_subset_layout.setContentsMargins(8, 6, 8, 6)
+        feature_subset_layout.setContentsMargins(6, 4, 6, 4)
         feature_subset_layout.setSpacing(2)
         self.umap_feature_subset_group.setLayout(feature_subset_layout)
         input_form.addRow(self.umap_feature_subset_group)
@@ -520,7 +1050,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Feature-dependent options are grouped together and enabled only for feature vectors.
         self.feature_options_group = QtWidgets.QGroupBox("Feature Options")
         prep_form = QtWidgets.QFormLayout()
-        prep_form.setContentsMargins(8, 6, 8, 6)
+        prep_form.setContentsMargins(6, 4, 6, 4)
+        prep_form.setVerticalSpacing(2)
         self.feature_options_group.setLayout(prep_form)
         self.tab5_layout.addWidget(self.feature_options_group)
 
@@ -595,7 +1126,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Method-specific settings
         settings_group = QtWidgets.QGroupBox("Method Settings")
         settings_layout = QtWidgets.QVBoxLayout()
-        settings_layout.setContentsMargins(8, 6, 8, 6)
+        settings_layout.setContentsMargins(6, 4, 6, 4)
+        settings_layout.setSpacing(2)
         settings_group.setLayout(settings_layout)
         self.tab5_layout.addWidget(settings_group)
 
@@ -763,7 +1295,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Neighboorhood fidelity settings
         settings_group = QtWidgets.QGroupBox("Neighborhood Fidelity")
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_form.setContentsMargins(6, 4, 6, 4)
+        settings_form.setVerticalSpacing(2)
         settings_group.setLayout(settings_form)
         self.tab6_layout.addWidget(settings_group)
 
@@ -816,7 +1349,8 @@ class ScatterControls(QtWidgets.QWidget):
         # KNN lines
         settings_group = QtWidgets.QGroupBox("K-Nearest Neighbors")
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_form.setContentsMargins(6, 4, 6, 4)
+        settings_form.setVerticalSpacing(2)
         settings_group.setLayout(settings_form)
         self.tab6_layout.addWidget(settings_group)
 
@@ -860,7 +1394,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Evaluate labels
         settings_group = QtWidgets.QGroupBox("Evaluate Labels")
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_form.setContentsMargins(6, 4, 6, 4)
+        settings_form.setVerticalSpacing(2)
         settings_group.setLayout(settings_form)
         self.evaluate_labels_form = settings_form
         self.tab6_layout.addWidget(settings_group)
@@ -960,7 +1495,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Distances edges
         settings_group = QtWidgets.QGroupBox("Distances")
         settings_form = QtWidgets.QFormLayout()
-        settings_form.setContentsMargins(8, 6, 8, 6)
+        settings_form.setContentsMargins(6, 4, 6, 4)
+        settings_form.setVerticalSpacing(2)
         settings_group.setLayout(settings_form)
         self.tab6_layout.addWidget(settings_group)
 
@@ -1036,7 +1572,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Input group
         input_group = QtWidgets.QGroupBox("Input")
         input_form = QtWidgets.QFormLayout()
-        input_form.setContentsMargins(8, 6, 8, 6)
+        input_form.setContentsMargins(6, 4, 6, 4)
+        input_form.setVerticalSpacing(2)
         input_group.setLayout(input_form)
         self.tab7_layout.addWidget(input_group)
 
@@ -1059,7 +1596,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Algorithm group
         algo_group = QtWidgets.QGroupBox("Algorithm")
         algo_layout = QtWidgets.QVBoxLayout()
-        algo_layout.setContentsMargins(8, 6, 8, 6)
+        algo_layout.setContentsMargins(6, 4, 6, 4)
+        algo_layout.setSpacing(2)
         algo_group.setLayout(algo_layout)
         self.tab7_layout.addWidget(algo_group)
 
@@ -1406,7 +1944,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Output group
         output_group = QtWidgets.QGroupBox("Output")
         output_form = QtWidgets.QFormLayout()
-        output_form.setContentsMargins(8, 6, 8, 6)
+        output_form.setContentsMargins(6, 4, 6, 4)
+        output_form.setVerticalSpacing(2)
         output_group.setLayout(output_form)
         self.tab7_layout.addWidget(output_group)
 
@@ -1444,7 +1983,8 @@ class ScatterControls(QtWidgets.QWidget):
         # Manual refinement group (hidden until cluster labels are available)
         self.cluster_manual_group = QtWidgets.QGroupBox("Manual Refinement")
         manual_form = QtWidgets.QFormLayout()
-        manual_form.setContentsMargins(8, 6, 8, 6)
+        manual_form.setContentsMargins(6, 4, 6, 4)
+        manual_form.setVerticalSpacing(2)
         self.cluster_manual_group.setLayout(manual_form)
         self.tab7_layout.addWidget(self.cluster_manual_group)
 
@@ -2746,6 +3286,50 @@ class ScatterControls(QtWidgets.QWidget):
             ids = self.figure._ids[indices]
             pyperclip.copy(",".join(np.array(ids).astype(str)))
 
+    def _on_color_column_changed(self):
+        """Handle color-by column change: reset range controls then apply colors."""
+        color_col = self.color_combo_box.currentText()
+        is_numerical = False
+        is_color_col = False
+        if (
+            color_col
+            and color_col not in ("Default", CLUSTER_DATA_OPTION)
+            and self.meta_data is not None
+            and color_col in self.meta_data.columns
+        ):
+            series = self.meta_data[color_col]
+            is_numerical = series.dtype.kind == "f"
+            is_color_col = is_color_column(series)
+
+        # Palette is not meaningful when the column already encodes colours or
+        # when colouring by cluster assignments.
+        palette_enabled = not is_color_col and color_col != CLUSTER_DATA_OPTION
+        self.palette_combo_box.setEnabled(palette_enabled)
+
+        if is_numerical:
+            data = self.meta_data[color_col].values
+            lo = float(np.nanmin(data))
+            hi = float(np.nanmax(data))
+            mid = (lo + hi) / 2.0
+            self.color_range_slider.blockSignals(True)
+            self.color_range_slider.set_data_range(lo, hi)
+            self.color_range_slider.set_values(lo, mid, hi)
+            self.color_range_slider.blockSignals(False)
+
+        self.color_range_slider.setVisible(is_numerical)
+        if is_numerical:
+            is_diverging = self.palette_combo_box.currentText() in _DIVERGING_PALETTES
+            self.color_range_slider.set_diverging(is_diverging)
+
+        self.set_colors()
+
+    def _on_palette_changed(self):
+        """Handle palette change: update centre handle visibility then apply colors."""
+        if self.color_range_slider.isVisible():
+            is_diverging = self.palette_combo_box.currentText() in _DIVERGING_PALETTES
+            self.color_range_slider.set_diverging(is_diverging)
+        self.set_colors()
+
     def set_colors(self, sync_to_viewer=True):
         """Set the color mode."""
         color_col = self.color_combo_box.currentText()
@@ -2761,9 +3345,15 @@ class ScatterControls(QtWidgets.QWidget):
         elif is_color_column(self.meta_data[color_col]):
             colors = self.meta_data[color_col].values
         else:
+            kwargs = {"palette": self.palette_combo_box.currentText()}
+            if self.color_range_slider.isVisible():
+                kwargs["vmin"] = self.color_range_slider.vmin
+                kwargs["vmax"] = self.color_range_slider.vmax
+                if self.color_range_slider.show_center:
+                    kwargs["vcenter"] = self.color_range_slider.vcenter
             colors = labels_to_colors(
                 self.meta_data[color_col].values,
-                palette=self.palette_combo_box.currentText(),
+                **kwargs,
             )
 
         self.figure.set_colors(colors, sync_to_viewer=sync_to_viewer)

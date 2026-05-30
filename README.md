@@ -53,10 +53,11 @@ Most GUI elements are hopefully self-explanatory - when in doubt look for the to
 
 #### Scatterplot
 
-Use the left click + hold to move the view and shift + left click + hold to draw a
-selection box around points.
-
+- left click to move the view
+- shift + left click to draw a selection box (add + cmd to add to selection)
+- shift + control + left click to draw a lasso selection (add + cmd to add to selection)
 - `ESC` to deselect all points
+
 - `C` to toggle the control panel
 - `L` to toggle labels
 - left/right arrows increase/decrease font size of labels

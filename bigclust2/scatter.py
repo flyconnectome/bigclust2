@@ -15,12 +15,45 @@ from scipy.spatial import ConvexHull, Delaunay
 
 from .figure import BaseFigure, update_figure
 from .embeddings import neighborhood_fidelity
-from .selection import SelectionGizmo
+from .selection import LassoGizmo, SelectionGizmo
 from .visuals import points2gfx, text2gfx, lines2gfx
 
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
 # Drop markers which look too similar to others
 AVAILABLE_MARKERS.remove("ring")
+
+
+def _pts_in_polygon(points, polygon):
+    """Test which points lie inside a polygon (vectorised ray-casting).
+
+    Parameters
+    ----------
+    points : (N, 2) array
+    polygon : (M, 2) array  — open or closed polygon vertices
+
+    Returns
+    -------
+    inside : (N,) bool array
+    """
+    px = points[:, 0]
+    py = points[:, 1]
+    x = polygon[:, 0]
+    y = polygon[:, 1]
+    n = len(polygon)
+    inside = np.zeros(len(points), dtype=bool)
+    j = n - 1
+    for i in range(n):
+        xi, yi = x[i], y[i]
+        xj, yj = x[j], y[j]
+        dy = yj - yi
+        # Guard against horizontal edges
+        safe_dy = np.where(dy == 0, 1e-10, dy)
+        cross = ((yi > py) != (yj > py)) & (
+            px < (xj - xi) * (py - yi) / safe_dy + xi
+        )
+        inside ^= cross
+        j = i
+    return inside
 
 
 class ScatterFigure(BaseFigure):
@@ -52,13 +85,23 @@ class ScatterFigure(BaseFigure):
         self.label_refresh_rate = 30  # update labels every n frames
         self._viewer_sync_enabled = True
 
-        # Add the selection gizmo
+        # Add the selection gizmo (Shift+drag → rectangle)
         self.selection_gizmo = SelectionGizmo(
             self.renderer,
             self.camera,
             self.scene,
             callback_after=lambda x: self.select_points(
                 x.bounds, additive="Control" in x._event_modifiers
+            ),
+        )
+
+        # Add the lasso gizmo (Shift+Command+drag → freehand polygon)
+        self.lasso_gizmo = LassoGizmo(
+            self.renderer,
+            self.camera,
+            self.scene,
+            callback_after=lambda x: self.select_points_lasso(
+                x.polygon, additive="Control" in x._event_modifiers
             ),
         )
 
@@ -1370,6 +1413,40 @@ class ScatterFigure(BaseFigure):
             & (positions_abs[:, 1] <= bounds[1, 1])
         )
         selected = indices[selected]
+
+        if not len(selected) and not self.deselect_on_empty:
+            return
+
+        if additive and self.selected is not None:
+            selected = np.unique(np.concatenate((self.selected, selected)))
+
+        self.selected = selected
+
+    @update_figure
+    def select_points_lasso(self, polygon, additive=False):
+        """Select all points inside a freehand lasso polygon.
+
+        Parameters
+        ----------
+        polygon : (N, 2) array | None
+            Polygon vertices in world coordinates. None is a no-op.
+        additive : bool
+            Whether to add to the existing selection.
+        """
+        if polygon is None:
+            return
+
+        positions_abs = []
+        indices = []
+        for l in self.point_visuals:
+            positions_abs.append(
+                la.vec_transform(l.geometry.positions.data, l.world.matrix)
+            )
+            indices.append(l._point_ix)
+        positions_abs = np.vstack(positions_abs)
+        indices = np.concatenate(indices)
+
+        selected = indices[_pts_in_polygon(positions_abs[:, :2], polygon)]
 
         if not len(selected) and not self.deselect_on_empty:
             return

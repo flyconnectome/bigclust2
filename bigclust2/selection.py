@@ -13,9 +13,10 @@ from pygfx.utils.transform import AffineTransform
 from .visuals import lines2gfx
 
 
+_MAX_LASSO_PTS = 2048
+
 # IDEAS:
 # - 3d selection gizmo (i.e. a box where we need to click twice)
-# - lasso selection gizmo
 
 
 class SelectionGizmo(WorldObject):
@@ -186,7 +187,9 @@ class SelectionGizmo(WorldObject):
     def process_event(self, event):
         """Callback to handle gizmo-related events."""
         # Triage over event type
-        has_mod = self._modifier is None or (self._modifier in event.modifiers)
+        has_mod = self._modifier is None or (
+            self._modifier in event.modifiers and "Meta" not in event.modifiers
+        )
         if event.type == "pointer_down" and has_mod:
             # print(f"Starting {self._name} at {self.screen_to_world((event.x, event.y))}")
             self._start_drag(event)
@@ -347,6 +350,172 @@ class SelectionGizmo(WorldObject):
         vs = self._viewport.logical_size
 
         # Convert position to NDC
+        x = pos_rel[0] / vs[0] * 2 - 1
+        y = -(pos_rel[1] / vs[1] * 2 - 1)
+        pos_ndc = (x, y, 0)
+
+        pos_ndc += la.vec_transform(
+            self._camera.world.position, self._camera.camera_matrix
+        )
+        pos_world = la.vec_unproject(pos_ndc[:2], self._camera.camera_matrix)
+
+        return pos_world
+
+
+class LassoGizmo(WorldObject):
+    """Gizmo to draw a freehand lasso selection.
+
+    Activate with Shift+Command (Meta) and drag to draw a freeform polygon.
+    Release to select all points inside the polygon.
+
+    Parameters
+    ----------
+    renderer : Renderer | Viewport
+    camera : Camera
+    scene : Scene
+    edge_color : str
+    line_width : float
+    callback_after : callable, optional
+        Called with the gizmo as argument when the drag ends.
+    """
+
+    _outline_opacity = 0.7
+
+    def __init__(
+        self,
+        renderer,
+        camera,
+        scene,
+        edge_color="w",
+        line_width=1,
+        callback_after=None,
+        name="LassoGizmo",
+    ):
+        super().__init__()
+
+        self._viewport = Viewport.from_viewport_or_renderer(renderer)
+        self._camera = camera
+        self._scene = scene
+        self._edge_color = edge_color
+        self._line_width = line_width
+        self._callback_after = callback_after
+        self._name = name
+        self._active = False
+        self._event_modifiers = ()
+        self._n_pts = 0
+
+        # Pre-allocate point buffer; NaN entries create invisible line breaks
+        self._pts_buf = np.full((_MAX_LASSO_PTS, 3), np.nan, dtype=np.float32)
+
+        self._create_elements()
+        self.visible = False
+        self._scene.add(self)
+        self.add_default_event_handlers()
+
+    def _create_elements(self):
+        self._outline = lines2gfx(
+            self._pts_buf.copy(),
+            self._edge_color,
+            linewidth=self._line_width,
+        )
+        self._outline.material.opacity = self._outline_opacity
+        self.add(self._outline)
+
+        # Dotted line closing start ↔ current mouse position
+        closing_pts = np.zeros((2, 3), dtype=np.float32)
+        self._closing = lines2gfx(
+            closing_pts,
+            self._edge_color,
+            linewidth=self._line_width,
+            dash_pattern="dotted",
+        )
+        self._closing.material.opacity = self._outline_opacity
+        self.add(self._closing)
+
+    @property
+    def polygon(self):
+        """Return lasso polygon as (N, 2) world-space array, or None if too few points."""
+        if self._n_pts < 3:
+            return None
+        return self._pts_buf[:self._n_pts, :2].copy()
+
+    def add_default_event_handlers(self):
+        self._viewport.renderer.add_event_handler(
+            self.process_event,
+            "pointer_down",
+            "pointer_move",
+            "pointer_up",
+        )
+
+    def process_event(self, event):
+        has_mod = "Shift" in event.modifiers and "Meta" in event.modifiers
+        if event.type == "pointer_down" and has_mod:
+            self._start_drag(event)
+            self._viewport.renderer.request_draw()
+        elif event.type == "pointer_up" and self._active:
+            self._stop_drag(event)
+            self._viewport.renderer.request_draw()
+        elif event.type == "pointer_move" and self._active:
+            self._move_selection(event)
+            self._viewport.renderer.request_draw()
+
+    def _start_drag(self, event):
+        world_pos = self.screen_to_world((event.x, event.y))
+        if world_pos is None:
+            return
+
+        self._active = True
+        self._event_modifiers = event.modifiers
+        self.visible = True
+
+        self._pts_buf[:] = np.nan
+        self._pts_buf[0] = [world_pos[0], world_pos[1], 0]
+        self._n_pts = 1
+
+        self._outline.geometry.positions.data[:] = self._pts_buf
+        self._outline.geometry.positions.update_range()
+
+        # Initialise closing line (zero-length at start)
+        self._closing.geometry.positions.data[:] = [
+            [world_pos[0], world_pos[1], 0],
+            [world_pos[0], world_pos[1], 0],
+        ]
+        self._closing.geometry.positions.update_range()
+
+    def _move_selection(self, event):
+        world_pos = self.screen_to_world((event.x, event.y))
+        if world_pos is None:
+            return
+
+        if self._n_pts < _MAX_LASSO_PTS:
+            self._pts_buf[self._n_pts] = [world_pos[0], world_pos[1], 0]
+            self._n_pts += 1
+            self._outline.geometry.positions.data[:] = self._pts_buf
+            self._outline.geometry.positions.update_range()
+
+        # Update closing line: current position → start
+        start = self._pts_buf[0]
+        self._closing.geometry.positions.data[0] = [world_pos[0], world_pos[1], 0]
+        self._closing.geometry.positions.data[1] = start
+        self._closing.geometry.positions.update_range()
+
+    def _stop_drag(self, event):
+        self._active = False
+        self.visible = False
+
+        if self._callback_after:
+            self._callback_after(self)
+
+    def screen_to_world(self, pos):
+        """Translate screen position to world coordinates."""
+        if not self._viewport.is_inside(*pos):
+            return None
+
+        pos_rel = (
+            pos[0] - self._viewport.rect[0],
+            pos[1] - self._viewport.rect[1],
+        )
+        vs = self._viewport.logical_size
         x = pos_rel[0] / vs[0] * 2 - 1
         y = -(pos_rel[1] / vs[1] * 2 - 1)
         pos_ndc = (x, y, 0)

@@ -1741,14 +1741,8 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
     def on_select_all(self):
-        try:
-            fig = self.centralWidget().fig_scatter
-            if hasattr(fig, "select_all"):
-                fig.select_all()
-            else:
-                logger.info("Select All not supported by current figure")
-        except Exception as e:
-            logger.debug(f"Select All failed: {e}")
+        fig = self.centralWidget().fig_scatter
+        fig.selected = np.arange(len(getattr(fig, "ids", [])))
 
     def on_deselect_all(self):
         try:

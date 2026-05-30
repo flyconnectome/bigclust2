@@ -435,7 +435,14 @@ def rgb_from_segment_id(color_seed, segment_id):
     return tuple([v * 255 for v in colorsys.hsv_to_rgb(h, s, v)])
 
 
-def labels_to_colors(labels, palette="vispy:husl", nan_color=(0.5, 0.5, 0.5, 1.0)):
+def labels_to_colors(
+    labels,
+    palette="vispy:husl",
+    nan_color=(0.5, 0.5, 0.5, 1.0),
+    vmin=None,
+    vmax=None,
+    vcenter=None,
+):
     """Map integer cluster labels to RGBA colours.
 
     Parameters
@@ -446,6 +453,13 @@ def labels_to_colors(labels, palette="vispy:husl", nan_color=(0.5, 0.5, 0.5, 1.0
         A ``cmap``-compatible colormap name used for distinct cluster colours.
     nan_color : tuple of 4 floats
         RGBA colour for NaN points.
+    vmin : float, optional
+        Lower bound for continuous colour mapping. Defaults to data minimum.
+    vmax : float, optional
+        Upper bound for continuous colour mapping. Defaults to data maximum.
+    vcenter : float, optional
+        Centre value for diverging colour mapping. When set, maps
+        [vmin, vcenter] → [0, 0.5] and [vcenter, vmax] → [0.5, 1.0].
 
     Returns
     -------
@@ -458,8 +472,27 @@ def labels_to_colors(labels, palette="vispy:husl", nan_color=(0.5, 0.5, 0.5, 1.0
     colormap_obj = _cmap.Colormap(palette)
 
     if labels.dtype.kind == "f":
-        # If labels are floats, treat them as continuous values and map to colors directly
-        normed = (labels - np.nanmin(labels)) / (np.nanmax(labels) - np.nanmin(labels))
+        # Continuous mapping
+        lo = vmin if vmin is not None else float(np.nanmin(labels))
+        hi = vmax if vmax is not None else float(np.nanmax(labels))
+
+        if vcenter is not None:
+            # Piecewise diverging normalisation
+            left_span = max(vcenter - lo, 1e-12)
+            right_span = max(hi - vcenter, 1e-12)
+
+            def _diverging_norm(v):
+                if v <= vcenter:
+                    return 0.5 * (v - lo) / left_span
+                else:
+                    return 0.5 + 0.5 * (v - vcenter) / right_span
+
+            normed = np.array([_diverging_norm(v) for v in labels], dtype=np.float64)
+        else:
+            span = hi - lo if hi != lo else 1.0
+            normed = (labels - lo) / span
+
+        normed = np.clip(normed, 0.0, 1.0)
         colors = np.empty((len(labels), 4), dtype=np.float32)
         for i, val in enumerate(normed):
             if np.isnan(val):

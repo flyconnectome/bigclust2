@@ -1562,6 +1562,12 @@ class ScatterFigure(BaseFigure):
         self.datasets = self.metadata[dataset_col].values if dataset_col else None
 
         self.hover_info_org = hover_col  # keep the original, unprocessed hover info
+        # Track which columns are available and which are currently shown
+        self._hover_col_names_all = [
+            c for c in metadata.columns if not str(c).startswith("_")
+        ] if hover_col is not None else []
+        self._hover_col_names_active = None  # None means "show all"
+
         if hover_col is not None:
             if "{" in hover_col:
                 hover_info = metadata.apply(hover_col.format_map, axis=1)
@@ -1595,7 +1601,7 @@ class ScatterFigure(BaseFigure):
 
                     self.hover_widget.visible = True
                     self._update_hover_widget(
-                        hover_info[point_ix],
+                        self.hover_info[point_ix],  # read live value, not captured local
                         (event.x, event.y),
                         self.world_to_screen(coords[closest]),
                     )
@@ -1636,6 +1642,33 @@ class ScatterFigure(BaseFigure):
         self.viewer_sync_enabled = enabled
         if self.viewer_sync_enabled and sync_now:
             self._sync_selection_to_viewer()
+
+    @property
+    def hover_col_names(self):
+        """List of metadata column names currently shown in hover tooltips."""
+        if self._hover_col_names_active is not None:
+            return list(self._hover_col_names_active)
+        return list(getattr(self, "_hover_col_names_all", []))
+
+    @hover_col_names.setter
+    def hover_col_names(self, col_names):
+        """Set which metadata columns are shown in hover tooltips."""
+        all_cols = getattr(self, "_hover_col_names_all", [])
+        # Validate and filter to known columns, preserving original order
+        valid = [c for c in all_cols if c in col_names]
+        self._hover_col_names_active = valid if valid != all_cols else None
+        self._recompute_hover_info()
+
+    def _recompute_hover_info(self):
+        """Rebuild self.hover_info from the currently active hover columns."""
+        if self.metadata is None:
+            return
+        col_names = self.hover_col_names
+        if not col_names:
+            self.hover_info = np.array([""] * len(self.metadata))
+            return
+        fmt = "\n".join(f"{c}: {{{c}}}" for c in col_names)
+        self.hover_info = np.asarray(self.metadata.apply(fmt.format_map, axis=1))
 
     def _sync_selection_to_viewer(self):
         """Push the current scatter selection to the synced viewer."""

@@ -14,6 +14,7 @@ from pathlib import Path
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
+    QMenu,
     QWidget,
     QScrollArea,
     QVBoxLayout,
@@ -29,9 +30,10 @@ from PySide6.QtWidgets import (
     QProgressDialog,
     QWidgetAction,
     QFileDialog,
+    QCheckBox,
 )
-from PySide6.QtGui import QIcon, QAction, QKeySequence
-from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal
+from PySide6.QtGui import QIcon, QAction, QKeySequence, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush
+from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
@@ -675,6 +677,111 @@ class MainWidget(QWidget):
                 window.resize(orig_size)
 
 
+class _KeyBadge(QLabel):
+    """A keyboard key-cap badge."""
+
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setStyleSheet(
+            "QLabel {"
+            "  background-color: #f0f0f0;"
+            "  color: #111111;"
+            "  border: 1px solid #b0b0b0;"
+            "  border-bottom: 2px solid #888;"
+            "  border-radius: 3px;"
+            "  padding: 1px 5px;"
+            "  font-size: 11px;"
+            "}"
+        )
+        self.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+
+
+class _MouseGlyph(QWidget):
+    """Tiny painted mouse icon with one button zone highlighted."""
+
+    def __init__(self, area="left", hold=False, double=False, parent=None):
+        super().__init__(parent)
+        self._area = area      # "left", "right", "middle", "scroll"
+        self._hold = hold
+        self._double = double
+        self.setFixedSize(20, 32)
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+
+    def paintEvent(self, event):
+        p = QPainter(self)
+        p.setRenderHint(QPainter.Antialiasing)
+
+        W = float(self.width())
+        H_body = 24.0
+        r = 5.0
+        btn_h = H_body * 0.44
+
+        body_fill = QColor("#f0f0f0")
+        body_line = QColor("#888")
+        hi_fill = QColor("#b8d4f0")
+        hi_line = QColor("#5b9bd5")
+
+        body = QRectF(0.5, 0.5, W - 1, H_body - 1)
+        clip_path = QPainterPath()
+        clip_path.addRoundedRect(body, r, r)
+
+        # Body fill
+        p.setPen(QPen(body_line, 1))
+        p.setBrush(QBrush(body_fill))
+        p.drawPath(clip_path)
+
+        # Three button zones: left | scroll-wheel | right
+        zone_w = (W - 1) / 3.0
+        zone_rects = {
+            "left":   QRectF(0.5,               0.5, zone_w, btn_h),
+            "middle": QRectF(0.5 + zone_w,      0.5, zone_w, btn_h),
+            "scroll": QRectF(0.5 + zone_w,      0.5, zone_w, btn_h),
+            "right":  QRectF(0.5 + 2 * zone_w,  0.5, zone_w, btn_h),
+        }
+
+        # Highlight active zone, clipped to rounded body
+        if self._area in zone_rects:
+            p.save()
+            p.setClipPath(clip_path)
+            p.setPen(Qt.NoPen)
+            p.setBrush(QBrush(hi_fill))
+            p.drawRect(zone_rects[self._area])
+            p.restore()
+
+        # Redraw body outline
+        p.setPen(QPen(body_line, 1))
+        p.setBrush(Qt.NoBrush)
+        p.drawPath(clip_path)
+
+        # Zone dividers (two vertical lines in button area)
+        p.setPen(QPen(QColor("#c0c0c0"), 0.8))
+        for i in (1, 2):
+            x = 0.5 + i * zone_w
+            p.drawLine(QPointF(x, 0.5), QPointF(x, btn_h))
+
+        # Horizontal separator below button area
+        p.drawLine(QPointF(0.5, btn_h), QPointF(W - 0.5, btn_h))
+
+        # Scroll wheel indicator in middle zone (when not highlighted)
+        if self._area not in ("middle", "scroll"):
+            sw = QRectF(0.5 + zone_w + 1.5, 2.0, zone_w - 3.0, btn_h - 3.5)
+            p.setPen(QPen(QColor("#aaa"), 0.8))
+            p.setBrush(QBrush(QColor("#d0d0d0")))
+            p.drawRoundedRect(sw, 2, 2)
+
+        # Annotation text below body (for hold / double-click variants)
+        if self._double or self._hold:
+            text = "2×" if self._double else "hold"
+            color = hi_line if self._double else QColor("#777")
+            f = p.font()
+            f.setPixelSize(7)
+            p.setFont(f)
+            p.setPen(QPen(color, 1))
+            p.drawText(QRectF(0, H_body + 0.5, W, 8), Qt.AlignCenter, text)
+
+        p.end()
+
+
 class AnnotationLogDialog(QDialog):
     """Dialog that shows the current window's annotation log."""
 
@@ -786,6 +893,7 @@ class MainWindow(QMainWindow):
         self.distances_table_action = None
         self.feature_explorer_action = None
         self.sync_viewer_action = None
+        self._hover_columns_menu = None
         self._current_project_loader = None
         self._connectivity_widget = None
         self._connectivity_widget_synced = False
@@ -947,6 +1055,11 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(self.show_hoverinfo_action)
 
+        self._hover_columns_menu = QMenu("Hover Columns", self)
+        view_menu.addMenu(self._hover_columns_menu)
+        self._hover_columns_menu.aboutToShow.connect(self._refresh_hover_columns_menu)
+        self._hover_columns_menu.aboutToHide.connect(self._on_hover_columns_menu_hidden)
+
         # The view menu automatically contains an item to toggle fullscreen mode
         # This separator keeps it visually separate from the custom view actions we added above.
         view_menu.addSeparator()
@@ -957,6 +1070,10 @@ class MainWindow(QMainWindow):
         select_all_action = QAction("Select All", self)
         select_all_action.triggered.connect(self.on_select_all)
         selection_menu.addAction(select_all_action)
+
+        invert_selection_action = QAction("Invert Selection", self)
+        invert_selection_action.triggered.connect(self.on_invert_selection)
+        selection_menu.addAction(invert_selection_action)
 
         deselect_all_action = QAction("Deselect All", self)
         deselect_all_action.triggered.connect(self.on_deselect_all)
@@ -1073,6 +1190,131 @@ class MainWindow(QMainWindow):
 
         about_action.triggered.connect(show_about_dialog)
         help_menu.addAction(about_action)
+
+        help_menu.addSeparator()
+
+        github_repo_action = QAction("GitHub Repository", self)
+        github_repo_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/flyconnectome/bigclust2"))
+        )
+        help_menu.addAction(github_repo_action)
+
+        report_problem_action = QAction("Report a Problem", self)
+        report_problem_action.triggered.connect(
+            lambda: QDesktopServices.openUrl(QUrl("https://github.com/flyconnectome/bigclust2/issues"))
+        )
+        help_menu.addAction(report_problem_action)
+
+        help_menu.addSeparator()
+
+        keyboard_shortcuts_action = QAction("Keyboard Shortcuts", self)
+        keyboard_shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
+        help_menu.addAction(keyboard_shortcuts_action)
+
+    def show_keyboard_shortcuts(self):
+        """Show a dialog listing all keyboard shortcuts."""
+
+        def _make_combo(keys):
+            w = QWidget()
+            lay = QHBoxLayout(w)
+            lay.setContentsMargins(0, 0, 0, 0)
+            lay.setSpacing(3)
+            first = True
+            for key in keys:
+                if key == "/":
+                    sep = QLabel("/")
+                    sep.setStyleSheet("color: #999; font-size: 11px;")
+                    lay.addWidget(sep)
+                    first = True
+                    continue
+                if not first:
+                    plus = QLabel("+")
+                    plus.setStyleSheet("color: #666; font-size: 11px; padding: 0 1px;")
+                    lay.addWidget(plus)
+                first = False
+                if key.startswith("mouse:"):
+                    spec = key[6:]
+                    double = spec.startswith("double-")
+                    hold = spec.endswith("-hold")
+                    area = spec.replace("double-", "").replace("-hold", "")
+                    lay.addWidget(_MouseGlyph(area=area, hold=hold, double=double))
+                else:
+                    lay.addWidget(_KeyBadge(key))
+            lay.addStretch()
+            w.setFixedWidth(200)
+            return w
+
+        def _add_section(layout, title):
+            lbl = QLabel(f"<b>{title}</b>")
+            lbl.setContentsMargins(4, 8, 4, 2)
+            layout.addWidget(lbl)
+            line = QFrame()
+            line.setFrameShape(QFrame.HLine)
+            line.setStyleSheet("color: #ddd;")
+            layout.addWidget(line)
+
+        def _add_row(layout, keys, description):
+            row = QWidget()
+            rl = QHBoxLayout(row)
+            rl.setContentsMargins(4, 2, 4, 2)
+            rl.setSpacing(12)
+            rl.setAlignment(Qt.AlignVCenter)
+            combo = _make_combo(keys)
+            rl.addWidget(combo)
+            desc = QLabel(description)
+            desc.setStyleSheet("font-size: 12px;")
+            rl.addWidget(desc, 1)
+            layout.addWidget(row)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Keyboard Shortcuts")
+        dialog.setModal(False)
+        dialog.resize(520, 560)
+
+        dlg_layout = QVBoxLayout(dialog)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
+        content = QWidget()
+        cl = QVBoxLayout(content)
+        cl.setSpacing(1)
+        cl.setContentsMargins(8, 8, 8, 8)
+
+        _add_section(cl, "Scatterplot")
+        _add_row(cl, ["mouse:left"], "Move the view")
+        _add_row(cl, ["⇧", "mouse:left"], "Draw a selection box")
+        _add_row(cl, ["⇧", "mouse:left", "⌘"], "Add box selection to current selection")
+        _add_row(cl, ["⇧", "⌃", "mouse:left"], "Draw a lasso selection")
+        _add_row(cl, ["⇧", "⌃", "mouse:left", "⌘"], "Add lasso selection to current selection")
+        _add_row(cl, ["Esc"], "Deselect all points")
+        _add_row(cl, ["C"], "Toggle the control panel")
+        _add_row(cl, ["L"], "Toggle labels")
+        _add_row(cl, ["←", "/", "→"], "Increase / decrease label font size")
+        _add_row(cl, ["↑", "/", "↓"], "Increase / decrease marker size")
+        _add_row(cl, ["mouse:double-left"], "Highlight points with the same label")
+        _add_row(cl, ["⇧", "mouse:double-left"], "Select points with the same label")
+        _add_row(cl, ["⌘", "⇧", "mouse:double-left"], "Add same-label points to selection")
+
+        _add_section(cl, "3D Viewer")
+        _add_row(cl, ["mouse:left-hold"], "Rotate the view")
+        _add_row(cl, ["mouse:middle-hold"], "Pan")
+        _add_row(cl, ["mouse:scroll"], "Zoom in and out")
+        _add_row(cl, ["C"], "Toggle the legend")
+        _add_row(cl, ["1"], "Align view: front")
+        _add_row(cl, ["2"], "Align view: side")
+        _add_row(cl, ["3"], "Align view: top")
+
+        cl.addStretch()
+        scroll.setWidget(content)
+        dlg_layout.addWidget(scroll)
+
+        ok_btn = QPushButton("OK")
+        ok_btn.clicked.connect(dialog.accept)
+        dlg_layout.addWidget(ok_btn, alignment=Qt.AlignCenter)
+
+        dialog.exec()
 
     def open_new_window(self):
         """Open a second top-level BigClust window."""
@@ -1740,6 +1982,101 @@ class MainWindow(QMainWindow):
             pass
         super().closeEvent(event)
 
+    def _refresh_hover_columns_menu(self):
+        """Rebuild the Hover Columns submenu with checkable column items."""
+        if self._hover_columns_menu is None:
+            return
+
+        self._hover_columns_menu.clear()
+
+        try:
+            fig = self.centralWidget().fig_scatter
+        except Exception:
+            fig = None
+
+        all_cols = getattr(fig, "_hover_col_names_all", None) if fig else None
+        if not all_cols:
+            no_data = QAction("No data loaded", self)
+            no_data.setEnabled(False)
+            self._hover_columns_menu.addAction(no_data)
+            return
+
+        active = set(fig.hover_col_names)
+
+        for col in all_cols:
+            checkbox = QCheckBox(col)
+            checkbox.setChecked(col in active)
+            checkbox.toggled.connect(
+                lambda checked, c=col: self._on_hover_column_toggled(c, checked)
+            )
+            action = QWidgetAction(self._hover_columns_menu)
+            action.setDefaultWidget(checkbox)
+            self._hover_columns_menu.addAction(action)
+
+        self._hover_columns_menu.addSeparator()
+
+        show_all = QAction("Show All", self)
+        show_all.triggered.connect(self._on_hover_show_all)
+        self._hover_columns_menu.addAction(show_all)
+
+        hide_all = QAction("Hide All", self)
+        hide_all.triggered.connect(self._on_hover_hide_all)
+        self._hover_columns_menu.addAction(hide_all)
+
+    def _on_hover_column_toggled(self, col_name, checked):
+        """Update hover column state and recompute hover_info immediately."""
+        try:
+            fig = self.centralWidget().fig_scatter
+        except Exception:
+            return
+
+        all_cols = getattr(fig, "_hover_col_names_all", [])
+        if not all_cols:
+            return
+
+        active = set(fig.hover_col_names)
+        if checked:
+            active.add(col_name)
+        else:
+            active.discard(col_name)
+
+        valid = [c for c in all_cols if c in active]
+        fig._hover_col_names_active = valid if valid != all_cols else None
+
+    def _on_hover_show_all(self):
+        """Show all metadata columns in the hover tooltip."""
+        try:
+            fig = self.centralWidget().fig_scatter
+            if getattr(fig, "_hover_col_names_all", None):
+                fig._hover_col_names_active = None  # None = all columns
+        except Exception as e:
+            logger.debug(f"Hover show all failed: {e}")
+
+    def _on_hover_hide_all(self):
+        """Hide all metadata columns from the hover tooltip."""
+        try:
+            fig = self.centralWidget().fig_scatter
+            if getattr(fig, "_hover_col_names_all", None):
+                fig._hover_col_names_active = []
+        except Exception as e:
+            logger.debug(f"Hover hide all failed: {e}")
+
+    def _on_hover_columns_menu_hidden(self):
+        """Recompute hover_info once after the Hover Columns menu closes."""
+        try:
+            fig = self.centralWidget().fig_scatter
+            if getattr(fig, "metadata", None) is not None:
+                # self.statusBar().showMessage("Computing hover labels…")
+                QApplication.setOverrideCursor(Qt.WaitCursor)
+                QApplication.processEvents()
+                try:
+                    fig._recompute_hover_info()
+                finally:
+                    QApplication.restoreOverrideCursor()
+                    # self.statusBar().clearMessage()
+        except Exception as e:
+            logger.debug(f"Hover recompute on menu close failed: {e}")
+
     def on_select_all(self):
         fig = self.centralWidget().fig_scatter
         fig.selected = np.arange(len(getattr(fig, "ids", [])))
@@ -1755,6 +2092,16 @@ class MainWindow(QMainWindow):
                 logger.info("Deselect All not supported by current figure")
         except Exception as e:
             logger.debug(f"Deselect All failed: {e}")
+
+    def on_invert_selection(self):
+        try:
+            fig = self.centralWidget().fig_scatter
+            all_indices = np.arange(len(getattr(fig, "ids", [])))
+            current = fig.selected
+            current_set = set(np.asarray(current, dtype=int).tolist()) if current is not None and len(current) > 0 else set()
+            fig.selected = np.array([i for i in all_indices if i not in current_set], dtype=int)
+        except Exception as e:
+            logger.debug(f"Invert Selection failed: {e}")
 
     def on_open_in_neuroglancer(self):
         """Generate a Neuroglancer scene from current viewer state."""
@@ -2161,6 +2508,7 @@ class MainWindow(QMainWindow):
             )
             # We have to update bits and pieces on the controls panels based on the new data
             self.centralWidget().scatter_controls.update_controls()
+            self._refresh_hover_columns_menu()
 
             # Set up the 3D viewer
             if "neuroglancer" in project.info:

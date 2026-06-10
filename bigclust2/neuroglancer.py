@@ -14,7 +14,7 @@ import nglscenes as ngl
 import cloudvolume as cv
 
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, CancelledError
 
 from .utils import is_url
 
@@ -289,7 +289,7 @@ class NglViewer:
                 future.cancel()
 
                 # Remove from futures
-                self.futures.pop(id, None)
+                self.futures.pop((id, _), None)
 
         # Now drop those already on display
         to_show = to_show[~to_show.index.isin(self._segments)]
@@ -627,9 +627,11 @@ class NglViewer:
         has_futures = len(self.futures) > 0
 
         for ((id, dataset), name), future in self.futures.items():
-            if not future.done():
+            if not future.done() or future.cancelled():
                 continue
+
             visual = future.result()
+
             self.pool._task_counter += 1  # Increment the number of tasks processed
 
             # If there is no mesh, skip
@@ -667,7 +669,7 @@ class NglViewer:
             )
 
         # Remove completed futures
-        self.futures = {k: v for k, v in self.futures.items() if not v.done()}
+        self.futures = {k: v for k, v in self.futures.items() if not v.done() and not v.cancelled()}
 
         # If all futures completed
         if has_futures and len(self.futures) == 0:

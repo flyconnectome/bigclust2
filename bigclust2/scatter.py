@@ -671,7 +671,7 @@ class ScatterFigure(BaseFigure):
                 mask=np.isin(np.arange(len(self)), points)
             )
             for vis in self.highlight_visuals:
-                vis.material.edge_color = "yellow"
+                vis.material.edge_color = color
                 vis.material.edge_width = 2
                 vis.material.color = (1, 1, 1, 0)
                 self.scatter_group.add(vis)

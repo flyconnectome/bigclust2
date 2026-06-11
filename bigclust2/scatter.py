@@ -273,7 +273,7 @@ class ScatterFigure(BaseFigure):
     @property
     def point_scale(self):
         """Uniform scale factor for points."""
-        return self._point_scale
+        return getattr(self, "_point_scale", 1.0)
 
     @point_scale.setter
     @update_figure

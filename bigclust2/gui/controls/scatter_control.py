@@ -32,6 +32,7 @@ CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
 CLUSTER_DATA_OPTION = "cluster (bigclust)"
 CLUSTER_DATA_COLUMN = "bigclust_cluster"
 EVALUATE_DATA_COLUMN = "bigclust_label_evaluation"
+FIDELITY_DATA_COLUMN = "bigclust_fidelity"
 CLUSTER_HOMOGENEOUS_LABEL_CURRENT = "Current labels"
 
 
@@ -40,6 +41,39 @@ _DIVERGING_PALETTES = frozenset({
     "colorbrewer:RdBu_r",
     "matplotlib:seismic",
 })
+
+
+def _normalize_sizes(values, smin=0.1, smax=1.0, vmin=None, vcenter=None, vmax=None):
+    """Map numeric values to point sizes in [smin, smax].
+
+    Values are mapped piecewise-linearly (with clipping) such that `vmin`
+    -> smin, `vcenter` -> (smin + smax) / 2 and `vmax` -> smax; these
+    default to the data minimum, midpoint and maximum, respectively.
+    NaNs map to `smin`; constant or all-NaN input maps to uniform 1.0
+    (the default point size).
+    """
+    values = np.asarray(values, dtype=float)
+    finite = np.isfinite(values)
+
+    if not finite.any():
+        return np.ones(len(values), dtype=np.float32)
+
+    if vmin is None:
+        vmin = values[finite].min()
+    if vmax is None:
+        vmax = values[finite].max()
+    if vcenter is None:
+        vcenter = (vmin + vmax) / 2
+    vcenter = min(max(vcenter, vmin), vmax)
+
+    if vmax == vmin:
+        return np.ones(len(values), dtype=np.float32)
+
+    sizes = np.full(len(values), smin, dtype=np.float32)
+    sizes[finite] = np.interp(
+        values[finite], [vmin, vcenter, vmax], [smin, (smin + smax) / 2, smax]
+    )
+    return sizes
 
 
 def _make_palette_pixmap(palette_name, width=100, height=14):
@@ -772,6 +806,42 @@ class ScatterControls(QtWidgets.QWidget):
         )
 
         ########
+        # Point sizes
+        ########
+
+        size_group = QtWidgets.QGroupBox("Point Size")
+        size_form = QtWidgets.QFormLayout()
+        size_form.setContentsMargins(2, 2, 2, 2)
+        size_form.setVerticalSpacing(2)
+        size_group.setLayout(size_form)
+        self.tab1_layout.addWidget(size_group)
+
+        # Add dropdown to choose which column to scale point sizes by
+        self.size_combo_box = _FilterableComboBox()
+        size_form.addRow("Size by:", self.size_combo_box)
+        self.size_combo_box.setToolTip(
+            "Scale point sizes by a numeric metadata column. Values are min-max "
+            "normalized; combine with the point scale setting in the Settings tab."
+        )
+
+        # Range slider — visible only when sizing by a column.
+        # Min/max handles set the values mapped to the smallest/largest point
+        # size; the centre handle sets the value mapped to the middle size.
+        self.size_range_slider = _MultiHandleSlider()
+        self.size_range_slider.setVisible(False)
+        self.size_range_slider.set_diverging(True)  # always show the centre handle
+        self.size_range_slider.setToolTip(
+            "Drag the handles to set the size-scale range.\n"
+            "Values at/below the min handle get the smallest size, values "
+            "at/above the max handle the largest; the centre handle sets "
+            "the value mapped to the middle size."
+        )
+        size_form.addRow(self.size_range_slider)
+
+        self.size_range_slider.valuesChanged.connect(lambda *_: self.set_sizes())
+        self.size_combo_box.currentIndexChanged.connect(self._on_size_column_changed)
+
+        ########
         # Selection behavior
         ########
 
@@ -1308,17 +1378,10 @@ class ScatterControls(QtWidgets.QWidget):
             settings_group,
             "Neighborhood fidelity measures how well local relationships are "
             "preserved by the 2D embedding. Higher values mean nearby neurons "
-            "in the original space remain nearby in the plot.",
+            "in the original space remain nearby in the plot. Computed scores "
+            f"are stored as metadata column '{FIDELITY_DATA_COLUMN}'.",
             anchor="group_label",
         )
-
-        self.fidelity_point_size_check = QtWidgets.QCheckBox()
-        self.fidelity_point_size_check.setToolTip(
-            "Show neighborhood fidelity scores as point sizes."
-        )
-        self.fidelity_point_size_check.setChecked(False)
-        self.fidelity_point_size_check.stateChanged.connect(self.set_fidelity_mode)
-        settings_form.addRow("Show:", self.fidelity_point_size_check)
 
         self.fidelity_k_slider = QtWidgets.QSpinBox()
         self.fidelity_k_slider.setRange(1, 200)
@@ -1327,7 +1390,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.fidelity_k_slider.setToolTip(
             "Number of nearest neighbors (k) used to compute neighborhood fidelity."
         )
-        self.fidelity_k_slider.valueChanged.connect(self.set_fidelity_mode)
         settings_form.addRow("k neighbors:", self.fidelity_k_slider)
 
         self.fidelity_distance_combo_box = QtWidgets.QComboBox()
@@ -1337,9 +1399,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.fidelity_distance_combo_box.addItems(
             ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
         )
-        self.fidelity_distance_combo_box.currentIndexChanged.connect(
-            self.set_fidelity_mode
-        )
         settings_form.addRow("Distance:", self.fidelity_distance_combo_box)
 
         self.fidelity_use_rank_check = QtWidgets.QCheckBox("Use rank")
@@ -1347,8 +1406,16 @@ class ScatterControls(QtWidgets.QWidget):
             "Use rank-based neighborhood overlap instead of distance-weighted overlap."
         )
         self.fidelity_use_rank_check.setChecked(True)
-        self.fidelity_use_rank_check.stateChanged.connect(self.set_fidelity_mode)
         settings_form.addRow(self.fidelity_use_rank_check)
+
+        self.fidelity_compute_button = QtWidgets.QPushButton("Compute")
+        self.fidelity_compute_button.setToolTip(
+            "Compute per-point neighborhood fidelity with the current settings "
+            f"and store it as metadata column '{FIDELITY_DATA_COLUMN}'. Point "
+            "sizes will be scaled by the result (see 'Size by' on the General tab)."
+        )
+        self.fidelity_compute_button.clicked.connect(self._on_fidelity_compute)
+        settings_form.addRow(self.fidelity_compute_button)
 
         # KNN lines
         settings_group = QtWidgets.QGroupBox("K-Nearest Neighbors")
@@ -2911,7 +2978,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.set_selection_restrict()
 
     def update_label_combo_boxes(self):
-        """Update the items in the label and color by combo boxes."""
+        """Update the items in the label, color by and size by combo boxes."""
         # First, collect the items we want to have:
         items = {"Default"}
         if self.figure.metadata is not None:
@@ -2938,6 +3005,27 @@ class ScatterControls(QtWidgets.QWidget):
             for item in sorted(items):
                 if combo_box.findText(item) < 0:
                     combo_box.addItem(item)
+
+        # The size combo box only offers numeric columns
+        size_items = {"Default"}
+        if self.figure.metadata is not None:
+            size_items.update(
+                col
+                for col in self.figure.metadata.columns
+                if not col.startswith("_")
+                and self.figure.metadata[col].dtype.kind in "iuf"
+            )
+
+        for i in reversed(range(self.size_combo_box.count())):
+            text = self.size_combo_box.itemText(i)
+            if text == "Default":
+                continue
+            if text not in size_items:
+                self.size_combo_box.removeItem(i)
+
+        for item in sorted(size_items):
+            if self.size_combo_box.findText(item) < 0:
+                self.size_combo_box.addItem(item)
 
     def update_distance_edges_controls(self):
         """Update the distance edges controls."""
@@ -3362,21 +3450,116 @@ class ScatterControls(QtWidgets.QWidget):
 
         self.figure.set_colors(colors, sync_to_viewer=sync_to_viewer)
 
+    def _on_size_column_changed(self):
+        """Handle size-by column change: reset range controls then apply sizes."""
+        size_col = self.size_combo_box.currentText()
+        has_range = False
+        if (
+            size_col
+            and size_col != "Default"
+            and self.meta_data is not None
+            and size_col in self.meta_data.columns
+        ):
+            data = np.asarray(self.meta_data[size_col].values, dtype=float)
+            data = data[np.isfinite(data)]
+            has_range = data.size > 0 and data.min() != data.max()
+            if has_range:
+                lo = float(data.min())
+                hi = float(data.max())
+                mid = (lo + hi) / 2.0
+                self.size_range_slider.blockSignals(True)
+                self.size_range_slider.set_data_range(lo, hi)
+                self.size_range_slider.set_values(lo, mid, hi)
+                self.size_range_slider.blockSignals(False)
+
+        self.size_range_slider.setVisible(has_range)
+
+        self.set_sizes()
+
+    def set_sizes(self):
+        """Apply the 'Size by' selection as per-point sizes."""
+        size_col = self.size_combo_box.currentText()
+
+        if not size_col:
+            return
+
+        if (
+            size_col == "Default"
+            or self.meta_data is None
+            or size_col not in self.meta_data.columns
+        ):
+            self.figure.point_size = 1
+            return
+
+        kwargs = {}
+        if self.size_range_slider.isVisible():
+            kwargs = {
+                "vmin": self.size_range_slider.vmin,
+                "vcenter": self.size_range_slider.vcenter,
+                "vmax": self.size_range_slider.vmax,
+            }
+
+        self.figure.point_size = _normalize_sizes(
+            self.meta_data[size_col].values, **kwargs
+        )
+
     def set_label_outlines(self):
         """Draw polygons around neurons with the same label."""
         self.figure.show_label_lines = self.label_outlines_check.isChecked()
 
-    def set_fidelity_mode(self):
-        """Set the fidelity mode."""
-        if not self.fidelity_point_size_check.isChecked():
-            self.figure.fidelity_mode = False
+    def _compute_fidelity_column(self, positions=None):
+        """Compute neighborhood fidelity and write it to metadata.
+
+        Returns True on success, False otherwise.
+        """
+        if self.figure.metadata is None:
+            self.figure.show_message(
+                "Metadata is required to store fidelity scores.",
+                color="red",
+                duration=3,
+            )
+            return False
+
+        try:
+            scores = self.figure.calculate_embedding_fidelity(
+                k=self.fidelity_k_slider.value(),
+                metric=self.fidelity_distance_combo_box.currentText(),
+                rank=self.fidelity_use_rank_check.isChecked(),
+                positions=positions,
+            )
+        except Exception as e:
+            logger.error(f"Fidelity computation failed: {e}")
+            self.figure.show_message(
+                f"Fidelity computation failed: {e}", color="red", duration=4
+            )
+            return False
+
+        self.figure.metadata[FIDELITY_DATA_COLUMN] = np.asarray(scores, dtype=float)
+
+        self.label_combo_box.blockSignals(True)
+        self.update_label_combo_boxes()  # this updates label, color and size combo boxes
+        self.label_combo_box.blockSignals(False)
+
+        return True
+
+    def _on_fidelity_compute(self):
+        """Handle the fidelity 'Compute' button."""
+        if not self._compute_fidelity_column():
+            return
+
+        if self.size_combo_box.currentText() != FIDELITY_DATA_COLUMN:
+            self.size_combo_box.setCurrentText(
+                FIDELITY_DATA_COLUMN
+            )  # this triggers _on_size_column_changed
         else:
-            self.figure.fidelity_mode = {
-                "mode": "point_size",
-                "k": self.fidelity_k_slider.value(),
-                "distance": self.fidelity_distance_combo_box.currentText(),
-                "rank": self.fidelity_use_rank_check.isChecked(),
-            }
+            # Force refresh (incl. the slider range) when re-computing the same column
+            self._on_size_column_changed()
+
+        self.figure.show_message(
+            f"Added fidelity column '{FIDELITY_DATA_COLUMN}' to metadata.",
+            color="lightgreen",
+            duration=3,
+        )
 
     def set_knn_edges(self):
         """Set the KNN line mode."""
@@ -3749,6 +3932,12 @@ class ScatterControls(QtWidgets.QWidget):
 
         # This moves points to their new positions
         self.figure.move_points(xy)
+
+        # If point sizes are currently driven by the fidelity column, recompute it
+        # against the new (post-animation) positions and refresh sizes.
+        if self.size_combo_box.currentText() == FIDELITY_DATA_COLUMN:
+            if self._compute_fidelity_column(positions=xy):
+                self._on_size_column_changed()
 
     def update_embedding_settings(self):
         """Update the embedding settings based on the selected method."""

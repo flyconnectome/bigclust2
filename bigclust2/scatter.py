@@ -562,46 +562,6 @@ class ScatterFigure(BaseFigure):
         self._show_knn_edges = x
 
     @property
-    def fidelity_mode(self):
-        """Show or hide the neighborhood fidelity."""
-        if not hasattr(self, "_fidelity_mode"):
-            return False
-        return self._fidelity_mode
-
-    @fidelity_mode.setter
-    @update_figure
-    def fidelity_mode(self, x):
-        # No need to change anything
-        if x == self.fidelity_mode:
-            return
-
-        if not x:
-            self._fidelity_mode = False
-            self.point_size = 1  # reset to default point size
-            return
-
-        if not isinstance(x, dict):
-            x = {"mode": x}
-
-        # If dictionary, parse parameters
-        mode = x.get("mode", "point_size")
-        rank = x.get("rank", False)
-        distance = x.get("distance", "euclidean")
-        k = x.get("k", 15)
-
-        assert mode in ("point_size",), f"Unsupported fidelity mode: {mode}"
-
-        # Calculate fidelity scores
-        self.point_size = self.calculate_embedding_fidelity(
-            k=k, rank=rank, metric=distance
-        )
-
-        # Make sure no point vanishes entirely
-        if np.any(self.point_size == 0):
-            self.point_size += 1e-2
-
-        self._fidelity_mode = x
-
     def debug(self):
         """Activate/Deactive debug mode for the Scatter figure."""
         return getattr(self, "_debug", False)
@@ -1938,10 +1898,6 @@ class ScatterFigure(BaseFigure):
                 self.make_label_lines()
             if self.show_distance_edges:
                 self.make_distance_edges()
-            if self.fidelity_mode:
-                fid_mode = self.fidelity_mode
-                self.fidelity_mode = None
-                self.fidelity_mode = fid_mode
             if self.show_knn_edges:
                 knn_mode = self.show_knn_edges
                 self.show_knn_edges = False
@@ -2013,8 +1969,16 @@ class ScatterFigure(BaseFigure):
             if self.label_visuals is not None and self.label_visuals[ix] is not None:
                 self.label_visuals[ix].material.color = color
 
-    def calculate_embedding_fidelity(self, k=10, metric="auto", rank=True):
-        """Calculate the neighborhood fidelity of the embedding."""
+    def calculate_embedding_fidelity(self, k=10, metric="auto", rank=True, positions=None):
+        """Calculate the neighborhood fidelity of the embedding.
+
+        Parameters
+        ----------
+        positions : (N, 2) array, optional
+                    Embedding positions to evaluate. Defaults to the current
+                    point positions; pass e.g. the target positions of an
+                    ongoing move animation to evaluate those instead.
+        """
         if not hasattr(self, "dists") or self.dists is None:
             raise ValueError(
                 "No distance matrix or features provided. Cannot calculate embedding fidelity."
@@ -2028,7 +1992,7 @@ class ScatterFigure(BaseFigure):
             )
 
         if metric == "auto":
-            metric = "procomputed" if has_dist else "euclidean"
+            metric = "precomputed" if has_dist else "euclidean"
 
         if metric == "precomputed" and not has_dist:
             raise ValueError("Precomputed metric requires a distance matrix.")
@@ -2044,7 +2008,7 @@ class ScatterFigure(BaseFigure):
             features = self.dists["features"]
 
         return neighborhood_fidelity(
-            embedding=self.positions,
+            embedding=positions if positions is not None else self.positions,
             distances=dists,
             features=features,
             k=k,

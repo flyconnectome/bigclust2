@@ -78,9 +78,11 @@ def resize_figures(func):
 class MainWidget(QWidget):
     """Main widget for the application."""
 
-    def __init__(self):
+    def __init__(self, status_bar, selection_counter):
         super().__init__()
         self._teardown_done = False
+        self._status_bar = status_bar
+        self._selection_counter = selection_counter
         self.init_ui()
 
     def teardown_rendering(self):
@@ -117,9 +119,9 @@ class MainWidget(QWidget):
 
         # Create top and bottom widgets
         self.top_widget = QWidget()
-        self.setup_top_widget(self.top_widget)
+        self.setup_top_widget()
         self.bottom_widget = QWidget()
-        self.setup_bottom_widget(self.bottom_widget)
+        self.setup_bottom_widget()
 
         # Add widgets to splitter
         self.splitter.addWidget(self.top_widget)
@@ -260,10 +262,10 @@ class MainWidget(QWidget):
         self.fig_scatter.force_single_render()
         self.ngl_viewer.force_single_render()
 
-    def setup_top_widget(self, top_widget):
+    def setup_top_widget(self):
         """Set up the top widget with overlay buttons and a left-positioned button."""
         # Initialize and connect the figure to the top widgets
-        self.fig_scatter = ScatterFigure(parent=top_widget)
+        self.fig_scatter = ScatterFigure(selection_counter=self._selection_counter, parent=self.top_widget)
         self.fig_scatter.show()
 
         # Create main layout for top widget
@@ -326,16 +328,16 @@ class MainWidget(QWidget):
         splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
 
         main_layout.addWidget(splitter)
-        top_widget.setLayout(main_layout)
-        top_widget.splitter = splitter
-        top_widget.sidebar = sidebar
-        top_widget.content = content
-        top_widget._initial_sidebar_width_applied = False
+        self.top_widget.setLayout(main_layout)
+        self.top_widget.splitter = splitter
+        self.top_widget.sidebar = sidebar
+        self.top_widget.content = content
+        self.top_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
         left_button.setFixedSize(40, 40)
-        left_button.setParent(top_widget)
+        left_button.setParent(self.top_widget)
         left_button.setFlat(True)
         left_button.setAutoFillBackground(True)
         left_button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -379,7 +381,7 @@ class MainWidget(QWidget):
             button.setFixedSize(button_size, button_size)
             button.setIcon(QIcon(str(icon_path)))
             button.setIconSize(QSize(button_size - 12, button_size - 12))
-            button.setParent(top_widget)
+            button.setParent(self.top_widget)
             button.setFlat(True)
             button.setAutoFillBackground(False)
             button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -396,7 +398,7 @@ class MainWidget(QWidget):
         # Position buttons in the top right corner
         for i, button in enumerate(buttons):
             x = (
-                top_widget.width()
+                self.top_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
@@ -404,47 +406,47 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         # Initial position of left button
-        self.update_left_button_position(top_widget)
+        self.update_left_button_position(self.top_widget)
 
         # Store reference to adjust position on resize
-        top_widget.left_button = left_button
-        top_widget.sidebar = sidebar
-        top_widget.buttons = buttons
-        top_widget.button_size = button_size
-        top_widget.button_spacing = button_spacing
+        self.top_widget.left_button = left_button
+        self.top_widget.sidebar = sidebar
+        self.top_widget.buttons = buttons
+        self.top_widget.button_size = button_size
+        self.top_widget.button_spacing = button_spacing
 
         # Override resizeEvent to reposition buttons
-        original_resize = top_widget.resizeEvent
+        original_resize = self.top_widget.resizeEvent
 
         def on_resize(event):
             original_resize(event)
-            if not top_widget._initial_sidebar_width_applied:
+            if not self.top_widget._initial_sidebar_width_applied:
                 self._set_sidebar_width(splitter, 300)
-                top_widget._initial_sidebar_width_applied = True
+                self.top_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
-                    top_widget.width()
+                    self.top_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
                 y = button_spacing
                 button.move(x, y)
             # Reposition left button
-            self.update_left_button_position(top_widget)
+            self.update_left_button_position(self.top_widget)
             # Resize figure if necessary
             self.resize_figures()
 
-        top_widget.resizeEvent = on_resize
+        self.top_widget.resizeEvent = on_resize
 
         # Update button position when splitter is moved
         splitter.splitterMoved.connect(
-            lambda: self.update_left_button_position(top_widget)
+            lambda: self.update_left_button_position(self.top_widget)
         )
 
-    def setup_bottom_widget(self, bottom_widget):
+    def setup_bottom_widget(self):
         """Set up the bottom widget with a left-positioned button and sidebar."""
         # Initialize and connect the neuroglancer viewer in the bottom widgets
-        self.ngl_viewer = NglViewer(viewer_kwargs=dict(parent=bottom_widget))
+        self.ngl_viewer = NglViewer(figure=self.fig_scatter, viewer_kwargs=dict(parent=self.bottom_widget))
         self.ngl_viewer.viewer.show()
 
         # Hook the viewer up to the figure
@@ -507,16 +509,16 @@ class MainWidget(QWidget):
         splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
 
         main_layout.addWidget(splitter)
-        bottom_widget.setLayout(main_layout)
-        bottom_widget.splitter = splitter
-        bottom_widget.sidebar = sidebar
-        bottom_widget.content = content
-        bottom_widget._initial_sidebar_width_applied = False
+        self.bottom_widget.setLayout(main_layout)
+        self.bottom_widget.splitter = splitter
+        self.bottom_widget.sidebar = sidebar
+        self.bottom_widget.content = content
+        self.bottom_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
         left_button.setFixedSize(40, 40)
-        left_button.setParent(bottom_widget)
+        left_button.setParent(self.bottom_widget)
         left_button.setFlat(True)
         left_button.setAutoFillBackground(False)
         left_button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -562,7 +564,7 @@ class MainWidget(QWidget):
             button.setFixedSize(button_size, button_size)
             button.setIcon(QIcon(icon_path))
             button.setIconSize(QSize(button_size - 12, button_size - 12))
-            button.setParent(bottom_widget)
+            button.setParent(self.bottom_widget)
             button.setFlat(True)
             button.setAutoFillBackground(False)
             button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -579,7 +581,7 @@ class MainWidget(QWidget):
         # Position overlay buttons in the top right corner
         for i, button in enumerate(buttons):
             x = (
-                bottom_widget.width()
+                self.bottom_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
@@ -587,26 +589,26 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         # Initial position of left button
-        self.update_left_button_position(bottom_widget)
+        self.update_left_button_position(self.bottom_widget)
 
         # Store reference to adjust position on resize
-        bottom_widget.left_button = left_button
-        bottom_widget.buttons = buttons
-        bottom_widget.button_size = button_size
-        bottom_widget.button_spacing = button_spacing
-        bottom_widget.sidebar = sidebar
+        self.bottom_widget.left_button = left_button
+        self.bottom_widget.buttons = buttons
+        self.bottom_widget.button_size = button_size
+        self.bottom_widget.button_spacing = button_spacing
+        self.bottom_widget.sidebar = sidebar
 
         # Override resizeEvent to reposition buttons
-        original_resize = bottom_widget.resizeEvent
+        original_resize = self.bottom_widget.resizeEvent
 
         def on_resize(event):
             original_resize(event)
-            if not bottom_widget._initial_sidebar_width_applied:
+            if not self.bottom_widget._initial_sidebar_width_applied:
                 self._set_sidebar_width(splitter, 300)
-                bottom_widget._initial_sidebar_width_applied = True
+                self.bottom_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
-                    bottom_widget.width()
+                    self.bottom_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
@@ -614,20 +616,20 @@ class MainWidget(QWidget):
                 button.move(x, y)
                 button.raise_()
             # Reposition left button
-            self.update_left_button_position(bottom_widget)
+            self.update_left_button_position(self.bottom_widget)
 
-        bottom_widget.resizeEvent = on_resize
+        self.bottom_widget.resizeEvent = on_resize
 
         # Update button position when splitter is moved
         splitter.splitterMoved.connect(
-            lambda: self.update_left_button_position(bottom_widget)
+            lambda: self.update_left_button_position(self.bottom_widget)
         )
 
         # Initial positions
-        self.update_left_button_position(bottom_widget)
+        self.update_left_button_position(self.bottom_widget)
         for i, button in enumerate(buttons):
             x = (
-                bottom_widget.width()
+                self.bottom_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
@@ -635,13 +637,13 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         def apply_initial_bottom_overlay_layout():
-            if not bottom_widget._initial_sidebar_width_applied:
+            if not self.bottom_widget._initial_sidebar_width_applied:
                 self._set_sidebar_width(splitter, 300)
-                bottom_widget._initial_sidebar_width_applied = True
+                self.bottom_widget._initial_sidebar_width_applied = True
 
             for i, button in enumerate(buttons):
                 x = (
-                    bottom_widget.width()
+                    self.bottom_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
@@ -649,7 +651,7 @@ class MainWidget(QWidget):
                 button.move(x, y)
                 button.raise_()
 
-            self.update_left_button_position(bottom_widget)
+            self.update_left_button_position(self.bottom_widget)
 
         # Ensure overlays are correctly placed after the first real layout pass.
         QTimer.singleShot(0, apply_initial_bottom_overlay_layout)
@@ -941,8 +943,15 @@ class MainWindow(QMainWindow):
             # Fall back silently if settings are missing or incompatible
             pass
 
+        # Status bar
+        self.status_bar = self.statusBar()
+        self.status_bar.showMessage("Ready", timeout=5000)
+
+        self.selection_counter = QLabel("Selected: N/A  ")
+        self.status_bar.addPermanentWidget(self.selection_counter)
+
         # Create and set the main widget
-        main_widget = MainWidget()
+        main_widget = MainWidget(status_bar=self.status_bar, selection_counter=self.selection_counter)
         self.setCentralWidget(main_widget)
 
         # Menu bar with File -> Open Project

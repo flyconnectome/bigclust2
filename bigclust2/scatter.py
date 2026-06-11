@@ -62,8 +62,10 @@ class ScatterFigure(BaseFigure):
     selection_color = "y"
     distance_edges_threshold_default = 0.5
 
-    def __init__(self, *args, **kwargs):
+    def __init__(self, selection_counter=None, debug=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        self.selection_counter = selection_counter
 
         # Some internal state
         self.labels = None
@@ -346,6 +348,8 @@ class ScatterFigure(BaseFigure):
             self.show_knn_edges = (
                 self._show_knn_edges
             )  # trigger an update of the KNN edges
+
+        self.selection_counter.setText(f"Selected: {len(self._selected):,}  ")
 
     @property
     def selected_ids(self):

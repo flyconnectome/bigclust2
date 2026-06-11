@@ -13,6 +13,7 @@ import octarine as oc
 import nglscenes as ngl
 import cloudvolume as cv
 
+from collections import OrderedDict
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
@@ -25,6 +26,54 @@ POOL_RESTART_INTERVAL = 10_000
 
 # Hide navis' progress bar
 navis.config.pbar_hide = True
+
+
+class LRUCache:
+    """Simple least-recently-used cache with a maximum number of entries.
+
+    Parameters
+    ----------
+    maxsize : int
+        Maximum number of entries to keep. When exceeded, the least
+        recently used entries are evicted.
+
+    """
+
+    def __init__(self, maxsize=100):
+        self._data = OrderedDict()
+        self._maxsize = max(1, int(maxsize))
+
+    def __contains__(self, key):
+        return key in self._data
+
+    def __len__(self):
+        return len(self._data)
+
+    def __getitem__(self, key):
+        # Accessing an entry marks it as most recently used
+        self._data.move_to_end(key)
+        return self._data[key]
+
+    def __setitem__(self, key, value):
+        self._data[key] = value
+        self._data.move_to_end(key)
+        self._evict()
+
+    @property
+    def maxsize(self):
+        return self._maxsize
+
+    @maxsize.setter
+    def maxsize(self, value):
+        self._maxsize = max(1, int(value))
+        self._evict()
+
+    def _evict(self):
+        while len(self._data) > self._maxsize:
+            self._data.popitem(last=False)
+
+    def clear(self):
+        self._data.clear()
 
 
 class NglViewer:
@@ -62,8 +111,8 @@ class NglViewer:
         # Tracks which neurons we've already loaded
         self._segments = {}
 
-        # Optional cache
-        self.cache = {}
+        # Optional cache (least-recently-used neurons are evicted first)
+        self.cache = LRUCache(maxsize=100)
 
         self.register()
 
@@ -75,13 +124,21 @@ class NglViewer:
 
     @property
     def use_cache(self):
-        return getattr(self, "_use_cache", False)
+        return getattr(self, "_use_cache", True)
 
     @use_cache.setter
     def use_cache(self, value):
         self._use_cache = value
         self.report(f"Cache set to {value}", flush=True)
 
+    @property
+    def max_cache_size(self):
+        return self.cache.maxsize
+
+    @max_cache_size.setter
+    def max_cache_size(self, value):
+        self.cache.maxsize = value
+        self.report(f"Max cache size set to {self.cache.maxsize}", flush=True)
     def set_neuropil_mesh(self, neuropil_mesh, neuropil_source=None):
         """Set the neuropil mesh."""
         self.neuropil_source = neuropil_source

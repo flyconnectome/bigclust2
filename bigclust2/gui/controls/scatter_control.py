@@ -1326,6 +1326,46 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.max_label_vis_layout.addWidget(self.max_label_vis_value_label)
 
+        ########
+        # Neuroglancer viewer
+        ########
+
+        ngl_group = QtWidgets.QGroupBox("Neuroglancer viewer")
+        ngl_form = QtWidgets.QFormLayout()
+        ngl_form.setContentsMargins(2, 2, 2, 2)
+        ngl_form.setVerticalSpacing(2)
+        ngl_group.setLayout(ngl_form)
+        self.tab4_layout.addWidget(ngl_group)
+
+        has_viewer = hasattr(self.figure, "ngl_viewer")
+
+        self.ngl_cache_neurons = QtWidgets.QCheckBox("Cache neurons")
+        self.ngl_cache_neurons.setToolTip(
+            "Whether to keep already loaded neurons in memory so they re-display instantly."
+        )
+        self.ngl_cache_neurons.setChecked(
+            self.figure.ngl_viewer.use_cache if has_viewer else True
+        )
+        self.ngl_cache_neurons.stateChanged.connect(self.set_ngl_cache)
+        ngl_form.addRow(self.ngl_cache_neurons)
+
+        cache_size_label = QtWidgets.QLabel("Max cache size:")
+        cache_size_label.setToolTip(
+            "Maximum number of neurons to keep in the cache; least-recently-used neurons are evicted first."
+        )
+        self.ngl_cache_size = QtWidgets.QSpinBox()
+        self.ngl_cache_size.setRange(1, 10_000)
+        self.ngl_cache_size.setValue(
+            self.figure.ngl_viewer.max_cache_size if has_viewer else 100
+        )
+        self.ngl_cache_size.valueChanged.connect(self.set_ngl_cache_size)
+        ngl_form.addRow(cache_size_label, self.ngl_cache_size)
+
+        self.ngl_clear_cache_button = QtWidgets.QPushButton("Clear cache")
+        self.ngl_clear_cache_button.setToolTip("Remove all neurons from the cache.")
+        self.ngl_clear_cache_button.clicked.connect(self.clear_ngl_cache)
+        ngl_form.addRow(self.ngl_clear_cache_button)
+
         # This makes it so the legend does not stretch
         self.tab4_layout.addStretch(1)
 
@@ -3542,10 +3582,15 @@ class ScatterControls(QtWidgets.QWidget):
             if not self.ngl_cache_neurons.isChecked():
                 self.figure.ngl_viewer.clear_cache()
 
-    def set_ngl_debug(self):
-        """Set debug mode for ngl viewer."""
+    def set_ngl_cache_size(self):
+        """Set the maximum number of neurons the ngl viewer will cache."""
         if hasattr(self.figure, "ngl_viewer"):
-            self.figure.ngl_viewer.debug = self.ngl_debug_mode.isChecked()
+            self.figure.ngl_viewer.max_cache_size = self.ngl_cache_size.value()
+
+    def clear_ngl_cache(self):
+        """Clear the ngl viewer's neuron cache."""
+        if hasattr(self.figure, "ngl_viewer"):
+            self.figure.ngl_viewer.clear_cache()
 
     def set_dclick_deselect(self):
         """Set whether to deselect on double-click."""

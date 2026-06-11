@@ -138,6 +138,8 @@ class ScatterFigure(BaseFigure):
         self.key_events["Escape"] = lambda: self.deselect_all()
         self.key_events["l"] = lambda: self.toggle_labels()
 
+        self.debug = debug
+
         def _toggle_last_label():
             """Toggle between the last label and the original labels."""
             if hasattr(self, "controls"):
@@ -599,6 +601,27 @@ class ScatterFigure(BaseFigure):
             self.point_size += 1e-2
 
         self._fidelity_mode = x
+
+    def debug(self):
+        """Activate/Deactive debug mode for the Scatter figure."""
+        return getattr(self, "_debug", False)
+
+    @debug.setter
+    def debug(self, x):
+        assert isinstance(x, bool), "`debug` must be a boolean."
+
+        if x == self.debug:
+            return
+
+        self._debug = x
+        self.selection_gizmo.debug = x
+        self.lasso_gizmo.debug = x
+
+        if self.debug:
+            print("Debug mode activated.")
+
+        else:
+            print("Debug mode deactivated: hiding point indices.")
 
     def deselect_all(self):
         self.selected = None

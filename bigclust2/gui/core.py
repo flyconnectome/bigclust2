@@ -1216,6 +1216,37 @@ class MainWindow(QMainWindow):
 
         help_menu.addSeparator()
 
+        # Debug submenu
+        debug_menu = help_menu.addMenu("Debug")
+
+        self.debug_scatter_action = QAction("Scatter", self)
+        self.debug_scatter_action.setCheckable(True)
+        self.debug_scatter_action.toggled.connect(
+            lambda checked: setattr(self.centralWidget().fig_scatter, "debug", checked)
+        )
+
+        self.debug_viewer_action = QAction("Viewer", self)
+        self.debug_viewer_action.setCheckable(True)
+        self.debug_viewer_action.toggled.connect(
+            lambda checked: setattr(self.centralWidget().ngl_viewer, "debug", checked)
+        )
+
+        self.debug_all_action = QAction("All", self)
+        self.debug_all_action.setCheckable(True)
+        self.debug_all_action.toggled.connect(
+            lambda checked: (
+                self.debug_scatter_action.setChecked(checked),
+                self.debug_viewer_action.setChecked(checked),
+            )
+        )
+
+        debug_menu.addAction(self.debug_all_action)
+        debug_menu.addSeparator()
+        debug_menu.addAction(self.debug_scatter_action)
+        debug_menu.addAction(self.debug_viewer_action)
+
+        help_menu.addSeparator()
+
         keyboard_shortcuts_action = QAction("Keyboard Shortcuts", self)
         keyboard_shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         help_menu.addAction(keyboard_shortcuts_action)

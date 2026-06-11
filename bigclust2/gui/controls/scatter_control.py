@@ -573,6 +573,257 @@ class _FilterableComboBox(QtWidgets.QComboBox):
         return super().eventFilter(obj, event)
 
 
+class _ScopeFilterRow(QtWidgets.QWidget):
+    """A single scope filter: column picker plus a dtype-specific editor.
+
+    Numeric columns get a range slider with editable min/max fields,
+    low-cardinality categorical columns get checkboxes and high-cardinality
+    ones a substring/regex filter field with a live match count.
+
+    Emits ``changed`` whenever the filter may produce a different mask and
+    ``removed(self)`` when the user clicks the remove button.
+    """
+
+    changed = QtCore.Signal()
+    removed = QtCore.Signal(object)
+
+    # Categorical columns with up to this many unique values get checkboxes,
+    # larger ones a text filter field
+    MAX_CHECKBOX_VALUES = 10
+
+    def __init__(self, df_getter, parent=None):
+        super().__init__(parent)
+        self._df_getter = df_getter
+        self._editor_kind = None
+        self._value_checks = {}
+        self._range_slider = None
+        self._min_spin = None
+        self._max_spin = None
+        self._text_edit = None
+
+        layout = QtWidgets.QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.setLayout(layout)
+
+        header = QtWidgets.QHBoxLayout()
+        header.setContentsMargins(0, 0, 0, 0)
+        header.setSpacing(2)
+        layout.addLayout(header)
+
+        self.combinator = QtWidgets.QComboBox()
+        self.combinator.addItems(["AND", "OR"])
+        self.combinator.setFixedWidth(60)
+        self.combinator.setToolTip("How to combine this filter with the one above")
+        self.combinator.currentIndexChanged.connect(lambda *_: self.changed.emit())
+        header.addWidget(self.combinator)
+
+        self.column_combo = _FilterableComboBox()
+        self.column_combo.setSizePolicy(
+            QtWidgets.QSizePolicy.Policy.Expanding,
+            QtWidgets.QSizePolicy.Policy.Fixed,
+        )
+        self.column_combo.currentIndexChanged.connect(self._on_column_changed)
+        header.addWidget(self.column_combo)
+
+        self.remove_btn = QtWidgets.QToolButton()
+        self.remove_btn.setText("×")
+        self.remove_btn.setAutoRaise(True)
+        self.remove_btn.setToolTip("Remove this filter")
+        self.remove_btn.clicked.connect(lambda: self.removed.emit(self))
+        header.addWidget(self.remove_btn)
+
+        self.editor_area = QtWidgets.QWidget()
+        editor_layout = QtWidgets.QVBoxLayout()
+        editor_layout.setContentsMargins(12, 0, 0, 0)
+        editor_layout.setSpacing(2)
+        self.editor_area.setLayout(editor_layout)
+        layout.addWidget(self.editor_area)
+
+    def set_first(self, is_first):
+        """Hide the AND/OR combinator on the first row."""
+        self.combinator.setVisible(not is_first)
+
+    def set_columns(self, cols):
+        """Refresh the column picker, keeping the current column if possible."""
+        current = self.column_combo.currentText()
+        self.column_combo.blockSignals(True)
+        self.column_combo.clear()
+        self.column_combo.addItems(cols)
+        if current in cols:
+            self.column_combo.setCurrentText(current)
+        self.column_combo.blockSignals(False)
+        # Rebuild the editor against the (possibly new) data
+        self._on_column_changed()
+
+    # ── editors ───────────────────────────────────────────────────────────────
+
+    def _clear_editor(self):
+        layout = self.editor_area.layout()
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+        self._editor_kind = None
+        self._value_checks = {}
+        self._range_slider = None
+        self._min_spin = None
+        self._max_spin = None
+        self._text_edit = None
+
+    def _on_column_changed(self):
+        self._clear_editor()
+        layout = self.editor_area.layout()
+
+        df = self._df_getter()
+        col = self.column_combo.currentText()
+        if df is not None and col in df.columns:
+            series = df[col]
+            if series.dtype.kind in "iuf":
+                self._build_numeric_editor(layout, series)
+            else:
+                uniques = series.dropna().astype(str).unique()
+                if len(uniques) <= self.MAX_CHECKBOX_VALUES:
+                    self._build_checkbox_editor(layout, uniques)
+                else:
+                    self._build_text_editor(layout)
+        self.changed.emit()
+
+    def _build_numeric_editor(self, layout, series):
+        vals = series.to_numpy(dtype=float)
+        finite = vals[np.isfinite(vals)]
+        if not len(finite):
+            hint = QtWidgets.QLabel("No finite values in this column")
+            hint.setStyleSheet("color: palette(mid);")
+            layout.addWidget(hint)
+            return
+        lo, hi = float(finite.min()), float(finite.max())
+
+        self._editor_kind = "numeric"
+        self._range_slider = _MultiHandleSlider()
+        self._range_slider.set_data_range(lo, hi)
+        self._range_slider.set_values(lo, (lo + hi) / 2, hi)
+        layout.addWidget(self._range_slider)
+
+        spin_row = QtWidgets.QWidget()
+        spin_layout = QtWidgets.QHBoxLayout()
+        spin_layout.setContentsMargins(0, 0, 0, 0)
+        spin_layout.setSpacing(2)
+        spin_row.setLayout(spin_layout)
+        decimals = 0 if series.dtype.kind in "iu" else 4
+        step = (hi - lo) / 100 if hi > lo else 1.0
+        self._min_spin = QtWidgets.QDoubleSpinBox()
+        self._max_spin = QtWidgets.QDoubleSpinBox()
+        for spin, value in ((self._min_spin, lo), (self._max_spin, hi)):
+            spin.setDecimals(decimals)
+            spin.setRange(lo, hi)
+            spin.setSingleStep(step)
+            spin.setValue(value)
+            spin.setKeyboardTracking(False)
+            spin_layout.addWidget(spin)
+        layout.addWidget(spin_row)
+
+        self._range_slider.valuesChanged.connect(self._on_slider_changed)
+        self._min_spin.valueChanged.connect(self._on_spin_changed)
+        self._max_spin.valueChanged.connect(self._on_spin_changed)
+
+    def _build_checkbox_editor(self, layout, uniques):
+        self._editor_kind = "checks"
+        for value in sorted(uniques):
+            check = QtWidgets.QCheckBox(value)
+            check.setChecked(True)
+            check.stateChanged.connect(lambda *_: self.changed.emit())
+            layout.addWidget(check)
+            self._value_checks[value] = check
+
+    def _build_text_editor(self, layout):
+        self._editor_kind = "text"
+        self._text_edit = QtWidgets.QLineEdit()
+        self._text_edit.setPlaceholderText("substring filter…")
+        self._text_edit.setToolTip(
+            "Case-insensitive substring filter; start with '/' for a regex pattern"
+        )
+        self._text_edit.setClearButtonEnabled(True)
+        layout.addWidget(self._text_edit)
+
+        self._text_edit.textChanged.connect(self._on_text_changed)
+
+    # ── editor callbacks ──────────────────────────────────────────────────────
+
+    def _on_slider_changed(self, vmin, vcenter, vmax):
+        for spin, value in ((self._min_spin, vmin), (self._max_spin, vmax)):
+            spin.blockSignals(True)
+            spin.setValue(value)
+            spin.blockSignals(False)
+        self.changed.emit()
+
+    def _on_spin_changed(self):
+        self._range_slider.set_values(
+            self._min_spin.value(), self._range_slider.vcenter, self._max_spin.value()
+        )
+        self.changed.emit()
+
+    def _on_text_changed(self):
+        # Flag an invalid regex directly on the field
+        pattern, is_regex = self._text_pattern()
+        valid = True
+        if is_regex:
+            try:
+                re.compile(pattern)
+            except re.error:
+                valid = False
+        self._text_edit.setStyleSheet("" if valid else "color: red;")
+        self._text_edit.setToolTip(
+            "Case-insensitive substring filter; start with '/' for a regex pattern"
+            if valid
+            else "Invalid regex pattern"
+        )
+        self.changed.emit()
+
+    def _text_pattern(self):
+        """Return (pattern, is_regex); a leading '/' marks a regex pattern."""
+        text = self._text_edit.text()
+        if text.startswith("/"):
+            return text[1:], True
+        return text, False
+
+    def _text_mask(self, series):
+        pattern, is_regex = self._text_pattern()
+        return (
+            series.astype(str)
+            .str.contains(pattern, case=False, regex=is_regex, na=False)
+            .to_numpy()
+        )
+
+    # ── mask ──────────────────────────────────────────────────────────────────
+
+    def mask(self, df):
+        """Boolean mask (length ``len(df)``) of rows passing this filter."""
+        col = self.column_combo.currentText()
+        if col not in df.columns:
+            return np.ones(len(df), dtype=bool)
+
+        if self._editor_kind == "numeric":
+            vals = df[col].to_numpy(dtype=float)
+            # NaN fails both comparisons and hence drops out
+            return (vals >= self._min_spin.value()) & (vals <= self._max_spin.value())
+        elif self._editor_kind == "checks":
+            checked = {v for v, c in self._value_checks.items() if c.isChecked()}
+            return (
+                df[col].notna().to_numpy()
+                & df[col].astype(str).isin(checked).to_numpy()
+            )
+        elif self._editor_kind == "text":
+            if not self._text_edit.text():
+                return np.ones(len(df), dtype=bool)
+            try:
+                return self._text_mask(df[col])
+            except re.error:
+                return np.ones(len(df), dtype=bool)
+        return np.ones(len(df), dtype=bool)
+
+
 class ScatterControls(QtWidgets.QWidget):
     """Controls for the scatter plot."""
 
@@ -842,6 +1093,35 @@ class ScatterControls(QtWidgets.QWidget):
         self.size_combo_box.currentIndexChanged.connect(self._on_size_column_changed)
 
         ########
+        # Scope
+        ########
+
+        scope_group = QtWidgets.QGroupBox("Scope")
+        scope_group.setToolTip(
+            "Restrict which points can be selected. Does not change the plot."
+        )
+        scope_layout = QtWidgets.QVBoxLayout()
+        scope_layout.setContentsMargins(2, 2, 2, 2)
+        scope_layout.setSpacing(2)
+        scope_group.setLayout(scope_layout)
+        self.tab1_layout.addWidget(scope_group)
+
+        self.scope_rows = []
+        self.scope_rows_layout = QtWidgets.QVBoxLayout()
+        self.scope_rows_layout.setContentsMargins(0, 0, 0, 0)
+        self.scope_rows_layout.setSpacing(2)
+        scope_layout.addLayout(self.scope_rows_layout)
+
+        self.scope_add_btn = QtWidgets.QPushButton("+ Add filter")
+        self.scope_add_btn.clicked.connect(self._add_scope_row)
+        scope_layout.addWidget(self.scope_add_btn)
+
+        self.scope_match_label = QtWidgets.QLabel("")
+        self.scope_match_label.setStyleSheet("color: white;")
+        self.scope_match_label.setVisible(False)
+        scope_layout.addWidget(self.scope_match_label)
+
+        ########
         # Selection behavior
         ########
 
@@ -852,63 +1132,10 @@ class ScatterControls(QtWidgets.QWidget):
         selection_group.setLayout(selection_form)
         self.tab1_layout.addWidget(selection_group)
 
-        self.selection_restrict_toggle = QtWidgets.QToolButton()
-        self.selection_restrict_toggle.setText("Restrict to datasets")
-        self.selection_restrict_toggle.setCheckable(True)
-        self.selection_restrict_toggle.setChecked(False)
-        self.selection_restrict_toggle.setToolButtonStyle(
-            QtCore.Qt.ToolButtonTextBesideIcon
-        )
-        self.selection_restrict_toggle.setSizePolicy(
-            QtWidgets.QSizePolicy.Policy.Expanding,
-            QtWidgets.QSizePolicy.Policy.Fixed,
-        )
-        self.selection_restrict_toggle.setIconSize(QtCore.QSize(10, 10))
-        self.selection_restrict_toggle.setStyleSheet(
-            "QToolButton {"
-            "text-align: left;"
-            "border: none;"
-            "background: transparent;"
-            "padding: 0px;"
-            "}"
-            "QToolButton:pressed, QToolButton:checked, QToolButton:hover {"
-            "border: none;"
-            "background: transparent;"
-            "}"
-        )
-        self.selection_restrict_toggle.setArrowType(QtCore.Qt.RightArrow)
-        self.selection_restrict_toggle.toggled.connect(
-            self._toggle_selection_restrict_panel
-        )
-        selection_form.addRow(self.selection_restrict_toggle)
-
-        self.selection_restrict_panel = QtWidgets.QWidget()
-        selection_restrict_layout = QtWidgets.QVBoxLayout()
-        selection_restrict_layout.setContentsMargins(12, 0, 0, 0)
-        selection_restrict_layout.setSpacing(2)
-        self.selection_restrict_panel.setLayout(selection_restrict_layout)
-        self.selection_restrict_panel.setVisible(False)
-        selection_form.addRow(self.selection_restrict_panel)
-
-        self.selection_restrict_checks = {}
-        self.selection_restrict_empty_label = QtWidgets.QLabel(
-            "No datasets available"
-        )
-        self.selection_restrict_empty_label.setStyleSheet("color: palette(mid);")
-        selection_restrict_layout.addWidget(self.selection_restrict_empty_label)
-
-        self.update_selection_restrict_options()
-
         self.add_group_check = QtWidgets.QCheckBox("Add as group")
         self.add_group_check.setToolTip("Whether to add neurons as group to the viewer when selected")
         self.add_group_check.stateChanged.connect(self.set_add_group)
         self.add_group_check.setChecked(True)
-        toggle_font = self.selection_restrict_toggle.font()
-        if toggle_font.pointSizeF() > 0:
-            toggle_font.setPointSizeF(toggle_font.pointSizeF() + 0.01)
-        elif toggle_font.pixelSize() > 0:
-            toggle_font.setPixelSize(toggle_font.pixelSize() + 0.01)
-        self.selection_restrict_toggle.setFont(toggle_font)
         selection_form.addRow(self.add_group_check)
 
         self.dclick_deselect = QtWidgets.QCheckBox("Deselect on double-click")
@@ -2898,84 +3125,71 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_label_combo_boxes()
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
-        self.update_selection_restrict_options()
+        self.update_scope_options()
 
-    def _toggle_selection_restrict_panel(self, expanded):
-        """Expand/collapse dataset restriction controls."""
-        self.selection_restrict_panel.setVisible(expanded)
-        self.selection_restrict_toggle.setArrowType(
-            QtCore.Qt.DownArrow if expanded else QtCore.Qt.RightArrow
-        )
-
-    def _available_datasets(self):
-        """Return unique dataset names from the loaded figure data."""
-        datasets = getattr(self.figure, "datasets", None)
-        if datasets is not None:
-            names = sorted(
-                {
-                    str(ds).strip()
-                    for ds in datasets
-                    if (not pd.isna(ds)) and str(ds).strip()
-                }
-            )
-            if names:
-                return names
-
-        meta = getattr(self.figure, "metadata", None)
-        if meta is None or "dataset" not in meta.columns:
+    def _scope_columns(self):
+        """Columns available for scope filters."""
+        if self.meta_data is None:
             return []
-        return sorted(
-            {
-                str(ds).strip()
-                for ds in meta["dataset"].dropna().tolist()
-                if str(ds).strip()
-            }
+        return [c for c in self.meta_data.columns if not str(c).startswith("_")]
+
+    def _refresh_scope_row_flags(self):
+        """Hide the AND/OR combinator on the first scope row."""
+        for i, row in enumerate(self.scope_rows):
+            row.set_first(i == 0)
+
+    def _add_scope_row(self, *_):
+        """Add a new scope filter row."""
+        row = _ScopeFilterRow(df_getter=lambda: self.meta_data)
+        row.set_columns(self._scope_columns())
+        row.changed.connect(self._update_scope_mask)
+        row.removed.connect(self._remove_scope_row)
+        self.scope_rows.append(row)
+        self.scope_rows_layout.addWidget(row)
+        self._refresh_scope_row_flags()
+        self._update_scope_mask()
+
+    def _remove_scope_row(self, row):
+        """Remove a scope filter row."""
+        if row in self.scope_rows:
+            self.scope_rows.remove(row)
+        self.scope_rows_layout.removeWidget(row)
+        row.deleteLater()
+        self._refresh_scope_row_flags()
+        self._update_scope_mask()
+
+    def update_scope_options(self):
+        """Refresh scope filter columns after the underlying data changed."""
+        if not hasattr(self, "scope_rows"):
+            return
+        cols = self._scope_columns()
+        for row in self.scope_rows:
+            row.set_columns(cols)
+        self._update_scope_mask()
+
+    def _update_scope_mask(self):
+        """Recompute the selection scope mask and pass it to the figure."""
+        df = self.meta_data
+        if df is None or not self.scope_rows:
+            self.figure._selection_scope_mask = None
+            self.scope_match_label.setVisible(False)
+            return
+        mask = self.scope_rows[0].mask(df)
+        for row in self.scope_rows[1:]:
+            m = row.mask(df)
+            if row.combinator.currentText() == "OR":
+                mask = mask | m
+            else:
+                mask = mask & m
+        self.figure._selection_scope_mask = mask
+
+        n = int(mask.sum())
+        self.scope_match_label.setText(
+            f"1 of {len(df)} rows matches"
+            if n == 1
+            else f"{n} of {len(df)} rows match"
         )
-
-    def update_selection_restrict_options(self):
-        """Refresh dataset restriction checkboxes from currently loaded data."""
-        if not hasattr(self, "selection_restrict_panel"):
-            return
-
-        datasets = self._available_datasets()
-
-        current_restriction = getattr(self.figure, "_restrict_selection", None)
-        if current_restriction is None:
-            checked_names = {
-                name
-                for name, check in self.selection_restrict_checks.items()
-                if check.isChecked()
-            }
-        else:
-            checked_names = {str(name).strip() for name in current_restriction}
-
-        layout = self.selection_restrict_panel.layout()
-        while layout.count():
-            item = layout.takeAt(0)
-            widget = item.widget()
-            if widget is not None:
-                widget.deleteLater()
-
-        self.selection_restrict_checks = {}
-
-        if not datasets:
-            self.selection_restrict_empty_label = QtWidgets.QLabel(
-                "No datasets available"
-            )
-            self.selection_restrict_empty_label.setStyleSheet("color: palette(mid);")
-            layout.addWidget(self.selection_restrict_empty_label)
-            if hasattr(self.figure, "_restrict_selection"):
-                delattr(self.figure, "_restrict_selection")
-            return
-
-        for dataset_name in datasets:
-            check = QtWidgets.QCheckBox(dataset_name)
-            check.setChecked(dataset_name in checked_names or not checked_names)
-            check.stateChanged.connect(self.set_selection_restrict)
-            layout.addWidget(check)
-            self.selection_restrict_checks[dataset_name] = check
-
-        self.set_selection_restrict()
+        self.scope_match_label.setVisible(True)
 
     def update_label_combo_boxes(self):
         """Update the items in the label, color by and size by combo boxes."""
@@ -3263,18 +3477,6 @@ class ScatterControls(QtWidgets.QWidget):
     def set_add_group(self):
         """Set whether to add neurons as group when selected."""
         self.figure._add_as_group = self.add_group_check.isChecked()
-
-    def set_selection_restrict(self):
-        """Set optional dataset restriction for point selection."""
-        if not hasattr(self, "selection_restrict_checks"):
-            return
-
-        selected_datasets = [
-            name
-            for name, check in self.selection_restrict_checks.items()
-            if check.isChecked()
-        ]
-        self.figure._restrict_selection = selected_datasets
 
     def set_ngl_cache(self):
         """Set whether the ngl viewer should cache neurons."""

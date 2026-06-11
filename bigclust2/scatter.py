@@ -315,11 +315,10 @@ class ScatterFigure(BaseFigure):
         # Set the selected points (make sure to sort them)
         self._selected = np.asarray(sorted(x), dtype=int)
 
-        # Restrict selections if applicable
-        if hasattr(self, "_restrict_selection"):
-            self._selected = self._selected[
-                np.isin(self.datasets[self._selected], self._restrict_selection)
-            ]
+        # Restrict selection to the current scope (mask set by the controls)
+        mask = getattr(self, "_selection_scope_mask", None)
+        if mask is not None and len(mask) == len(self.metadata):
+            self._selected = self._selected[mask[self._selected]]
 
         # Create the new selection visuals
         self.highlight_points(self._selected, color=self.selection_color)

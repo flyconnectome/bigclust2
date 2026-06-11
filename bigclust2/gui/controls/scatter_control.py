@@ -105,6 +105,7 @@ class _MultiHandleSlider(QtWidgets.QWidget):
     _LABEL_AREA = 16   # px below the track reserved for value labels
     _MIN_H = 46        # total widget height
     _RESET_BTN_SIZE = 16  # reset button side length in px
+    _HIST_H = 18       # px above the track reserved for the distribution histogram
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -116,6 +117,8 @@ class _MultiHandleSlider(QtWidgets.QWidget):
         self._show_center: bool = False
         self._active: "str | None" = None   # 'min' | 'center' | 'max'
         self._hover: "str | None" = None
+        self._dist_values: "np.ndarray | None" = None
+        self._hist_cache: "tuple[tuple[int, float, float], np.ndarray] | None" = None
         self.setMinimumHeight(self._MIN_H)
         self.setSizePolicy(
             QtWidgets.QSizePolicy.Policy.Expanding,
@@ -164,6 +167,22 @@ class _MultiHandleSlider(QtWidgets.QWidget):
         """Update the track bounds. Does not emit."""
         self._lo = float(lo)
         self._hi = float(hi) if hi != lo else float(lo) + 1.0
+        self._hist_cache = None
+        self.update()
+
+    def set_distribution(self, values=None) -> None:
+        """Show a small histogram of `values` above the track; None removes it."""
+        if values is not None:
+            values = np.asarray(values, dtype=float)
+            values = values[np.isfinite(values)]
+            if not values.size:
+                values = None
+        self._dist_values = values
+        self._hist_cache = None
+        self.setMinimumHeight(
+            self._MIN_H + (self._HIST_H if values is not None else 0)
+        )
+        self.updateGeometry()
         self.update()
 
     def set_values(self, vmin: float, vcenter: float, vmax: float) -> None:
@@ -189,8 +208,24 @@ class _MultiHandleSlider(QtWidgets.QWidget):
     # ── coordinate helpers ────────────────────────────────────────────────────
 
     def _track_y(self) -> int:
-        usable = self.height() - self._LABEL_AREA
-        return max(self._HANDLE_R + 2, usable // 2)
+        hist_h = self._HIST_H if self._dist_values is not None else 0
+        usable = self.height() - self._LABEL_AREA - hist_h
+        return hist_h + max(self._HANDLE_R + 2, usable // 2)
+
+    def _hist_counts(self) -> "np.ndarray | None":
+        """Normalized bin heights for the distribution, cached per width/range."""
+        if self._dist_values is None:
+            return None
+        key = (self._track_width(), self._lo, self._hi)
+        if self._hist_cache is None or self._hist_cache[0] != key:
+            n_bins = max(10, self._track_width() // 3)
+            counts, _ = np.histogram(
+                self._dist_values, bins=n_bins, range=(self._lo, self._hi)
+            )
+            peak = counts.max()
+            heights = counts / peak if peak else counts.astype(float)
+            self._hist_cache = (key, heights)
+        return self._hist_cache[1]
 
     def _track_left(self) -> int:
         return self._H_MARGIN
@@ -321,6 +356,26 @@ class _MultiHandleSlider(QtWidgets.QWidget):
         tl = self._track_left()
         tr_r = self._track_right()
         th = self._TRACK_H
+
+        # Distribution histogram above the track
+        heights = self._hist_counts()
+        if heights is not None:
+            baseline = cy - self._HANDLE_R - 2
+            bin_w = (tr_r - tl) / len(heights)
+            span = self._hi - self._lo
+            in_col = QtGui.QColor(255, 255, 255, 200)
+            out_col = QtGui.QColor(255, 255, 255, 80)
+            painter.setPen(QtCore.Qt.PenStyle.NoPen)
+            for i, h in enumerate(heights):
+                if not h:
+                    continue
+                bin_center = self._lo + (i + 0.5) / len(heights) * span
+                in_range = self._vmin <= bin_center <= self._vmax
+                painter.setBrush(in_col if in_range else out_col)
+                bar_h = h * self._HIST_H
+                painter.drawRect(
+                    QtCore.QRectF(tl + i * bin_w, baseline - bar_h, bin_w, bar_h)
+                )
 
         # Groove
         groove = QtCore.QRectF(tl, cy - th / 2, tr_r - tl, th)
@@ -704,6 +759,7 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._range_slider = _MultiHandleSlider()
         self._range_slider.set_data_range(lo, hi)
         self._range_slider.set_values(lo, (lo + hi) / 2, hi)
+        self._range_slider.set_distribution(finite)
         layout.addWidget(self._range_slider)
 
         spin_row = QtWidgets.QWidget()
@@ -3608,6 +3664,7 @@ class ScatterControls(QtWidgets.QWidget):
             self.color_range_slider.blockSignals(True)
             self.color_range_slider.set_data_range(lo, hi)
             self.color_range_slider.set_values(lo, mid, hi)
+            self.color_range_slider.set_distribution(data)
             self.color_range_slider.blockSignals(False)
 
         self.color_range_slider.setVisible(is_numerical)
@@ -3672,6 +3729,7 @@ class ScatterControls(QtWidgets.QWidget):
                 self.size_range_slider.blockSignals(True)
                 self.size_range_slider.set_data_range(lo, hi)
                 self.size_range_slider.set_values(lo, mid, hi)
+                self.size_range_slider.set_distribution(data)
                 self.size_range_slider.blockSignals(False)
 
         self.size_range_slider.setVisible(has_range)

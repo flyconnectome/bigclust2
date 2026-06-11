@@ -14,7 +14,7 @@ import nglscenes as ngl
 import cloudvolume as cv
 
 from functools import lru_cache
-from concurrent.futures import ThreadPoolExecutor, CancelledError
+from concurrent.futures import ThreadPoolExecutor, TimeoutError
 
 from .utils import is_url
 
@@ -266,7 +266,7 @@ class NglViewer:
             raise ValueError(f"IDs {ids[miss]} not found in the data.")
 
         self.report(
-            f"Showing {len(to_show)} neuron(s): ",
+            f"  Showing {len(to_show)} neuron(s): ",
             to_show.id.values.tolist(),
             flush=True,
         )
@@ -277,6 +277,9 @@ class NglViewer:
                 x for x in self._segments if x not in to_show.index.values.tolist()
             ]  # do not remove the .tolist() here!
         )
+
+        # Drop those already on display
+        to_show = to_show[~to_show.index.isin(self._segments)]
 
         # Cancel all futures we don't need anymore
         # Note: we need to use list() because we're potentially
@@ -290,9 +293,11 @@ class NglViewer:
 
                 # Remove from futures
                 self.futures.pop((id, _), None)
+            else:
+                self.report("  Keeping future for", id, flush=True)
 
-        # Now drop those already on display
-        to_show = to_show[~to_show.index.isin(self._segments)]
+        # Drop those already loading
+        to_show = to_show[~to_show.index.isin([k for k, _ in self.futures.keys()])]
 
         for _, row in to_show.iterrows():
             id, dataset = row.name
@@ -306,10 +311,6 @@ class NglViewer:
             else:
                 first_id = to_show.index.values[0][0]  # remember this is a multiindex
                 name = f"group_{first_id}"
-
-            # Skip if we're already loading this segment
-            if ((id, dataset), name) in self.futures:
-                continue
 
             if (id, dataset) in self.cache:
                 self.report(f"  Using cached visual for {id} ({dataset})", flush=True)
@@ -342,6 +343,8 @@ class NglViewer:
                     lod=lod,
                     **kwargs,
                 )
+
+        self.report(f"  {len(self.futures)} neurons still loading", flush=True)
 
     def remove_objects(self, objects):
         """Remove objects from the viewer."""
@@ -626,11 +629,23 @@ class NglViewer:
         # Keep track of whether we had any futures at the beginning
         has_futures = len(self.futures) > 0
 
+        finished_futures = []
         for ((id, dataset), name), future in self.futures.items():
-            if not future.done() or future.cancelled():
+            if not future.done():
                 continue
 
-            visual = future.result()
+            if future.cancelled():
+                self.report(f"Future for {id} ({dataset}) was cancelled.")
+                continue
+
+            try:
+                # Let the future time out after
+                visual = future.result(60)  # wait up to 60 seconds for the result
+                visual.material.pick_write = True  # make sure the visual is pickable
+            except TimeoutError:
+                finished_futures.append(((id, dataset), name))
+                self.report(f"Future for {id} ({dataset}) timed out.")
+                continue
 
             self.pool._task_counter += 1  # Increment the number of tasks processed
 
@@ -640,9 +655,12 @@ class NglViewer:
                 self.report(f"  Failed to load {id} ({dataset}): {visual}", flush=True)
                 continue
 
-            self.report(f"  Adding {id} ({dataset}) as '{name}'", flush=True)
-            self.viewer.add(visual, name=str(name), center=False)
+            self.report(f"  Adding {id} ({dataset}) as {str(id)} (group '{name}')", flush=True)
+            self.viewer.add(visual, group=str(name), name=str(id), center=False)
             self._segments[(id, dataset)] = visual
+
+            # Remove this future
+            finished_futures.append(((id, dataset), name))
 
             # Center on the first neuron
             if not self._centered:
@@ -653,6 +671,10 @@ class NglViewer:
             if self.use_cache:
                 self.report(f"  Caching visual for {id}", flush=True)
                 self.cache[(id, dataset)] = visual
+
+        # Drop completed futures
+        for key in finished_futures:
+            self.futures.pop(key, None)
 
         # Show progress message
         if has_futures and len(self.futures) > 0:
@@ -667,9 +689,6 @@ class NglViewer:
                 position="bottom-right",
                 color="w" if not self.n_failed else "r",
             )
-
-        # Remove completed futures
-        self.futures = {k: v for k, v in self.futures.items() if not v.done() and not v.cancelled()}
 
         # If all futures completed
         if has_futures and len(self.futures) == 0:

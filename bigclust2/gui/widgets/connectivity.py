@@ -612,7 +612,7 @@ class ConnectivityTable(QtWidgets.QWidget):
         row.addWidget(QtWidgets.QLabel("Max partners:"))
         self._max_cols = QtWidgets.QSpinBox()
         self._max_cols.setRange(1, 1000)
-        self._max_cols.setValue(30)
+        self._max_cols.setValue(5)
         self._max_cols.setSingleStep(1)
         self._max_cols.setToolTip(
             "Set the maximum number of columns to show in the graph"

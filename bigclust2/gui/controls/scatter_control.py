@@ -3227,7 +3227,7 @@ class ScatterControls(QtWidgets.QWidget):
         """Recompute the selection scope mask and pass it to the figure."""
         df = self.meta_data
         if df is None or not self.scope_rows:
-            self.figure._selection_scope_mask = None
+            self.figure.set_scope(None)
             self.scope_match_label.setVisible(False)
             return
         mask = self.scope_rows[0].mask(df)
@@ -3237,7 +3237,7 @@ class ScatterControls(QtWidgets.QWidget):
                 mask = mask | m
             else:
                 mask = mask & m
-        self.figure._selection_scope_mask = mask
+        self.figure.set_scope(mask)
 
         n = int(mask.sum())
         self.scope_match_label.setText(

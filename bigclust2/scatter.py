@@ -22,6 +22,9 @@ AVAILABLE_MARKERS = list(gfx.MarkerShape)
 # Drop markers which look too similar to others
 AVAILABLE_MARKERS.remove("ring")
 
+# Alpha multiplier for points outside the current selection scope
+SCOPE_FADE_ALPHA = 0.15
+
 
 def _pts_in_polygon(points, polygon):
     """Test which points lie inside a polygon (vectorised ray-casting).
@@ -75,6 +78,7 @@ class ScatterFigure(BaseFigure):
         self.positions = None
         self.metadata = None
         self._selected = None
+        self._selection_scope_mask = None
         self.deselect_on_empty = (
             False  # whether to deselect everything on empty selection
         )
@@ -315,8 +319,8 @@ class ScatterFigure(BaseFigure):
         # Set the selected points (make sure to sort them)
         self._selected = np.asarray(sorted(x), dtype=int)
 
-        # Restrict selection to the current scope (mask set by the controls)
-        mask = getattr(self, "_selection_scope_mask", None)
+        # Restrict selection to the current scope (see `set_scope`)
+        mask = self._selection_scope_mask
         if mask is not None and len(mask) == len(self.metadata):
             self._selected = self._selected[mask[self._selected]]
 
@@ -1570,6 +1574,10 @@ class ScatterFigure(BaseFigure):
         # Generate the visuals
         self.make_visuals()
 
+        # Re-apply scope fading to the new visuals (ignored if the
+        # scope mask no longer matches the number of points)
+        self._apply_scope_to_visuals()
+
         # Setup hover info
         if hover_info is not None:
 
@@ -1674,10 +1682,16 @@ class ScatterFigure(BaseFigure):
                 else:
                     group_name = "mixed"
 
-                # Ensure a unique group name in the viewer.
+                # Ensure a unique group name in the viewer
                 i = 1
                 final_group_name = group_name
                 while final_group_name in self.ngl_viewer.viewer.objects:
+                    final_group_name = group_name + f" - #{i}"
+                    i += 1
+
+                i = 1
+                final_group_name = group_name
+                while final_group_name in self.ngl_viewer.viewer.objects_grouped:
                     final_group_name = group_name + f" - #{i}"
                     i += 1
 
@@ -1757,11 +1771,61 @@ class ScatterFigure(BaseFigure):
         self.colors = colors.astype(np.float32)
 
         for vis in self.point_visuals:
-            vis.geometry.colors.set_data(self.colors[vis._point_ix])
-            vis.geometry.colors.update_full()
+            vis._base_colors = self.colors[vis._point_ix]
+        self._apply_scope_to_visuals()
 
         if sync_to_viewer and hasattr(self, "ngl_viewer"):
             self.set_viewer_colors(colors)
+
+    def set_scope(self, mask):
+        """Restrict selections to a subset of points.
+
+        Points outside the scope can not be selected and are shown faded.
+
+        Parameters
+        ----------
+        mask :  (N,) bool array | None
+                True = selectable. N must match the number of points in the
+                scatterplot. Use `None` to clear the scope.
+
+        """
+        if mask is not None:
+            mask = np.asarray(mask).astype(bool, copy=False)
+            if len(mask) != len(self):
+                raise ValueError(
+                    f"Expected mask of length {len(self)}, got {len(mask)}."
+                )
+        self._selection_scope_mask = mask
+
+        # Prune the current selection to the new scope (re-assigning routes
+        # through the `selected` setter, which applies the mask, refreshes
+        # the highlights and syncs widgets/viewer)
+        if mask is not None and self._selected is not None and len(self._selected):
+            self.selected = self._selected
+
+        self._apply_scope_to_visuals()
+
+    def _apply_scope_to_visuals(self):
+        """(Re-)apply scope fading on top of the base point colors."""
+        mask = self._selection_scope_mask
+        if mask is not None and len(mask) != len(self):
+            mask = None  # stale mask (e.g. after set_points) -> ignore
+
+        if self.point_visuals is None:
+            return
+
+        for vis in self.point_visuals:
+            if not hasattr(vis, "_base_colors"):
+                # Lazily capture the unfaded colors created by make_points()
+                vis._base_colors = vis.geometry.colors.data.copy()
+            colors = vis._base_colors.copy()
+            if mask is not None:
+                colors[~mask[vis._point_ix], 3] *= SCOPE_FADE_ALPHA
+            vis.geometry.colors.set_data(colors)
+            vis.geometry.colors.update_full()
+
+        self._render_stale = True
+        self.canvas.request_draw()
 
     def set_viewer_colors(self, colors):
         """Set the colors for the neuroglancer viewer.

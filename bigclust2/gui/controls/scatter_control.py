@@ -989,9 +989,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_button.clicked.connect(self.calculate_embeddings)
         actions_row.addWidget(self.umap_button)
 
-        actions_row = QtWidgets.QHBoxLayout()
-        self.tab5_layout.addLayout(actions_row)
-
         self.umap_auto_run = QtWidgets.QCheckBox("Auto run")
         self.umap_auto_run.setToolTip(
             "Automatically run dimensionality reduction when changing settings."
@@ -1001,13 +998,6 @@ class ScatterControls(QtWidgets.QWidget):
             lambda: setattr(self.figure, "_auto_umap", self.umap_auto_run.isChecked())
         )
         actions_row.addWidget(self.umap_auto_run)
-
-        self.umap_selection_only = QtWidgets.QCheckBox("Selection only")
-        self.umap_selection_only.setToolTip(
-            "Run on current selection only. This spawns a new figure."
-        )
-        self.umap_selection_only.setChecked(False)
-        actions_row.addWidget(self.umap_selection_only)
 
         # Input group
         input_group = QtWidgets.QGroupBox("Input")
@@ -3733,211 +3723,32 @@ class ScatterControls(QtWidgets.QWidget):
             tsne_n_iter=self.tsne_n_iter_slider.value(),
         )
 
-        if self.umap_selection_only.isChecked():
-            # Get the selected indices
-            selected_indices = self.selected_indices
-            if selected_indices.size == 0:
-                self.figure.show_message("No points selected", color="red", duration=2)
-                return
-
-            # Get the distances for the selected indices
-            if dists.shape[0] == dists.shape[1]:
-                if isinstance(dists, pd.DataFrame):
-                    dists = dists.iloc[selected_indices, selected_indices].copy()
-                else:
-                    dists = dists[np.ix_(selected_indices, selected_indices)].copy()
-            else:
-                if isinstance(dists, pd.DataFrame):
-                    dists = dists.iloc[selected_indices].copy()
-                else:
-                    dists = dists[selected_indices].copy()
-
-            # Get the data for the selected indices
-            data = self.meta_data.iloc[selected_indices].copy().reset_index(drop=True)
-
-            pca_components = (
-                self.pca_n_components_slider.value()
-                if ((not is_precomputed) and self.pca_check.isChecked())
-                else None
-            )
-            if pca_components is not None:
-                print(
-                    f" Using PCA to reduce {dists.shape} observation vector to {pca_components} components",
-                    flush=True,
-                )
-
-            _dists = prepare_embedding_input(
-                dists.values if isinstance(dists, pd.DataFrame) else dists,
-                is_precomputed=is_precomputed,
-                method=method,
-                metric=metric,
-                rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
-                pca_n_components=pca_components,
-                random_state=random_state,
+        pca_components = (
+            self.pca_n_components_slider.value()
+            if ((not is_precomputed) and self.pca_check.isChecked())
+            else None
+        )
+        if pca_components is not None:
+            print(
+                f" Using PCA to reduce {dists.shape} observation vector to {pca_components} components",
+                flush=True,
             )
 
-            # Re-calculate the x/y coordinates
-            with warnings.catch_warnings(action="ignore"):
-                xy = fit.fit_transform(_dists)
-            data["x"] = xy[:, 0]
-            data["y"] = xy[:, 1]
+        dists = prepare_embedding_input(
+            dists.values if isinstance(dists, pd.DataFrame) else dists,
+            is_precomputed=is_precomputed,
+            method=method,
+            metric=metric,
+            rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
+            pca_n_components=pca_components,
+            random_state=random_state,
+        )
 
-            selected_ids = data["id"].to_numpy()
+        with warnings.catch_warnings(action="ignore"):
+            xy = fit.fit_transform(dists)
 
-            selected_distances = None
-            selected_features = None
-
-            # Preserve both modalities when both are available in the source figure.
-            source_matrices = getattr(self.figure, "dists", None)
-            if isinstance(source_matrices, dict):
-                source_distances = source_matrices.get("distances")
-                source_features = source_matrices.get("features")
-
-                if source_distances is not None:
-                    if isinstance(source_distances, pd.DataFrame):
-                        selected_distances = source_distances.iloc[
-                            selected_indices, selected_indices
-                        ].copy()
-                    else:
-                        selected_distances = pd.DataFrame(
-                            source_distances[
-                                np.ix_(selected_indices, selected_indices)
-                            ],
-                            index=selected_ids,
-                            columns=selected_ids,
-                        )
-
-                if source_features is not None:
-                    if isinstance(source_features, pd.DataFrame):
-                        selected_features = source_features.iloc[
-                            selected_indices
-                        ].copy()
-                        selected_features.index = selected_ids
-                        selected_features = self._apply_embedding_feature_partition_filter(
-                            selected_features
-                        )
-                    else:
-                        selected_features = pd.DataFrame(
-                            np.asarray(source_features)[selected_indices],
-                            index=selected_ids,
-                        )
-
-            # Fallback for non-dict sources: preserve whichever modality was used.
-            if selected_distances is None and selected_features is None:
-                if is_precomputed:
-                    if isinstance(dists, pd.DataFrame):
-                        selected_distances = dists.copy()
-                    else:
-                        selected_distances = pd.DataFrame(
-                            dists,
-                            index=selected_ids,
-                            columns=selected_ids,
-                        )
-                else:
-                    if isinstance(dists, pd.DataFrame):
-                        selected_features = dists.copy()
-                        selected_features.index = selected_ids
-                    else:
-                        selected_features = pd.DataFrame(dists, index=selected_ids)
-
-            from ..core import MainWindow
-
-            window = MainWindow()
-            parent_window = self.window()
-            if parent_window is not None:
-                window.move(parent_window.pos() + QtCore.QPoint(40, 40))
-            window.show()
-
-            main_widget = window.centralWidget()
-            fig = main_widget.fig_scatter
-            fig.clear()
-
-            fig.set_points(
-                points=xy,
-                metadata=data,
-                label_col="label",
-                id_col="id",
-                color_col="_color",
-                marker_col="dataset",
-                hover_col="\n".join(
-                    [
-                        f"{c}: {{{c}}}"
-                        for c in data.columns
-                        if not str(c).startswith("_")
-                    ]
-                ),
-                dataset_col="dataset",
-                point_size=10,
-                distances=selected_distances,
-                features=selected_features,
-            )
-            main_widget.scatter_controls.update_controls()
-
-            # Try to propagate neuroglancer source data for the selected subset.
-            try:
-                src_viewer = getattr(self.figure, "ngl_viewer", None)
-                src_data = getattr(src_viewer, "data", None)
-                if src_data is not None and len(src_data):
-                    if (
-                        isinstance(src_data.index, pd.MultiIndex)
-                        and "dataset" in data.columns
-                    ):
-                        keys = list(zip(data["id"].tolist(), data["dataset"].tolist()))
-                        ngl_data = src_data.loc[keys].copy()
-                    else:
-                        ngl_data = src_data.loc[data["id"].tolist()].copy()
-
-                    main_widget.ngl_viewer.set_data(ngl_data)
-
-                    neuropil_mesh = getattr(src_viewer, "neuropil_mesh", None)
-                    if neuropil_mesh is not None:
-                        main_widget.ngl_viewer.set_neuropil_mesh(
-                            neuropil_mesh,
-                            neuropil_source=getattr(
-                                src_viewer, "neuropil_source", None
-                            ),
-                        )
-            except Exception as e:
-                logger.debug(
-                    f"Failed to propagate Neuroglancer data to new window: {e}"
-                )
-
-            window._data = {
-                "meta": data,
-                "embeddings": xy,
-                "distances": selected_distances,
-                "features": selected_features,
-            }
-            window._update_view_actions()
-            window.setWindowTitle(f"BigClust - {method} selection ({len(data)})")
-
-        else:
-            pca_components = (
-                self.pca_n_components_slider.value()
-                if ((not is_precomputed) and self.pca_check.isChecked())
-                else None
-            )
-            if pca_components is not None:
-                print(
-                    f" Using PCA to reduce {dists.shape} observation vector to {pca_components} components",
-                    flush=True,
-                )
-
-            dists = prepare_embedding_input(
-                dists.values if isinstance(dists, pd.DataFrame) else dists,
-                is_precomputed=is_precomputed,
-                method=method,
-                metric=metric,
-                rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
-                pca_n_components=pca_components,
-                random_state=random_state,
-            )
-
-            with warnings.catch_warnings(action="ignore"):
-                xy = fit.fit_transform(dists)
-
-            # This moves points to their new positions
-            self.figure.move_points(xy)
+        # This moves points to their new positions
+        self.figure.move_points(xy)
 
     def update_embedding_settings(self):
         """Update the embedding settings based on the selected method."""
@@ -3987,12 +3798,6 @@ class ScatterControls(QtWidgets.QWidget):
     def calculate_embeddings_maybe(self):
         """Recalculate embeddings if the auto-run checkbox is checked."""
         if self.umap_auto_run.isChecked():
-            if self.umap_selection_only.isChecked():
-                self.figure.show_message(
-                    "Can't automatically run UMAP on a selection. Please run it manually.",
-                    duration=5,
-                    color="red",
-                )
             self.calculate_embeddings()
 
 

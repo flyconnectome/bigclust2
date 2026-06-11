@@ -1147,22 +1147,42 @@ class ScatterFigure(BaseFigure):
         if mask is not None and mask.sum() == 0:
             return
 
-        # At this point we should have completed all checks, so we can safely grab the required data
+        # At this point we should have completed all checks, so we can safely
+        # grab the required data. If we have a mask, we only compute nearest
+        # neighbours for the masked points (the neighbours themselves can
+        # still be anywhere).
+        if mask is not None:
+            ind = np.where(mask)[0]
+
         if metric == "precomputed":
-            knn = np.argsort(self.dists["distances"], axis=1)[:, 1 : (k + 1)]
+            dists = np.asarray(self.dists["distances"])
+            if mask is None:
+                knn = np.argsort(dists, axis=1)[:, 1 : (k + 1)]
+                ind = np.arange(len(knn))
+            else:
+                # Fancy indexing copies the masked rows, so we can safely
+                # overwrite the self-distances below
+                sub = dists[ind]
+                sub[np.arange(len(ind)), ind] = np.inf  # exclude self
+                # argpartition because we only need the k smallest - the order
+                # doesn't matter since edges get sorted/deduplicated anyway
+                knn = np.argpartition(sub, k, axis=1)[:, :k]
         else:
             from sklearn.neighbors import NearestNeighbors
 
-            _, knn = (
-                NearestNeighbors(n_neighbors=k, metric=metric)
-                .fit(self.dists["features"])
-                .kneighbors()
+            nn = NearestNeighbors(n_neighbors=k, metric=metric).fit(
+                self.dists["features"]
             )
-
-        ind = np.arange(len(knn))
-        if mask is not None:
-            knn = knn[mask]
-            ind = ind[mask]
+            if mask is None:
+                _, knn = nn.kneighbors()  # excludes self by default
+                ind = np.arange(len(knn))
+            else:
+                # Query only the masked points; each point comes back as its
+                # own first hit, so we ask for one extra neighbour and drop it
+                _, knn = nn.kneighbors(
+                    np.asarray(self.dists["features"])[ind], n_neighbors=k + 1
+                )
+                knn = knn[:, 1:]
 
         # Convert to edges (i.e. pairs of points)
         edges = []

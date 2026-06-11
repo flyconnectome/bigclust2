@@ -1690,7 +1690,6 @@ class ScatterFigure(BaseFigure):
         if getattr(self, "_hover_use_cols", False):
             # Series of the active columns; _format_hover_text renders
             # them as "column: value" lines
-            print("!!! Using hover columns:", self.hover_col_names)
             return self.metadata.iloc[ix][self.hover_col_names]
         hover_col = self.hover_info_org
         if "{" in hover_col:

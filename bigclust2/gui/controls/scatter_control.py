@@ -933,6 +933,20 @@ class ScatterControls(QtWidgets.QWidget):
         )
         hlayout.addWidget(self.font_size_slider)
 
+        # Add SpinBox for point scale
+        hlayout = QtWidgets.QHBoxLayout()
+        self.tab4_layout.addLayout(hlayout)
+        label = QtWidgets.QLabel("Point scale:")
+        label.setToolTip("Set the scaling factor for the point sizes in the figure.")
+        hlayout.addWidget(label)
+        self.point_scale_spinbox = QtWidgets.QDoubleSpinBox()
+        self.point_scale_spinbox.setRange(.01, 200)
+        self.point_scale_spinbox.setValue(float(self.figure.point_scale))
+        self.point_scale_spinbox.valueChanged.connect(
+            lambda x: setattr(self.figure, "point_scale", x)
+        )
+        hlayout.addWidget(self.point_scale_spinbox)
+
         # Add slider for number of labels visible at once
         label = QtWidgets.QLabel("Max visible labels:")
         label.setToolTip(

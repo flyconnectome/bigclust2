@@ -2102,18 +2102,11 @@ class MainWindow(QMainWindow):
             logger.debug(f"Hover hide all failed: {e}")
 
     def _on_hover_columns_menu_hidden(self):
-        """Recompute hover_info once after the Hover Columns menu closes."""
+        """Apply the hover column selection after the Hover Columns menu closes."""
         try:
             fig = self.centralWidget().fig_scatter
             if getattr(fig, "metadata", None) is not None:
-                # self.statusBar().showMessage("Computing hover labels…")
-                QApplication.setOverrideCursor(Qt.WaitCursor)
-                QApplication.processEvents()
-                try:
-                    fig._recompute_hover_info()
-                finally:
-                    QApplication.restoreOverrideCursor()
-                    # self.statusBar().clearMessage()
+                fig._recompute_hover_info()
         except Exception as e:
             logger.debug(f"Hover recompute on menu close failed: {e}")
 

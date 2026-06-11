@@ -184,7 +184,11 @@ class BaseFigure:
         if rm == "active_window":
             # Note to self: we need to explore how to do this with different backends / Window managers
             if hasattr(self.canvas, "isActiveWindow"):
-                if not self.canvas.isActiveWindow():
+                # Qt can erroneously report the window as inactive after
+                # interactions with the (native) menu bar. Keep rendering
+                # while the cursor is over the canvas so that e.g. hover
+                # info still shows up.
+                if not self.canvas.isActiveWindow() and not self.canvas.underMouse():
                     return
         elif rm == "reactive":
             # If the scene is not stale, we can skip rendering

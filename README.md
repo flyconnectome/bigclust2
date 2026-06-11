@@ -208,4 +208,4 @@ The top-level `info` file would look like this:
 - [ ] Caching system for remote data sources for faster start-up times
   - this turns out to not really be a problem from the client side; could still implement to reduce traffic on the server side
 - [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
-- [ ] Fine-control over hover info
+- [X] Fine-control over hover info

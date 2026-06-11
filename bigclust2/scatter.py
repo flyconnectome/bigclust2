@@ -718,7 +718,7 @@ class ScatterFigure(BaseFigure):
                 color=color,
                 size=this_size * self.point_scale,
                 marker=m,
-                pick_write=self.hover_info is not None,
+                pick_write=self.hover_info_org is not None,
             )
             vis._point_ix = ix
             visuals.append(vis)
@@ -1577,13 +1577,9 @@ class ScatterFigure(BaseFigure):
             c for c in metadata.columns if not str(c).startswith("_")
         ] if hover_col is not None else []
         self._hover_col_names_active = None  # None means "show all"
-
-        if hover_col is not None:
-            if "{" in hover_col:
-                hover_info = metadata.apply(hover_col.format_map, axis=1)
-            else:
-                hover_info = metadata[hover_col]
-        self.hover_info = np.asarray(hover_info) if hover_col else None
+        # Whether to build hover text from the active columns instead of the
+        # original hover_col (flips on first hover-column change)
+        self._hover_use_cols = False
 
         # Update some internal state
         # (note that we're writing to the protected member variables here)
@@ -1599,7 +1595,7 @@ class ScatterFigure(BaseFigure):
         self._apply_scope_to_visuals()
 
         # Setup hover info
-        if hover_info is not None:
+        if hover_col is not None:
 
             def hover(event):
                 # Note: we could use e.g. shift-hover to show more/different info?
@@ -1615,7 +1611,7 @@ class ScatterFigure(BaseFigure):
 
                     self.hover_widget.visible = True
                     self._update_hover_widget(
-                        self.hover_info[point_ix],  # read live value, not captured local
+                        self.get_hover_info(point_ix),
                         (event.x, event.y),
                         self.world_to_screen(coords[closest]),
                     )
@@ -1674,15 +1670,32 @@ class ScatterFigure(BaseFigure):
         self._recompute_hover_info()
 
     def _recompute_hover_info(self):
-        """Rebuild self.hover_info from the currently active hover columns."""
-        if self.metadata is None:
-            return
-        col_names = self.hover_col_names
-        if not col_names:
-            self.hover_info = np.array([""] * len(self.metadata))
-            return
-        fmt = "\n".join(f"{c}: {{{c}}}" for c in col_names)
-        self.hover_info = np.asarray(self.metadata.apply(fmt.format_map, axis=1))
+        """Switch hover text to the active hover columns (computed lazily on hover)."""
+        self._hover_use_cols = True
+
+    @property
+    def hover_info(self):
+        """Hover text for all points (computed on demand)."""
+        if getattr(self, "hover_info_org", None) is None:
+            return None
+        return np.array(
+            [
+                self._format_hover_text(self.get_hover_info(i))
+                for i in range(len(self.metadata))
+            ]
+        )
+
+    def get_hover_info(self, ix):
+        """Compute hover info for a single point on demand."""
+        if getattr(self, "_hover_use_cols", False):
+            # Series of the active columns; _format_hover_text renders
+            # them as "column: value" lines
+            print("!!! Using hover columns:", self.hover_col_names)
+            return self.metadata.iloc[ix][self.hover_col_names]
+        hover_col = self.hover_info_org
+        if "{" in hover_col:
+            return hover_col.format_map(self.metadata.iloc[ix])
+        return self.metadata[hover_col].iloc[ix]
 
     def _sync_selection_to_viewer(self):
         """Push the current scatter selection to the synced viewer."""

@@ -2133,6 +2133,14 @@ class ScatterFigure(BaseFigure):
             if self.point_visuals is not None:
                 self.update_point_position()
 
+        # Let the user know which embedding is now shown.
+        self.show_message(
+            f"Embedding: {entry.get('name', f'#{idx + 1}')}",
+            position="top-center",
+            color="w",
+            duration=2,
+        )
+
         if self.controls is not None:
             self.controls.on_embedding_switched()
 

@@ -759,6 +759,13 @@ class SingleProjectLoader(BaseProjectLoader):
                         "embedding": emb,
                         "features": feats,
                         "distances": dists,
+                        # Raw source specs (carry `type`/`metric` for display).
+                        "features_info": spec["feat_spec"]
+                        if isinstance(spec["feat_spec"], dict)
+                        else None,
+                        "distances_info": spec["dist_spec"]
+                        if isinstance(spec["dist_spec"], dict)
+                        else None,
                     }
                 )
                 report_if_callback(progress_callback, value=int(10 + (i + 1) * 30 / n))

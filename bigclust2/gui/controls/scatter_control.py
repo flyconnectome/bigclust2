@@ -1460,6 +1460,14 @@ class ScatterControls(QtWidgets.QWidget):
         )
         input_form.addRow("Data:", self.umap_dist_combo_box)
 
+        # Info about the selected source (shape + type/metric from the project info).
+        self.umap_source_info_label = QtWidgets.QLabel("")
+        self.umap_source_info_label.setWordWrap(True)
+        self.umap_source_info_label.setStyleSheet("color: #8a8a8a; font-size: 11px;")
+        # Bottom margin keeps it from crowding the Feature Subset group below.
+        self.umap_source_info_label.setContentsMargins(0, 0, 0, 8)
+        input_form.addRow(self.umap_source_info_label)
+
         # Optional sub-selection of top-level feature groups for MultiIndex columns.
         self.umap_feature_subset_group = QtWidgets.QGroupBox("Feature Subset")
         feature_subset_layout = QtWidgets.QVBoxLayout()
@@ -3676,6 +3684,42 @@ class ScatterControls(QtWidgets.QWidget):
         )
 
         self._update_densmap_controls()
+        self._update_embedding_source_info()
+
+    def _active_source_info(self, key):
+        """Return the raw `info` spec (with type/metric) for the selected source."""
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        active = getattr(self.figure, "active_embedding", None)
+        if active is None or not (0 <= active < len(entries)):
+            return None
+        entry = entries[active]
+        if key == "features":
+            return entry.get("features_info")
+        if key == "distances":
+            return entry.get("distances_info")
+        return None
+
+    def _update_embedding_source_info(self):
+        """Show shape (and type/metric, if available) for the selected source."""
+        label = getattr(self, "umap_source_info_label", None)
+        if label is None:
+            return
+
+        dists = getattr(self.figure, "dists", None)
+        key = self.umap_dist_combo_box.currentText()
+        arr = dists.get(key) if isinstance(dists, dict) else None
+        if arr is None or not hasattr(arr, "shape"):
+            label.setText("")
+            return
+
+        parts = [f"shape: {tuple(arr.shape)}"]
+        info = self._active_source_info(key)
+        if isinstance(info, dict):
+            if info.get("type"):
+                parts.append(f"type: {info['type']}")
+            if info.get("metric"):
+                parts.append(f"metric: {info['metric']}")
+        label.setText("  ·  ".join(parts))
 
     def _update_densmap_controls(self):
         """Show the dens_lambda control only when DensMAP is enabled."""

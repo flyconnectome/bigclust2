@@ -32,6 +32,7 @@ from PySide6.QtWidgets import (
     QWidgetAction,
     QFileDialog,
     QCheckBox,
+    QDialogButtonBox,
 )
 from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
@@ -56,6 +57,10 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 
 logger = logging.getLogger(__name__)
 
+
+# Ask for confirmation before Select All / Invert Selection grabs more
+# neurons than this.
+LARGE_SELECTION_THRESHOLD = 5000
 
 # Keep strong references to top-level windows so spawned windows stay alive.
 _OPEN_WINDOWS = []
@@ -1236,10 +1241,14 @@ class MainWindow(QMainWindow):
         selection_menu = menu_bar.addMenu("Selection")
 
         select_all_action = QAction("Select All", self)
+        # On other platforms Ctrl+A is taken by "Set Annotations" (see below).
+        if sys.platform == "darwin":
+            select_all_action.setShortcut(QKeySequence("Ctrl+A"))
         select_all_action.triggered.connect(self.on_select_all)
         selection_menu.addAction(select_all_action)
 
         invert_selection_action = QAction("Invert Selection", self)
+        invert_selection_action.setShortcut(QKeySequence("Ctrl+I"))
         invert_selection_action.triggered.connect(self.on_invert_selection)
         selection_menu.addAction(invert_selection_action)
 
@@ -1543,6 +1552,7 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["L"], "Toggle labels")
         _add_row(cl, ["←", "/", "→"], "Increase / decrease label font size")
         _add_row(cl, ["↑", "/", "↓"], "Increase / decrease marker size")
+        _add_row(cl, ["Space"], "Cycle through embeddings")
         _add_row(cl, ["mouse:double-left"], "Highlight points with the same label")
         _add_row(cl, ["⇧", "mouse:double-left"], "Select points with the same label")
         _add_row(cl, ["⌘", "⇧", "mouse:double-left"], "Add same-label points to selection")
@@ -2721,9 +2731,39 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Hover recompute on menu close failed: {e}")
 
+    def _confirm_large_selection(self, n):
+        """Ask the user to confirm a selection of `n` neurons if it is large."""
+        if n <= LARGE_SELECTION_THRESHOLD:
+            return True
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Confirm Selection")
+        dialog.setModal(True)
+
+        layout = QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 14)
+        layout.setSpacing(14)
+
+        msg = QLabel(f"Confirm selection of <b>{n:,}</b> neurons?")
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+
+        buttons = QDialogButtonBox()
+        no_btn = buttons.addButton(QDialogButtonBox.No)
+        yes_btn = buttons.addButton(QDialogButtonBox.Yes)
+        no_btn.clicked.connect(dialog.reject)
+        yes_btn.clicked.connect(dialog.accept)
+        no_btn.setDefault(True)
+        layout.addWidget(buttons)
+
+        dialog.setMinimumWidth(300)
+        return dialog.exec() == QDialog.Accepted
+
     def on_select_all(self):
         fig = self.current_view().fig_scatter
-        fig.selected = np.arange(len(getattr(fig, "ids", [])))
+        indices = np.arange(len(getattr(fig, "ids", [])))
+        if not self._confirm_large_selection(len(indices)):
+            return
+        fig.selected = indices
 
     def on_deselect_all(self):
         try:
@@ -2743,7 +2783,10 @@ class MainWindow(QMainWindow):
             all_indices = np.arange(len(getattr(fig, "ids", [])))
             current = fig.selected
             current_set = set(np.asarray(current, dtype=int).tolist()) if current is not None and len(current) > 0 else set()
-            fig.selected = np.array([i for i in all_indices if i not in current_set], dtype=int)
+            inverted = np.array([i for i in all_indices if i not in current_set], dtype=int)
+            if not self._confirm_large_selection(len(inverted)):
+                return
+            fig.selected = inverted
         except Exception as e:
             logger.debug(f"Invert Selection failed: {e}")
 

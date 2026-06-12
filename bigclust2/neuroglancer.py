@@ -81,6 +81,9 @@ class NglViewer:
 
     Parameters
     ----------
+    figure : bigclust2.Scatter, optional
+        The Scatter figure to link to. If provided, the viewer will automatically
+        update when the selection in the figure changes.
     debug : bool
         Whether to print debug messages.
     max_threads : int
@@ -92,14 +95,18 @@ class NglViewer:
 
     def __init__(
         self,
+        figure=None,
         debug=False,
         max_threads=20,
         viewer_kwargs={},
     ):
+        self.figure = figure
         self.debug = debug
 
         self.viewer = oc.Viewer(**viewer_kwargs)
         self.viewer.render_trigger = "reactive"
+        self.viewer.objects_pickable = True # need to set here once so we can set neuropil to non-pickable later
+        self.viewer.on_double_click = self._deselect_on_doubleclick
         self._centered = False
 
         # Holds the futures for requested data
@@ -139,6 +146,40 @@ class NglViewer:
     def max_cache_size(self, value):
         self.cache.maxsize = value
         self.report(f"Max cache size set to {self.cache.maxsize}", flush=True)
+
+    def _deselect_on_doubleclick(self, event, viewer):
+        """Deselect given object on double click."""
+        if not self.figure:
+            return
+
+        # Only respond to left double-clicks (right would be "2")
+        if event.button != 1:
+            return
+
+        # Parse the object (this will be e.g. a Mesh visual)
+        obj = event.pick_info["world_object"]
+
+        # Get the (legend) name of the object
+        hover_name = [k for k, v in viewer.objects.items() if obj in v]
+        hover_name = hover_name[0] if hover_name else None
+
+        if not hover_name:
+            return
+
+        # Get the visual object(s) corresponding to this name
+        hover_objects = viewer.objects[hover_name]
+
+        # Get the actual (id, dataset) for this object
+        hover_id = [k for k, v in self._segments.items() if v in hover_objects]
+
+        # Translate the ID (likely: id, dataset) to indices in the data
+        hover_indices = [self.data.index.get_loc(h) for h in hover_id if h in self.data.index]
+
+        self.report(f"Double-clicked on {hover_name} (ID: {hover_id}, indices: {hover_indices}), deselecting in figure.", flush=True)
+
+        # This should also take care of removing the clicked-on neuron from the viewer
+        self.figure.selected = list(set(list(self.figure.selected)) - set(hover_indices))
+
     def set_neuropil_mesh(self, neuropil_mesh, neuropil_source=None):
         """Set the neuropil mesh."""
         self.neuropil_source = neuropil_source
@@ -166,13 +207,17 @@ class NglViewer:
         self.viewer.center_camera()
         self._centered = True
 
+        # Make the neuropil non-pickable so that it doesn't interfere with picking neurons
+        for obj in self.viewer.objects["neuropil"]:
+            obj.material.pick_write = False
+
     def set_data(self, data):
         """Set the data for the viewer.
 
         Parameters
         ----------
         data : pandas.DataFrame
-            A DataFrame in the same order as neurons in original distance matrix.
+            A DataFrame in the same order as neurons in original distance matrix/feature vectors.
             Must, for each neuron, contain a 'segment_id' or 'id' column, and a
             `source` column that contains a URL for CloudVolume. Optional:
               - '_color' column that contains a color for the neuron.
@@ -698,10 +743,13 @@ class NglViewer:
             try:
                 # Let the future time out after
                 visual = future.result(60)  # wait up to 60 seconds for the result
-                visual.material.pick_write = True  # make sure the visual is pickable
             except TimeoutError:
                 finished_futures.append(((id, dataset), name))
                 self.report(f"Future for {id} ({dataset}) timed out.")
+                continue
+            except BaseException as e:
+                finished_futures.append(((id, dataset), name))
+                self.report(f"Future for {id} ({dataset}) raised an exception: {e}")
                 continue
 
             self.pool._task_counter += 1  # Increment the number of tasks processed
@@ -713,6 +761,7 @@ class NglViewer:
                 continue
 
             self.report(f"  Adding {id} ({dataset}) as {str(id)} (group '{name}')", flush=True)
+            visual.material.pick_write = True  # make sure the visual is pickable
             self.viewer.add(visual, group=str(name), name=str(id), center=False)
             self._segments[(id, dataset)] = visual
 

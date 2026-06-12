@@ -389,7 +389,7 @@ class NglViewer:
                 # We also need to make sure that the visual is visible
                 visual.visible = True
 
-                self.viewer.add(visual, name=str(name), center=False)
+                self.viewer.add(visual, group=str(name), name=str(id), center=False)
                 self._segments[(id, dataset)] = visual
             else:
                 self.report(f"  Loading visual for {id} ({dataset})", flush=True)

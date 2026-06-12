@@ -319,6 +319,12 @@ class MainWidget(QWidget):
             return
 
         sidebar.setVisible(not sidebar.isVisible())
+        # Size the sidebar on first open: the splitter is laid out at its real
+        # width here, unlike during construction (tab pages get an early layout
+        # pass at a junk size that would corrupt the splitter's size state).
+        if sidebar.isVisible() and not self.top_widget._initial_sidebar_width_applied:
+            self._set_sidebar_width(self.top_widget.splitter, 300)
+            self.top_widget._initial_sidebar_width_applied = True
         self.update_left_button_position(self.top_widget)
 
         # Force an update to prevent transparency artifacts on sidebar toggles.
@@ -334,6 +340,9 @@ class MainWidget(QWidget):
             return
 
         sidebar.setVisible(not sidebar.isVisible())
+        if sidebar.isVisible() and not self.bottom_widget._initial_sidebar_width_applied:
+            self._set_sidebar_width(self.bottom_widget.splitter, 300)
+            self.bottom_widget._initial_sidebar_width_applied = True
         self.update_left_button_position(self.bottom_widget)
 
         # Force an update to prevent transparency artifacts on sidebar toggles.
@@ -405,7 +414,11 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
+        # Resizes go to the content pane; the sidebar keeps its width. The
+        # sidebar width itself is set when it is first shown (see
+        # toggle_figure_controls).
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
         self.top_widget.setLayout(main_layout)
@@ -500,9 +513,6 @@ class MainWidget(QWidget):
 
         def on_resize(event):
             original_resize(event)
-            if not self.top_widget._initial_sidebar_width_applied:
-                self._set_sidebar_width(splitter, 300)
-                self.top_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
                     self.top_widget.width()
@@ -586,7 +596,11 @@ class MainWidget(QWidget):
 
         splitter.addWidget(sidebar)
         splitter.addWidget(content)
-        splitter.setSizes([300, 1])  # Updated after first resize to exact pixel width
+        # Resizes go to the content pane; the sidebar keeps its width. The
+        # sidebar width itself is set when it is first shown (see
+        # toggle_viewer_controls).
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
         self.bottom_widget.setLayout(main_layout)
@@ -683,9 +697,6 @@ class MainWidget(QWidget):
 
         def on_resize(event):
             original_resize(event)
-            if not self.bottom_widget._initial_sidebar_width_applied:
-                self._set_sidebar_width(splitter, 300)
-                self.bottom_widget._initial_sidebar_width_applied = True
             for i, button in enumerate(buttons):
                 x = (
                     self.bottom_widget.width()
@@ -717,10 +728,6 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         def apply_initial_bottom_overlay_layout():
-            if not self.bottom_widget._initial_sidebar_width_applied:
-                self._set_sidebar_width(splitter, 300)
-                self.bottom_widget._initial_sidebar_width_applied = True
-
             for i, button in enumerate(buttons):
                 x = (
                     self.bottom_widget.width()

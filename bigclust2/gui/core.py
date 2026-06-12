@@ -127,10 +127,11 @@ class MainWidget(QWidget):
         self.accent_color = None
         self.accent_dot = ""
 
-        # Per-view auxiliary widgets (created on demand by the main window)
-        self._connectivity_widget = None
-        self._connectivity_widget_synced = False
-        self._feature_explorer_widget = None
+        # Per-view auxiliary widgets (created on demand by the main window).
+        # Connectivity/feature widgets are keyed by embedding so each embedding
+        # gets its own widget (showing that embedding's features).
+        self._connectivity_widgets = {}
+        self._feature_explorer_widgets = {}
         self._annotation_dialog = None
         self._meta_explorer_dialog = None
         self._distance_widgets = []
@@ -149,8 +150,8 @@ class MainWidget(QWidget):
         be switched while it is open) and manages its own window title.
         """
         candidates = [
-            self._connectivity_widget,
-            self._feature_explorer_widget,
+            *self._connectivity_widgets.values(),
+            *self._feature_explorer_widgets.values(),
             self._meta_explorer_dialog,
             *self._distance_widgets,
         ]
@@ -1058,7 +1059,7 @@ class MainWindow(QMainWindow):
             if owner is not None:
                 # User closed an aux widget: don't restore it on tab switch.
                 obj._visible_in_tab = False
-                if obj is getattr(owner, "_connectivity_widget", None):
+                if obj in getattr(owner, "_connectivity_widgets", {}).values():
                     self._unsync_connectivity_widget(owner, obj)
         return super().eventFilter(obj, event)
 
@@ -1946,8 +1947,29 @@ class MainWindow(QMainWindow):
         if self.meta_explorer_action is not None:
             self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
 
+    def _active_embedding_key(self, view):
+        """Return ``(key, name)`` identifying the active embedding for a view.
+
+        `key` keys the per-embedding widget caches (the active embedding index,
+        or a sentinel when there are no entries). `name` is the embedding's
+        display name, used in widget titles - only set when more than one
+        embedding exists, so single-embedding projects keep plain titles.
+        """
+        fig = getattr(view, "fig_scatter", None)
+        idx = getattr(fig, "active_embedding", None) if fig is not None else None
+        entries = (getattr(fig, "embedding_entries", None) or []) if fig is not None else []
+        name = None
+        if idx is not None and 0 <= idx < len(entries) and len(entries) > 1:
+            name = str(entries[idx].get("name", ""))
+        key = idx if idx is not None else "__default__"
+        return key, name
+
     def show_connectivity_table(self):
-        """Open the connectivity table widget for the current view's project."""
+        """Open the connectivity table for the active embedding of the current view.
+
+        Widgets are cached per embedding, so switching embeddings and reopening
+        gives each embedding its own table (showing that embedding's features).
+        """
         if not self._can_open_connectivity_table():
             return
 
@@ -1955,16 +1977,18 @@ class MainWindow(QMainWindow):
         if view is None:
             return
 
-        existing = view._connectivity_widget
+        key, emb_name = self._active_embedding_key(view)
+
+        existing = view._connectivity_widgets.get(key)
         if existing is not None:
             try:
                 self._sync_connectivity_widget(view, existing)
-                # Reuse the existing widget for this project and bring it to front.
+                # Reuse this embedding's widget and bring it to front.
                 self._present_aux_widget(existing)
                 return
             except RuntimeError:
                 # Underlying Qt object was deleted elsewhere; rebuild on demand.
-                view._connectivity_widget = None
+                view._connectivity_widgets.pop(key, None)
 
         data = view._data if isinstance(view._data, dict) else {}
         features = data.get("features")
@@ -1974,10 +1998,15 @@ class MainWindow(QMainWindow):
         if features is None or meta_data is None:
             return
 
+        title = "Connectivity widget"
+        if emb_name:
+            title = f"Connectivity widget — {emb_name}"
+
         widget = ConnectivityTable(
             features,
             figure=fig,
             meta_data=meta_data,
+            title=title,
             parent=self,
         )
         self._register_aux_widget(view, widget)
@@ -1985,19 +2014,20 @@ class MainWindow(QMainWindow):
         widget.show()
 
         # Keep a strong reference so the window can be reopened instead of recreated.
-        view._connectivity_widget = widget
+        view._connectivity_widgets[key] = widget
         widget.destroyed.connect(
-            lambda _obj=None, v=view: setattr(v, "_connectivity_widget", None)
-        )
-        widget.destroyed.connect(
-            lambda _obj=None, v=view: setattr(v, "_connectivity_widget_synced", False)
+            lambda _obj=None, v=view, k=key: v._connectivity_widgets.pop(k, None)
         )
         widget.destroyed.connect(
             lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
         )
 
     def show_feature_explorer(self):
-        """Open the Feature Explorer widget for the current view's project."""
+        """Open the Feature Explorer for the active embedding of the current view.
+
+        Cached per embedding so each embedding gets its own explorer (showing
+        that embedding's features).
+        """
         if not self._can_open_feature_explorer():
             return
 
@@ -2005,13 +2035,15 @@ class MainWindow(QMainWindow):
         if view is None:
             return
 
-        existing = view._feature_explorer_widget
+        key, emb_name = self._active_embedding_key(view)
+
+        existing = view._feature_explorer_widgets.get(key)
         if existing is not None:
             try:
                 self._present_aux_widget(existing)
                 return
             except RuntimeError:
-                view._feature_explorer_widget = None
+                view._feature_explorer_widgets.pop(key, None)
 
         data = view._data if isinstance(view._data, dict) else {}
         features = data.get("features")
@@ -2027,14 +2059,17 @@ class MainWindow(QMainWindow):
         )
         widget.setAttribute(Qt.WA_DeleteOnClose, True)
         widget.setWindowFlag(Qt.Window, True)
-        widget.setWindowTitle("Feature Explorer")
+        title = "Feature Explorer"
+        if emb_name:
+            title = f"Feature Explorer — {emb_name}"
+        widget.setWindowTitle(title)
         self._register_aux_widget(view, widget)
         # widget.resize(1100, 700)
         widget.show()
 
-        view._feature_explorer_widget = widget
+        view._feature_explorer_widgets[key] = widget
         widget.destroyed.connect(
-            lambda _obj=None, v=view: setattr(v, "_feature_explorer_widget", None)
+            lambda _obj=None, v=view, k=key: v._feature_explorer_widgets.pop(k, None)
         )
 
     def show_meta_explorer(self):
@@ -2074,28 +2109,20 @@ class MainWindow(QMainWindow):
         )
 
     def _sync_connectivity_widget(self, view, widget):
-        """Ensure a view's connectivity widget is synced to figure selection."""
-        if widget is None or view._connectivity_widget_synced:
+        """Sync a connectivity widget to figure selection (idempotent)."""
+        if widget is None:
             return
-
         view.fig_scatter.sync_widget(widget)
-        view._connectivity_widget_synced = True
 
-    def _unsync_connectivity_widget(self, view, widget=None):
-        """Unsync a view's connectivity widget to avoid heavy updates while hidden."""
-        if not view._connectivity_widget_synced:
-            return
-
+    def _unsync_connectivity_widget(self, view, widget):
+        """Unsync a connectivity widget to avoid heavy updates while hidden."""
         if widget is None:
-            widget = view._connectivity_widget
-        if widget is None:
-            view._connectivity_widget_synced = False
             return
-
         try:
             view.fig_scatter.unsync_widget(widget)
-        finally:
-            view._connectivity_widget_synced = False
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
 
     def _dispose_view_aux_widgets(self, view):
         """Dispose all auxiliary widgets owned by a view (project context change)."""
@@ -2108,35 +2135,30 @@ class MainWindow(QMainWindow):
         self._dispose_distance_widgets(view)
 
     def _dispose_connectivity_widget(self, view):
-        """Dispose a view's connectivity widget."""
-        widget = view._connectivity_widget
-        if widget is None:
-            return
-
-        view._connectivity_widget = None
-        self._unsync_connectivity_widget(view, widget)
-
-        try:
-            widget.removeEventFilter(self)
-            widget.close()
-            widget.deleteLater()
-        except RuntimeError:
-            # Qt object may already be deleted.
-            pass
+        """Dispose all of a view's connectivity widgets."""
+        widgets = list(view._connectivity_widgets.values())
+        view._connectivity_widgets = {}
+        for widget in widgets:
+            self._unsync_connectivity_widget(view, widget)
+            try:
+                widget.removeEventFilter(self)
+                widget.close()
+                widget.deleteLater()
+            except RuntimeError:
+                # Qt object may already be deleted.
+                pass
 
     def _dispose_feature_explorer_widget(self, view):
-        """Dispose a view's feature explorer widget."""
-        widget = view._feature_explorer_widget
-        if widget is None:
-            return
-
-        view._feature_explorer_widget = None
-        try:
-            widget.close()
-            widget.deleteLater()
-        except RuntimeError:
-            # Qt object may already be deleted.
-            pass
+        """Dispose all of a view's feature explorer widgets."""
+        widgets = list(view._feature_explorer_widgets.values())
+        view._feature_explorer_widgets = {}
+        for widget in widgets:
+            try:
+                widget.close()
+                widget.deleteLater()
+            except RuntimeError:
+                # Qt object may already be deleted.
+                pass
 
     def _dispose_meta_explorer_dialog(self, view):
         """Dispose a view's meta explorer dialog."""
@@ -2352,10 +2374,16 @@ class MainWindow(QMainWindow):
         if distances is None or meta_data is None:
             return
 
+        _key, emb_name = self._active_embedding_key(view)
+        title = "Distance heatmap"
+        if emb_name:
+            title = f"Distance heatmap — {emb_name}"
+
         widget = DistancesTable(
             distances,
             figure=fig,
             meta_data=meta_data,
+            title=title,
             parent=self,
         )
         self._register_aux_widget(view, widget)
@@ -2773,6 +2801,8 @@ class MainWindow(QMainWindow):
                         "embedding": emb,
                         "features": feats,
                         "distances": dists,
+                        "features_info": entry.get("features_info"),
+                        "distances_info": entry.get("distances_info"),
                     }
                 )
 

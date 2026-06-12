@@ -21,6 +21,13 @@ pg.setConfigOptions(antialias=True)
 # Shorten the upstream/downstream labels for display
 SHORT = {"upstream": "up", "downstream": "ds"}
 
+# Above this many lines, per-line text labels become unreadable (and pyqtgraph
+# has no batched text primitive), so we skip them
+MAX_GRAPH_LABELS = 30
+
+# Skip the hoverable "+" symbols beyond this many points to keep the graph snappy
+MAX_GRAPH_POINTS = 50_000
+
 
 def trigger_graph_update(func):
     """Decorator to update the graph after the function is called."""
@@ -575,6 +582,12 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._tab_graph_layout.setSpacing(4)
         self._tab_graph.setLayout(self._tab_graph_layout)
 
+        # Building the graph can be expensive, so we defer it until the graph
+        # tab actually becomes visible (Qt sends a Show event to the tab page
+        # both on tab switch and when the whole window is re-shown)
+        self._graph_dirty = True
+        self._tab_graph.installEventFilter(self)
+
         self._graph_widget = pg.PlotWidget()
         self._graph_widget.setBackground("k")
         self._tab_graph_layout.addWidget(self._graph_widget)
@@ -619,6 +632,18 @@ class ConnectivityTable(QtWidgets.QWidget):
         )
         self._max_cols.valueChanged.connect(self.update_graph)
         row.addWidget(self._max_cols)
+
+        # Spinbox for maximum number of rows to plot
+        row.addWidget(QtWidgets.QLabel("Max rows:"))
+        self._max_rows = QtWidgets.QSpinBox()
+        self._max_rows.setRange(1, 100_000)
+        self._max_rows.setValue(100)
+        self._max_rows.setSingleStep(10)
+        self._max_rows.setToolTip(
+            "Set the maximum number of rows to plot in the graph"
+        )
+        self._max_rows.valueChanged.connect(self.update_graph)
+        row.addWidget(self._max_rows)
 
         # Stretch the row
         row.addStretch()
@@ -721,6 +746,14 @@ class ConnectivityTable(QtWidgets.QWidget):
                 return
         super().keyPressEvent(event)
 
+    def eventFilter(self, obj, event):
+        # Rebuild the graph when its tab becomes visible (tab switch or window
+        # re-show) and an update was deferred in the meantime
+        if obj is self._tab_graph and event.type() == QtCore.QEvent.Type.Show:
+            if self._graph_dirty:
+                self._rebuild_graph()
+        return super().eventFilter(obj, event)
+
     def update_always_on_top(self, *args, **kwargs):
         """Toggle whether this widget should float above other BigClust windows."""
         self.setWindowFlag(Qt.Tool, self._always_on_top.isChecked())
@@ -737,7 +770,64 @@ class ConnectivityTable(QtWidgets.QWidget):
             self._toggle_options_button.setToolTip("Show options panel")
 
     def update_graph(self):
-        """Update the graph view with the selected IDs."""
+        """Update the graph view with the selected IDs.
+
+        While the graph tab is hidden this only marks the graph as dirty;
+        the actual (potentially expensive) rebuild is deferred until the
+        tab is next shown.
+        """
+        if not self._tab_graph.isVisible():
+            self._graph_dirty = True
+            return
+        self._rebuild_graph()
+
+    def _graph_line_colors(self, index, label=None, id2color=None):
+        """Determine the line color for each row in `index`."""
+        scheme = self._color_dropdown.currentText()
+        if scheme == "Up/Downstream":
+            color = {"upstream": "cyan", "downstream": "red"}.get(label, "w")
+            return [color] * len(index)
+        elif scheme == "ID":
+            # Generate a random color for each row
+            colors = []
+            for ix in index:
+                # Collapsed rows have (string) labels as index which can't
+                # be translated into a color
+                try:
+                    colors.append(rgb_from_segment_id(color_seed=1985, segment_id=ix))
+                except (TypeError, ValueError):
+                    colors.append("w")
+            return colors
+        else:
+            # Use the selected meta data column to color the lines
+            id2color = id2color if id2color is not None else {}
+            return [id2color.get(ix, "w") for ix in index]
+
+    def _plot_line_batches(self, x, V, row_colors):
+        """Plot rows of `V` as lines, batched into one curve item per color."""
+        groups = {}
+        for i, c in enumerate(row_colors):
+            qcol = pg.mkColor(c)
+            groups.setdefault(qcol.name(), (qcol, []))[1].append(i)
+
+        # NaN separators let us draw all same-colored lines as a single item
+        x_nan = np.append(x.astype(float), np.nan)
+        for qcol, rows in groups.values():
+            xs = np.tile(x_nan, len(rows))
+            ys = np.column_stack([V[rows], np.full(len(rows), np.nan)]).ravel()
+            curve = pg.PlotCurveItem(
+                x=xs,
+                y=ys,
+                connect="finite",
+                pen=pg.mkPen(color=qcol, width=self._line_width.value()),
+            )
+            curve.setOpacity(0.8)
+            self._graph_widget.addItem(curve)
+
+    def _rebuild_graph(self):
+        """Rebuild the graph from the current table view."""
+        self._graph_dirty = False
+
         # First clear
         self._graph_widget.clear()
 
@@ -753,6 +843,18 @@ class ConnectivityTable(QtWidgets.QWidget):
         # Plot only the first N columns
         data = data.iloc[:, : self._max_cols.value()]
 
+        # Plot only the first N rows
+        n_total = len(data)
+        data = data.iloc[: self._max_rows.value()]
+        if len(data) < n_total:
+            self._graph_widget.setTitle(
+                f"Showing first {len(data)} of {n_total} rows",
+                color="#aaaaaa",
+                size="9pt",
+            )
+        else:
+            self._graph_widget.setTitle(None)
+
         if data.empty:
             return
 
@@ -767,6 +869,7 @@ class ConnectivityTable(QtWidgets.QWidget):
             cols = data.columns
             x = np.arange(len(cols))
 
+        id2color = None
         if self._color_dropdown.currentText() in self._meta_data.columns:
             this_meta = self._meta_data.loc[data.index]
             vals = this_meta[self._color_dropdown.currentText()].unique()
@@ -780,71 +883,73 @@ class ConnectivityTable(QtWidgets.QWidget):
                 )
             }
 
-        for index, row in data.iterrows():
-            if self._color_dropdown.currentText() == "ID":
-                # Generate a random color for each row
-                color = rgb_from_segment_id(color_seed=1985, segment_id=index)
-            elif self._color_dropdown.currentText() != "Up/Downstream":
-                # Use the selected column to color the lines
-                color = id2color.get(index, "w")
+        # Collect per-point data for the "+" symbols and per-line text labels
+        # as we go; both are added in a single batch at the end
+        pts_x, pts_y, pts_brush, pts_data = [], [], [], []
+        labels = []
 
-            if isinstance(data.columns, pd.MultiIndex):
-                for label in ["upstream", "downstream"]:
-                    if self._color_dropdown.currentText() == "Up/Downstream":
-                        color = {"upstream": "cyan", "downstream": "red"}[label]
+        if isinstance(data.columns, pd.MultiIndex):
+            for label in ("upstream", "downstream"):
+                if label not in data.columns.get_level_values(0):
+                    continue
 
-                    if label not in row:
-                        continue
+                # All of this direction's values as a (n_rows, n_cols) array
+                V = data[label].reindex(columns=cols).fillna(0).values
+                row_colors = self._graph_line_colors(data.index, label, id2color)
 
-                    pen = pg.mkPen(color=color, width=self._line_width.value())
-                    y = row[label].reindex(cols).fillna(0).values
-                    line = self._graph_widget.plot(
-                        x,
-                        y,
-                        name=str(index),
-                        pen=pen,
-                        symbol="+",
-                        symbolSize=5,
-                        symbolBrush=(color),
-                    )
-                    line.setAlpha(0.8, False)
+                self._plot_line_batches(x, V, row_colors)
 
-                    # Add hover tooltip to the line
-                    def hovered(sig, points):
-                        """Handle hover events on the line."""
-                        if not points:
-                            return
-                        point = points[0]
-                        # Show the index and label in the tooltip
-                        point.setToolTip(
-                            f"{index} ({SHORT[label]})\n"
-                            f"Synapse count: {point.y():.2f}"
-                        )
-                    line.sigPointsHovered.connect(hovered)
+                pts_x.append(np.tile(x, len(V)))
+                pts_y.append(V.ravel())
+                pts_brush += [c for c in row_colors for _ in range(len(cols))]
+                pts_data += [
+                    (ix, SHORT[label]) for ix in data.index for _ in range(len(cols))
+                ]
+                labels += [
+                    (f"{ix} ({SHORT[label]})", c, V[i, 0])
+                    for i, (ix, c) in enumerate(zip(data.index, row_colors))
+                ]
+        else:
+            V = data.fillna(0).values
+            row_colors = ["w"] * len(data)
 
-                    # Add text at the beginning of the line
-                    text = pg.TextItem(
-                        f"{index} ({SHORT[label]})",
-                        anchor=(1, 0.5),
-                        color=color,
-                        border=None,
-                    )
-                    text.setPos(-0.1, y[0])
-                    text.setFont(QtGui.QFont("Arial", 8))
-                    self._graph_widget.addItem(text)
-            else:
-                color = "w"
-                pen = pg.mkPen(color=color, alpha=0.1, width=self._line_width.value())
-                self._graph_widget.plot(
-                    x,
-                    row.fillna(0).values,
-                    name=str(index),
-                    pen=pen,
-                    symbol="+",
-                    symbolSize=5,
-                    symbolBrush=(color),
-                )
-                cols = data.columns
+            self._plot_line_batches(x, V, row_colors)
+
+            pts_x.append(np.tile(x, len(V)))
+            pts_y.append(V.ravel())
+            pts_brush += [c for c in row_colors for _ in range(len(cols))]
+            pts_data += [(ix, None) for ix in data.index for _ in range(len(cols))]
+
+        # Add the "+" symbols as a single batched scatter item with hover tooltips
+        n_points = sum(len(p) for p in pts_x)
+        if 0 < n_points <= MAX_GRAPH_POINTS:
+
+            def tip(x, y, data):
+                ix, direction = data
+                head = f"{ix} ({direction})" if direction else f"{ix}"
+                return f"{head}\nSynapse count: {y:.2f}"
+
+            scatter = pg.ScatterPlotItem(
+                x=np.concatenate(pts_x),
+                y=np.concatenate(pts_y),
+                symbol="+",
+                size=5,
+                pen=pg.mkPen(200, 200, 200),
+                brush=pts_brush,
+                data=pts_data,
+                hoverable=True,
+                tip=tip,
+            )
+            scatter.setOpacity(0.8)
+            self._graph_widget.addItem(scatter)
+
+        # Add text at the beginning of each line (unless there are too many)
+        if len(labels) <= MAX_GRAPH_LABELS:
+            for text, color, y0 in labels:
+                item = pg.TextItem(text, anchor=(1, 0.5), color=color, border=None)
+                item.setPos(-0.1, y0)
+                item.setFont(QtGui.QFont("Arial", 8))
+                self._graph_widget.addItem(item)
 
         # Set the x-ticks to the column names
         self._graph_widget.getAxis("bottom").setTicks(

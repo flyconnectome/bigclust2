@@ -92,6 +92,19 @@ def _make_dot_icon(color, size=10):
     painter.end()
     return QIcon(pixmap)
 
+
+def _dismiss_active_popup():
+    """Close any active popup window (e.g. a completer dropdown).
+
+    Tearing a widget out from under its open popup (closing or moving its
+    tab) leaves a stale entry in Qt's application-wide popup stack; key
+    events are then redirected to the dead popup, i.e. swallowed, until a
+    mouse click dismisses it.
+    """
+    popup = QApplication.activePopupWidget()
+    if popup is not None:
+        popup.close()
+
 try:
     ASSETS_FILE_PATH = files("bigclust2") / "assets"
 except ModuleNotFoundError:
@@ -170,6 +183,23 @@ class MainWidget(QWidget):
                 continue
             widgets.append(widget)
         return widgets
+
+    def focus_canvas(self):
+        """Give keyboard focus to the scatter canvas.
+
+        The global key bindings (Escape, space, arrows, ...) are rendercanvas
+        events and only fire while the canvas widget has Qt focus.
+        """
+        canvas = getattr(getattr(self, "fig_scatter", None), "canvas", None)
+        # The RenderCanvas wrapper proxies events to an inner subwidget; that
+        # subwidget is the one with a focus policy and the key handlers.
+        target = getattr(canvas, "_subwidget", None) or canvas
+        if target is None:
+            return
+        try:
+            target.setFocus(Qt.OtherFocusReason)
+        except RuntimeError:
+            pass  # canvas already deleted
 
     def teardown_rendering(self):
         """Stop render backends before Qt starts deleting child widgets."""
@@ -1630,11 +1660,20 @@ class MainWindow(QMainWindow):
 
     def _on_current_tab_changed(self, index):
         """Sync window chrome (title, actions, status bar) to the active tab."""
+        _dismiss_active_popup()
         view = self._tabs.widget(index) if index >= 0 else None
         self._sync_window_title()
         self._update_view_actions()
         self._refresh_window_menu_actions()
         self._sync_actions_to_view(view)
+
+        # Hand keyboard focus to the canvas. Qt does not reliably reassign
+        # focus when the tab holding the focused widget goes away (e.g.
+        # Cmd+W while typing in a text field), which would leave the global
+        # key bindings dead until the user clicks a focusable widget.
+        if view is not None:
+            view.focus_canvas()
+            self._reassert_native_key_focus()
 
         # Only the active tab's auxiliary widgets are shown.
         self._update_aux_widget_visibility()
@@ -1664,6 +1703,22 @@ class MainWindow(QMainWindow):
                 view.ngl_viewer.force_single_render()
             except Exception as e:
                 logger.debug(f"Failed to refresh canvases after tab switch: {e}")
+
+    def _reassert_native_key_focus(self):
+        """Point the OS-level key routing back at this window.
+
+        The wgpu canvases force native window handles onto parts of the
+        widget tree, so a text field can live inside a native subwindow.
+        Typing there makes that subwindow's view the macOS first responder,
+        and Qt-side focus changes do not move it back. When the subwindow
+        dies with its tab, the first responder dangles and macOS drops all
+        key events before Qt sees them. Re-activating the (already active)
+        window makes its top-level content view the first responder again,
+        restoring delivery to Qt's focus widget.
+        """
+        handle = self.windowHandle()
+        if handle is not None and self.isActiveWindow():
+            handle.requestActivate()
 
     def _sync_actions_to_view(self, view):
         """Mirror the per-view checkable menu actions to the given view's state."""
@@ -1821,6 +1876,7 @@ class MainWindow(QMainWindow):
 
     def close_view(self, view):
         """Tear down and remove a view; closing the last tab closes the window."""
+        _dismiss_active_popup()
         if self._tabs.count() <= 1:
             # closeEvent takes care of tearing down the remaining view.
             self.close()
@@ -1856,6 +1912,7 @@ class MainWindow(QMainWindow):
         if index < 0:
             return None
 
+        _dismiss_active_popup()
         self._tabs.removeTab(index)
         window = MainWindow(adopt_view=view)
         window._parent_window = self
@@ -1880,6 +1937,7 @@ class MainWindow(QMainWindow):
         if parent is None:
             return
 
+        _dismiss_active_popup()
         views = self.views()
         for view in views:
             index = self._tabs.indexOf(view)
@@ -2631,6 +2689,9 @@ class MainWindow(QMainWindow):
                 self._load_project_from_dialog(dialog)
 
     def closeEvent(self, event):
+        # A popup left open in this window would keep eating key events in
+        # the remaining windows after this one is gone.
+        _dismiss_active_popup()
         for view in self.views():
             if view is not None and hasattr(view, "teardown_rendering"):
                 self._teardown_view(view)

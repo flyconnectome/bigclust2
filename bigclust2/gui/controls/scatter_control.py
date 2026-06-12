@@ -3466,11 +3466,14 @@ class ScatterControls(QtWidgets.QWidget):
         self._sync_window_data_active()
 
     def _sync_window_data_active(self):
-        """Mirror the active embedding's artifacts into the owning window's _data."""
-        win = self.figure.canvas.window()
-        while win is not None and not isinstance(getattr(win, "_data", None), dict):
-            win = win.parent()
-        if win is None:
+        """Mirror the active embedding's artifacts into the owning view's _data."""
+        # Walk up from the canvas to the view (MainWidget) that owns this
+        # figure. Views live as tabs inside the main window, so we must stop at
+        # the owning view rather than the top-level window.
+        owner = self.figure.canvas
+        while owner is not None and getattr(owner, "fig_scatter", None) is not self.figure:
+            owner = owner.parentWidget()
+        if owner is None or not isinstance(getattr(owner, "_data", None), dict):
             return
 
         active = getattr(self.figure, "active_embedding", None)
@@ -3479,12 +3482,18 @@ class ScatterControls(QtWidgets.QWidget):
             return
 
         entry = entries[active]
-        win._data["embeddings"] = entry["embedding"]
-        win._data["features"] = entry["features"]
-        win._data["distances"] = entry["distances"]
-        win._data["active_embedding"] = active
-        if hasattr(win, "_update_view_actions"):
-            win._update_view_actions()
+        owner._data["embeddings"] = entry["embedding"]
+        owner._data["features"] = entry["features"]
+        owner._data["distances"] = entry["distances"]
+        owner._data["active_embedding"] = active
+
+        # Menu enablement reflects the active tab only.
+        window = owner.window()
+        current_view = getattr(window, "current_view", None)
+        if hasattr(window, "_update_view_actions") and (
+            current_view is None or current_view() is owner
+        ):
+            window._update_view_actions()
 
     def update_fidelity_options(self):
         """Update fidelity controls based on available distances/features."""

@@ -295,7 +295,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 
 		self.select_btn = QtWidgets.QPushButton("Select in Main Window")
 		self.select_btn.clicked.connect(self._on_select)
-		self.open_new_btn = QtWidgets.QPushButton("Open as New Project")
+		self.open_new_btn = QtWidgets.QPushButton("Open in New Tab")
 		self.open_new_btn.clicked.connect(self._on_open_new)
 		self.close_btn = QtWidgets.QPushButton("Close")
 		self.close_btn.clicked.connect(self.close)
@@ -492,7 +492,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		ind = self.selected_row_positions()
 		if self._figure is not None:
 			try:
-				self._figure.open_selection_in_new_window(ind=ind)
+				self._figure.open_selection_in_new_tab(ind=ind)
 			except Exception:
 				pass
 		self.openInNewWindowRequested.emit(ind)

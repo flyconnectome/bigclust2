@@ -395,16 +395,16 @@ class ScatterFigure(BaseFigure):
         ind = np.where(np.isin(self.ids, x))[0]
         self.selected = ind
 
-    def open_selection_in_new_window(self, ids=None, ind=None):
-        """Open the current or given selection in a new window.
+    def open_selection_in_new_tab(self, ids=None, ind=None):
+        """Open the current or given selection in a new tab.
 
         Parameters
         ----------
         ids : array-like of int or str, optional
-            IDs of the leafs to open in a new window. If None, the currently
+            IDs of the leafs to open in a new tab. If None, the currently
             selected leafs will be used.
         ind : array-like of int, optional
-            Indices of the leafs to open in a new window. If None, the currently
+            Indices of the leafs to open in a new tab. If None, the currently
             selected leafs will be used.
         """
         if ids is not None and ind is not None:
@@ -418,20 +418,23 @@ class ScatterFigure(BaseFigure):
 
         window = self.canvas.window()
         while window is not None and not hasattr(
-            window, "on_open_selection_in_new_window"
+            window, "on_open_selection_in_new_tab"
         ):
             window = window.parent()
 
         if window is None:
             raise RuntimeError(
-                "Unable to find parent window to open selection in a new window."
+                "Unable to find parent window to open selection in a new tab."
             )
 
-        window.on_open_selection_in_new_window()
+        window.on_open_selection_in_new_tab()
 
         self.selected = (
-            curr_sel  # restore the current selection after opening the new window
+            curr_sel  # restore the current selection after opening the new tab
         )
+
+    # Backwards-compatible alias
+    open_selection_in_new_window = open_selection_in_new_tab
 
     @property
     def selected_ids_dataset(self):

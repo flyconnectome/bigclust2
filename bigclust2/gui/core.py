@@ -2,6 +2,7 @@ import sys
 import cmap
 import csv
 import io
+import itertools
 import json
 import logging
 from datetime import datetime
@@ -32,11 +33,12 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
 )
-from PySide6.QtGui import QIcon, QAction, QKeySequence, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush
+from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
+from .tabs import ViewTabWidget
 from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
@@ -58,6 +60,33 @@ logger = logging.getLogger(__name__)
 # Keep strong references to top-level windows so spawned windows stay alive.
 _OPEN_WINDOWS = []
 
+# Accent colors assigned to tabs/views so users can match auxiliary widgets to
+# their tab: a painted dot in the tab plus a matching circle character in
+# window titles (native macOS title bars can't show icons).
+_TAB_ACCENTS = [
+    ("#e74c3c", "\U0001f534"),  # red
+    ("#3498db", "\U0001f535"),  # blue
+    ("#2ecc71", "\U0001f7e2"),  # green
+    ("#e67e22", "\U0001f7e0"),  # orange
+    ("#9b59b6", "\U0001f7e3"),  # purple
+    ("#f1c40f", "\U0001f7e1"),  # yellow
+    ("#8d6e63", "\U0001f7e4"),  # brown
+]
+_NEXT_TAB_ACCENT = itertools.count()
+
+
+def _make_dot_icon(color, size=10):
+    """Create a round single-color icon (used as per-tab accent dot)."""
+    pixmap = QPixmap(size, size)
+    pixmap.fill(Qt.transparent)
+    painter = QPainter(pixmap)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setBrush(QBrush(QColor(color)))
+    painter.setPen(Qt.NoPen)
+    painter.drawEllipse(0, 0, size, size)
+    painter.end()
+    return QIcon(pixmap)
+
 try:
     ASSETS_FILE_PATH = files("bigclust2") / "assets"
 except ModuleNotFoundError:
@@ -76,14 +105,65 @@ def resize_figures(func):
 
 
 class MainWidget(QWidget):
-    """Main widget for the application."""
+    """A single view into a project: scatter figure, 3D viewer and per-view state.
 
-    def __init__(self, status_bar, selection_counter):
+    One instance per tab in the main window. Owns the project data and any
+    auxiliary widgets (connectivity table, explorers, ...) opened for it.
+    """
+
+    def __init__(self, selection_counter=None):
         super().__init__()
         self._teardown_done = False
-        self._status_bar = status_bar
+        if selection_counter is None:
+            selection_counter = QLabel("Selected: N/A  ")
         self._selection_counter = selection_counter
+
+        # Per-view project state
+        self._data = None
+        self._current_project_loader = None
+        self.view_title = "untitled"
+        # Accent color identifying this view across tab + widget titles;
+        # assigned by MainWindow.add_new_tab and kept for life (incl. detach).
+        self.accent_color = None
+        self.accent_dot = ""
+
+        # Per-view auxiliary widgets (created on demand by the main window)
+        self._connectivity_widget = None
+        self._connectivity_widget_synced = False
+        self._feature_explorer_widget = None
+        self._annotation_dialog = None
+        self._meta_explorer_dialog = None
+        self._distance_widgets = []
+
         self.init_ui()
+
+    @property
+    def selection_counter(self):
+        """Status bar label showing this view's selection count."""
+        return self._selection_counter
+
+    def aux_widgets(self):
+        """All live auxiliary widgets owned by this view.
+
+        Excludes the annotation dialog: it is application-modal (tabs cannot
+        be switched while it is open) and manages its own window title.
+        """
+        candidates = [
+            self._connectivity_widget,
+            self._feature_explorer_widget,
+            self._meta_explorer_dialog,
+            *self._distance_widgets,
+        ]
+        widgets = []
+        for widget in candidates:
+            if widget is None:
+                continue
+            try:
+                widget.objectName()  # raises RuntimeError if Qt object is gone
+            except RuntimeError:
+                continue
+            widgets.append(widget)
+        return widgets
 
     def teardown_rendering(self):
         """Stop render backends before Qt starts deleting child widgets."""
@@ -886,7 +966,7 @@ class MainWindow(QMainWindow):
     annotation_submit_result_received = Signal(str)
     annotation_changed = Signal(object)
 
-    def __init__(self):
+    def __init__(self, adopt_view=None):
         super().__init__()
         self.setAttribute(Qt.WA_DeleteOnClose, True)
         self.settings = QSettings("BigClust", "BigClustGUI")
@@ -894,13 +974,17 @@ class MainWindow(QMainWindow):
         self.connectivity_table_action = None
         self.distances_table_action = None
         self.feature_explorer_action = None
+        self.meta_explorer_action = None
         self.sync_viewer_action = None
         self._hover_columns_menu = None
-        self._current_project_loader = None
-        self._connectivity_widget = None
-        self._connectivity_widget_synced = False
-        self._feature_explorer_widget = None
-        self._annotation_dialog = None
+        self._adopt_view = adopt_view
+        self._active_selection_counter = None
+        # Window this one was detached from (for "merge back"), if any.
+        self._parent_window = None
+        # Whether widgets of background tabs are hidden (global preference).
+        self._hide_inactive_aux_widgets = self.settings.value(
+            "auxWidgets/hideInactiveTabWidgets", True, type=bool
+        )
         self._annotation_log = []
         self._annotation_log_dir = Path.home() / ".bigclust"
         self._annotation_log_dir.mkdir(parents=True, exist_ok=True)
@@ -908,7 +992,6 @@ class MainWindow(QMainWindow):
             f"annotation_{datetime.now().strftime('%Y%m%d_%H%M%S_%f')}.log"
         )
         self._annotation_log_file.touch(exist_ok=True)
-        self._distance_widgets = []
         self.annotation_submit_result_received.connect(
             self._handle_annotation_submit_result
         )
@@ -921,9 +1004,55 @@ class MainWindow(QMainWindow):
         )
         self.init_ui()
 
+    def current_view(self):
+        """Return the currently active view (MainWidget) or None."""
+        tabs = getattr(self, "_tabs", None)
+        return tabs.currentWidget() if tabs is not None else None
+
+    def views(self):
+        """Return all views (MainWidgets) hosted in this window."""
+        tabs = getattr(self, "_tabs", None)
+        if tabs is None:
+            return []
+        return [tabs.widget(i) for i in range(tabs.count())]
+
+    # Project data lives on the per-tab view; these properties keep the many
+    # existing `self._data` / `self._current_project_loader` references working
+    # by delegating to the active tab.
+    @property
+    def _data(self):
+        view = self.current_view()
+        return getattr(view, "_data", None) if view is not None else None
+
+    @_data.setter
+    def _data(self, value):
+        view = self.current_view()
+        if view is not None:
+            view._data = value
+
+    @property
+    def _current_project_loader(self):
+        view = self.current_view()
+        return (
+            getattr(view, "_current_project_loader", None)
+            if view is not None
+            else None
+        )
+
+    @_current_project_loader.setter
+    def _current_project_loader(self, value):
+        view = self.current_view()
+        if view is not None:
+            view._current_project_loader = value
+
     def eventFilter(self, obj, event):
-        if obj is self._connectivity_widget and event.type() == QEvent.Close:
-            self._unsync_connectivity_widget(obj)
+        if event.type() == QEvent.Close:
+            owner = getattr(obj, "_owner_view", None)
+            if owner is not None:
+                # User closed an aux widget: don't restore it on tab switch.
+                obj._visible_in_tab = False
+                if obj is getattr(owner, "_connectivity_widget", None):
+                    self._unsync_connectivity_widget(owner, obj)
         return super().eventFilter(obj, event)
 
     def init_ui(self):
@@ -947,12 +1076,24 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready", timeout=5000)
 
-        self.selection_counter = QLabel("Selected: N/A  ")
-        self.status_bar.addPermanentWidget(self.selection_counter)
+        # Tab widget hosting one view (MainWidget) per tab
+        self._tabs = ViewTabWidget()
+        self._tabs.currentChanged.connect(self._on_current_tab_changed)
+        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        # Queued so the tab bar's mouse handling finishes before we mutate it.
+        self._tabs.detach_requested.connect(
+            self._on_tab_detach_requested, Qt.QueuedConnection
+        )
+        self.setCentralWidget(self._tabs)
 
-        # Create and set the main widget
-        main_widget = MainWidget(status_bar=self.status_bar, selection_counter=self.selection_counter)
-        self.setCentralWidget(main_widget)
+        if self._adopt_view is not None:
+            view = self._adopt_view
+            self._adopt_view = None
+            self.add_new_tab(
+                title=getattr(view, "view_title", "untitled"), view=view
+            )
+        else:
+            self.add_new_tab(title="untitled")
 
         # Menu bar with File -> Open Project
         menu_bar = self.menuBar()
@@ -967,13 +1108,23 @@ class MainWindow(QMainWindow):
         open_project_action.triggered.connect(self.show_open_project_dialog)
         file_menu.addAction(open_project_action)
 
+        new_tab_action = QAction("New Tab", self)
+        new_tab_action.setShortcut(QKeySequence("Ctrl+T"))
+        new_tab_action.triggered.connect(lambda: self.add_new_tab(title="untitled"))
+        file_menu.addAction(new_tab_action)
+
         new_window_action = QAction("New Window", self)
         new_window_action.setShortcut(QKeySequence("Shift+Meta+N"))
         new_window_action.triggered.connect(self.open_new_window)
         file_menu.addAction(new_window_action)
 
+        close_tab_action = QAction("Close Tab", self)
+        close_tab_action.setShortcut(QKeySequence.Close)
+        close_tab_action.triggered.connect(self.close_current_tab)
+        file_menu.addAction(close_tab_action)
+
         close_window_action = QAction("Close Window", self)
-        close_window_action.setShortcut(QKeySequence.Close)
+        close_window_action.setShortcut(QKeySequence("Shift+Ctrl+W"))
         close_window_action.triggered.connect(self.close)
         file_menu.addAction(close_window_action)
 
@@ -1012,13 +1163,13 @@ class MainWindow(QMainWindow):
 
         center_scatter_action = QAction("Scatter", self)
         center_scatter_action.triggered.connect(
-            lambda: self.centralWidget().fig_scatter.center_camera()
+            lambda: self.current_view().fig_scatter.center_camera()
         )
         center_menu.addAction(center_scatter_action)
 
         center_3d_action = QAction("3D Viewer", self)
         center_3d_action.triggered.connect(
-            lambda: self.centralWidget().ngl_viewer.viewer.center_camera()
+            lambda: self.current_view().ngl_viewer.viewer.center_camera()
         )
         center_menu.addAction(center_3d_action)
 
@@ -1026,13 +1177,13 @@ class MainWindow(QMainWindow):
 
         toggle_figure_controls_action = QAction("Toggle Figure Controls", self)
         toggle_figure_controls_action.triggered.connect(
-            lambda: self.centralWidget().toggle_figure_controls()
+            lambda: self.current_view().toggle_figure_controls()
         )
         view_menu.addAction(toggle_figure_controls_action)
 
         toggle_viewer_controls_action = QAction("Toggle Viewer Controls", self)
         toggle_viewer_controls_action.triggered.connect(
-            lambda: self.centralWidget().toggle_viewer_controls()
+            lambda: self.current_view().toggle_viewer_controls()
         )
         view_menu.addAction(toggle_viewer_controls_action)
 
@@ -1046,7 +1197,7 @@ class MainWindow(QMainWindow):
             "Toggle synchronization from scatter selection to 3D viewer"
         )
         self.sync_viewer_action.toggled.connect(
-            lambda checked: self.centralWidget().fig_scatter.set_viewer_sync(
+            lambda checked: self.current_view().fig_scatter.set_viewer_sync(
                 checked, sync_now=checked
             )
         )
@@ -1057,7 +1208,7 @@ class MainWindow(QMainWindow):
         self.show_hoverinfo_action.setChecked(True)
         self.show_hoverinfo_action.toggled.connect(
             lambda checked: setattr(
-                self.centralWidget().fig_scatter,
+                self.current_view().fig_scatter,
                 "_hide_hover",
                 not checked,
             )
@@ -1098,14 +1249,14 @@ class MainWindow(QMainWindow):
         selection_menu.addAction(set_annotations_action)
 
         selection_menu.addSeparator()
-        open_selection_in_new_window_action = QAction("Open in New Window", self)
-        open_selection_in_new_window_action.setShortcut(
+        open_selection_in_new_tab_action = QAction("Open in New Tab", self)
+        open_selection_in_new_tab_action.setShortcut(
             QKeySequence("Shift+Ctrl+Meta+N")
         )
-        open_selection_in_new_window_action.triggered.connect(
-            self.on_open_selection_in_new_window
+        open_selection_in_new_tab_action.triggered.connect(
+            self.on_open_selection_in_new_tab
         )
-        selection_menu.addAction(open_selection_in_new_window_action)
+        selection_menu.addAction(open_selection_in_new_tab_action)
 
         open_in_neuroglancer_action = QAction("Open in Neuroglancer", self)
         open_in_neuroglancer_action.triggered.connect(self.on_open_in_neuroglancer)
@@ -1165,6 +1316,46 @@ class MainWindow(QMainWindow):
         minimize_action.triggered.connect(self.showMinimized)
         window_menu.addAction(minimize_action)
 
+        window_menu.addSeparator()
+
+        self.detach_tab_action = QAction("Move Tab to New Window", self)
+        self.detach_tab_action.setToolTip(
+            "Open the current tab as a separate window (same as dragging the "
+            "tab out of the tab bar)."
+        )
+        self.detach_tab_action.triggered.connect(self.detach_current_tab)
+        self.detach_tab_action.setEnabled(False)
+        window_menu.addAction(self.detach_tab_action)
+
+        self.merge_window_action = QAction("Merge Window into Parent", self)
+        self.merge_window_action.setToolTip(
+            "Move this window's tabs back into the window it was detached from."
+        )
+        self.merge_window_action.triggered.connect(self.merge_into_parent_window)
+        self.merge_window_action.setEnabled(False)
+        window_menu.addAction(self.merge_window_action)
+
+        # Enablement depends on tab count / detach lineage; refresh on open.
+        window_menu.aboutToShow.connect(self._refresh_window_menu_actions)
+
+        window_menu.addSeparator()
+
+        self.hide_inactive_widgets_action = QAction(
+            "Hide Widgets of Inactive Tabs", self
+        )
+        self.hide_inactive_widgets_action.setCheckable(True)
+        self.hide_inactive_widgets_action.setChecked(self._hide_inactive_aux_widgets)
+        self.hide_inactive_widgets_action.setToolTip(
+            "When enabled, widgets (connectivity, explorers, heatmaps) of "
+            "background tabs are hidden and restored with their tab."
+        )
+        self.hide_inactive_widgets_action.toggled.connect(
+            self._on_hide_inactive_widgets_toggled
+        )
+        window_menu.addAction(self.hide_inactive_widgets_action)
+
+        window_menu.addSeparator()
+
         show_annotation_log_action = QAction("Show Annotation Log", self)
         show_annotation_log_action.triggered.connect(self.show_annotation_log)
         window_menu.addAction(show_annotation_log_action)
@@ -1222,13 +1413,13 @@ class MainWindow(QMainWindow):
         self.debug_scatter_action = QAction("Scatter", self)
         self.debug_scatter_action.setCheckable(True)
         self.debug_scatter_action.toggled.connect(
-            lambda checked: setattr(self.centralWidget().fig_scatter, "debug", checked)
+            lambda checked: setattr(self.current_view().fig_scatter, "debug", checked)
         )
 
         self.debug_viewer_action = QAction("Viewer", self)
         self.debug_viewer_action.setCheckable(True)
         self.debug_viewer_action.toggled.connect(
-            lambda checked: setattr(self.centralWidget().ngl_viewer, "debug", checked)
+            lambda checked: setattr(self.current_view().ngl_viewer, "debug", checked)
         )
 
         self.debug_all_action = QAction("All", self)
@@ -1250,6 +1441,17 @@ class MainWindow(QMainWindow):
         keyboard_shortcuts_action = QAction("Keyboard Shortcuts", self)
         keyboard_shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         help_menu.addAction(keyboard_shortcuts_action)
+
+        # Cmd/Ctrl+1..9 switch between tabs (9 jumps to the last tab).
+        for i in range(1, 10):
+            shortcut = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
+            shortcut.activated.connect(
+                lambda idx=i: self._activate_tab_by_number(idx)
+            )
+
+        # The first tab was added before the menus existed; sync window title,
+        # action states and status bar to it now.
+        self._on_current_tab_changed(self._tabs.currentIndex())
 
     def show_keyboard_shortcuts(self):
         """Show a dialog listing all keyboard shortcuts."""
@@ -1337,6 +1539,11 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⇧", "mouse:double-left"], "Select points with the same label")
         _add_row(cl, ["⌘", "⇧", "mouse:double-left"], "Add same-label points to selection")
 
+        _add_section(cl, "Tabs")
+        _add_row(cl, ["⌘", "T"], "Open a new tab")
+        _add_row(cl, ["⌘", "W"], "Close the current tab")
+        _add_row(cl, ["⌘", "1-9"], "Switch to the n-th tab (9 = last tab)")
+
         _add_section(cl, "3D Viewer")
         _add_row(cl, ["mouse:left-hold"], "Rotate the view")
         _add_row(cl, ["mouse:middle-hold"], "Pan")
@@ -1361,6 +1568,315 @@ class MainWindow(QMainWindow):
         window = MainWindow()
         window.move(self.pos() + QPoint(40, 40))
         window.show()
+
+    def add_new_tab(self, title="untitled", switch=True, view=None):
+        """Create (or adopt) a view and add it as a new tab."""
+        if view is None:
+            view = MainWidget()
+        view.view_title = title
+
+        # Assign a per-view accent color; adopted views keep theirs.
+        if view.accent_color is None:
+            color, dot = _TAB_ACCENTS[next(_NEXT_TAB_ACCENT) % len(_TAB_ACCENTS)]
+            view.accent_color = color
+            view.accent_dot = dot
+
+        index = self._tabs.addTab(view, title)
+        self._tabs.setTabIcon(index, _make_dot_icon(view.accent_color))
+        if switch:
+            self._tabs.setCurrentIndex(index)
+        return view
+
+    def set_view_title(self, view, title, tooltip=None):
+        """Set a view's title and mirror it on its tab, its widgets and the window."""
+        if view is None:
+            return
+        view.view_title = title
+        index = self._tabs.indexOf(view)
+        if index >= 0:
+            self._tabs.setTabText(index, title)
+            self._tabs.setTabToolTip(index, tooltip if tooltip else title)
+        for widget in view.aux_widgets():
+            self._decorate_aux_widget_title(view, widget)
+        self._sync_window_title()
+
+    def _sync_window_title(self):
+        view = self.current_view()
+        title = getattr(view, "view_title", "") if view is not None else ""
+        dot = getattr(view, "accent_dot", "") if view is not None else ""
+        prefix = f"{dot} " if dot else ""
+        if title and title != "untitled":
+            self.setWindowTitle(f"{prefix}BigClust - {title}")
+        else:
+            self.setWindowTitle(f"{prefix}BigClust")
+
+    def _on_current_tab_changed(self, index):
+        """Sync window chrome (title, actions, status bar) to the active tab."""
+        view = self._tabs.widget(index) if index >= 0 else None
+        self._sync_window_title()
+        self._update_view_actions()
+        self._refresh_window_menu_actions()
+        self._sync_actions_to_view(view)
+
+        # Only the active tab's auxiliary widgets are shown.
+        self._update_aux_widget_visibility()
+
+        # Swap in the active view's selection counter.
+        status_bar = getattr(self, "status_bar", None)
+        if status_bar is not None:
+            prev = self._active_selection_counter
+            counter = getattr(view, "selection_counter", None)
+            if prev is not None and prev is not counter:
+                try:
+                    status_bar.removeWidget(prev)
+                except RuntimeError:
+                    pass
+            if counter is not None and counter is not prev:
+                status_bar.addPermanentWidget(counter)
+                counter.show()
+            self._active_selection_counter = counter
+
+        # A freshly exposed view may hold a stale frame; force one render.
+        # Skip while hidden (e.g. during startup) - rendering to a canvas
+        # whose surface doesn't exist yet can upset the wgpu backend.
+        if view is not None and self.isVisible():
+            try:
+                view.resize_figures()
+                view.fig_scatter.force_single_render()
+                view.ngl_viewer.force_single_render()
+            except Exception as e:
+                logger.debug(f"Failed to refresh canvases after tab switch: {e}")
+
+    def _sync_actions_to_view(self, view):
+        """Mirror the per-view checkable menu actions to the given view's state."""
+        if view is None:
+            return
+        fig = getattr(view, "fig_scatter", None)
+        ngl = getattr(view, "ngl_viewer", None)
+
+        states = [
+            ("sync_viewer_action", bool(getattr(fig, "_viewer_sync_enabled", True))),
+            ("show_hoverinfo_action", not getattr(fig, "_hide_hover", False)),
+            ("debug_scatter_action", bool(getattr(fig, "debug", False))),
+            ("debug_viewer_action", bool(getattr(ngl, "debug", False))),
+        ]
+        for name, checked in states:
+            action = getattr(self, name, None)
+            if action is None:
+                continue
+            action.blockSignals(True)
+            action.setChecked(checked)
+            action.blockSignals(False)
+
+    def _register_aux_widget(self, view, widget):
+        """Mark a widget as owned by a view and decorate its window title."""
+        widget._owner_view = view
+        widget._visible_in_tab = True
+        if not hasattr(widget, "_base_window_title"):
+            widget._base_window_title = widget.windowTitle()
+        self._decorate_aux_widget_title(view, widget)
+        # Lets eventFilter() detect user closes (and connectivity unsyncs).
+        widget.installEventFilter(self)
+
+    def _decorate_aux_widget_title(self, view, widget):
+        """Prefix a widget's title with its view's accent dot and tab title."""
+        base = getattr(widget, "_base_window_title", widget.windowTitle())
+        dot = getattr(view, "accent_dot", "")
+        title = getattr(view, "view_title", "")
+        prefix = f"{dot} " if dot else ""
+        suffix = f" — {title}" if title else ""
+        widget.setWindowTitle(f"{prefix}{base}{suffix}")
+
+    def _present_aux_widget(self, widget):
+        """(Re-)show a cached auxiliary widget and bring it to the front."""
+        widget._visible_in_tab = True
+        widget.showNormal()
+        widget.show()
+        widget.raise_()
+        widget.activateWindow()
+
+    def _update_aux_widget_visibility(self):
+        """Show only the active tab's auxiliary widgets (if so configured).
+
+        Widgets of background tabs are hidden; switching back restores those
+        that were open. `_visible_in_tab` tracks user intent: set on
+        creation/re-show, cleared when the user closes the widget (via the
+        close-event filter) - hiding here does not touch it. With the
+        "Hide Widgets of Inactive Tabs" preference off, every tab's open
+        widgets stay visible.
+        """
+        current = self.current_view()
+        for view in self.views():
+            if view is None:
+                continue
+            for widget in view.aux_widgets():
+                try:
+                    if view is current or not self._hide_inactive_aux_widgets:
+                        if getattr(widget, "_visible_in_tab", False) and not widget.isVisible():
+                            widget.show()
+                    elif widget.isVisible():
+                        widget.hide()
+                except RuntimeError:
+                    continue
+
+    def _on_hide_inactive_widgets_toggled(self, checked):
+        """Apply and persist the hide-inactive-tab-widgets preference globally."""
+        try:
+            self.settings.setValue("auxWidgets/hideInactiveTabWidgets", checked)
+        except Exception:
+            pass
+
+        # The preference is global; mirror it into every open window.
+        for win in list(_OPEN_WINDOWS):
+            if not isinstance(win, MainWindow):
+                continue
+            try:
+                win._hide_inactive_aux_widgets = checked
+                action = getattr(win, "hide_inactive_widgets_action", None)
+                if action is not None and action.isChecked() != checked:
+                    action.blockSignals(True)
+                    action.setChecked(checked)
+                    action.blockSignals(False)
+                win._update_aux_widget_visibility()
+            except RuntimeError:
+                continue
+
+    def _transfer_aux_widgets(self, view, new_window):
+        """Re-home a detached view's auxiliary widgets to its new window.
+
+        Without this, widgets stay Qt-children of the old window and get
+        destroyed with it even though their view lives on.
+        """
+        widgets = view.aux_widgets()
+
+        # The annotation dialog is excluded from aux_widgets() but must move too.
+        dialog = view._annotation_dialog
+        if dialog is not None:
+            try:
+                dialog.objectName()
+                widgets.append(dialog)
+                # Annotation logging is per-window; rewire to the new one.
+                try:
+                    dialog.annotations_logged.disconnect(self._log_annotation_entries)
+                except (RuntimeError, TypeError):
+                    pass
+                dialog.annotations_logged.connect(new_window._log_annotation_entries)
+            except RuntimeError:
+                pass
+
+        for widget in widgets:
+            try:
+                if widget.parent() is self:
+                    visible = widget.isVisible()
+                    widget.setParent(new_window, widget.windowFlags())
+                    if visible:
+                        widget.show()
+                # The close-event filter lives on the owning window.
+                widget.removeEventFilter(self)
+                widget.installEventFilter(new_window)
+            except RuntimeError:
+                continue
+
+    def _refresh_window_menu_actions(self):
+        """Update enablement of the tab/window organization actions."""
+        if getattr(self, "detach_tab_action", None) is not None:
+            self.detach_tab_action.setEnabled(self._tabs.count() > 1)
+        if getattr(self, "merge_window_action", None) is not None:
+            self.merge_window_action.setEnabled(self.parent_main_window() is not None)
+
+    def _activate_tab_by_number(self, number):
+        """Switch to the n-th tab; 9 jumps to the last tab."""
+        count = self._tabs.count()
+        index = count - 1 if number == 9 else number - 1
+        if 0 <= index < count:
+            self._tabs.setCurrentIndex(index)
+
+    def _on_tab_close_requested(self, index):
+        view = self._tabs.widget(index)
+        if view is not None:
+            self.close_view(view)
+
+    def close_current_tab(self):
+        view = self.current_view()
+        if view is not None:
+            self.close_view(view)
+
+    def close_view(self, view):
+        """Tear down and remove a view; closing the last tab closes the window."""
+        if self._tabs.count() <= 1:
+            # closeEvent takes care of tearing down the remaining view.
+            self.close()
+            return
+
+        self._teardown_view(view)
+        index = self._tabs.indexOf(view)
+        if index >= 0:
+            self._tabs.removeTab(index)
+        view.deleteLater()
+
+    def _teardown_view(self, view):
+        """Stop a view's render backends and dispose its auxiliary widgets."""
+        try:
+            view.teardown_rendering()
+        except Exception as e:
+            logger.debug(f"Failed to tear down view rendering: {e}")
+        self._dispose_view_aux_widgets(view)
+
+    def _on_tab_detach_requested(self, index, global_pos):
+        """Move a tab into its own window (tab dragged out of the bar)."""
+        self.detach_view(self._tabs.widget(index), global_pos)
+
+    def detach_current_tab(self):
+        """Move the current tab into its own window."""
+        return self.detach_view(self.current_view())
+
+    def detach_view(self, view, global_pos=None):
+        """Move a view out of this window into a new window of its own."""
+        if view is None or self._tabs.count() <= 1:
+            return None
+        index = self._tabs.indexOf(view)
+        if index < 0:
+            return None
+
+        self._tabs.removeTab(index)
+        window = MainWindow(adopt_view=view)
+        window._parent_window = self
+        self._transfer_aux_widgets(view, window)
+        if global_pos is not None:
+            window.move(global_pos - QPoint(100, 20))
+        else:
+            window.move(self.pos() + QPoint(40, 40))
+        window.show()
+        return window
+
+    def parent_main_window(self):
+        """The window this one was detached from, if it still exists."""
+        parent = self._parent_window
+        if parent is None or parent is self or parent not in _OPEN_WINDOWS:
+            return None
+        return parent
+
+    def merge_into_parent_window(self):
+        """Move this window's tabs back into the parent window, then close."""
+        parent = self.parent_main_window()
+        if parent is None:
+            return
+
+        views = self.views()
+        for view in views:
+            index = self._tabs.indexOf(view)
+            if index < 0:
+                continue
+            self._tabs.removeTab(index)
+            parent.add_new_tab(title=view.view_title, switch=False, view=view)
+            self._transfer_aux_widgets(view, parent)
+
+        if views:
+            parent._tabs.setCurrentWidget(views[0])
+        parent.show()
+        parent.raise_()
+        parent.activateWindow()
+        self.close()
 
     def _can_open_connectivity_table(self):
         """Whether the connectivity table can be opened for the current project."""
@@ -1424,27 +1940,29 @@ class MainWindow(QMainWindow):
             self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
 
     def show_connectivity_table(self):
-        """Open the connectivity table widget for the current project."""
+        """Open the connectivity table widget for the current view's project."""
         if not self._can_open_connectivity_table():
             return
 
-        existing = self._connectivity_widget
+        view = self.current_view()
+        if view is None:
+            return
+
+        existing = view._connectivity_widget
         if existing is not None:
             try:
-                self._sync_connectivity_widget(existing)
+                self._sync_connectivity_widget(view, existing)
                 # Reuse the existing widget for this project and bring it to front.
-                existing.showNormal()
-                existing.show()
-                existing.raise_()
-                existing.activateWindow()
+                self._present_aux_widget(existing)
                 return
             except RuntimeError:
                 # Underlying Qt object was deleted elsewhere; rebuild on demand.
-                self._connectivity_widget = None
+                view._connectivity_widget = None
 
-        features = self._data.get("features") if hasattr(self, "_data") else None
-        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
-        fig = self.centralWidget().fig_scatter
+        data = view._data if isinstance(view._data, dict) else {}
+        features = data.get("features")
+        meta_data = data.get("meta")
+        fig = view.fig_scatter
 
         if features is None or meta_data is None:
             return
@@ -1455,125 +1973,141 @@ class MainWindow(QMainWindow):
             meta_data=meta_data,
             parent=self,
         )
-        widget.installEventFilter(self)
-        self._sync_connectivity_widget(widget)
+        self._register_aux_widget(view, widget)
+        self._sync_connectivity_widget(view, widget)
         widget.show()
 
         # Keep a strong reference so the window can be reopened instead of recreated.
-        self._connectivity_widget = widget
+        view._connectivity_widget = widget
         widget.destroyed.connect(
-            lambda _obj=None: setattr(self, "_connectivity_widget", None)
+            lambda _obj=None, v=view: setattr(v, "_connectivity_widget", None)
         )
         widget.destroyed.connect(
-            lambda _obj=None: setattr(self, "_connectivity_widget_synced", False)
+            lambda _obj=None, v=view: setattr(v, "_connectivity_widget_synced", False)
         )
-        widget.destroyed.connect(lambda _obj=None, w=widget: fig.unsync_widget(w))
+        widget.destroyed.connect(
+            lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
+        )
 
     def show_feature_explorer(self):
-        """Open the Feature Explorer widget for the current project."""
+        """Open the Feature Explorer widget for the current view's project."""
         if not self._can_open_feature_explorer():
             return
 
-        existing = self._feature_explorer_widget
+        view = self.current_view()
+        if view is None:
+            return
+
+        existing = view._feature_explorer_widget
         if existing is not None:
             try:
-                existing.showNormal()
-                existing.show()
-                existing.raise_()
-                existing.activateWindow()
+                self._present_aux_widget(existing)
                 return
             except RuntimeError:
-                self._feature_explorer_widget = None
+                view._feature_explorer_widget = None
 
-        features = self._data.get("features")
-        meta_data = self._data.get("meta")
+        data = view._data if isinstance(view._data, dict) else {}
+        features = data.get("features")
+        meta_data = data.get("meta")
         if features is None or meta_data is None:
             return
 
         widget = FeatureExplorerWidget(
             metadata=meta_data,
             features=features,
-            figure=self.centralWidget().fig_scatter,
+            figure=view.fig_scatter,
             parent=None,
         )
         widget.setAttribute(Qt.WA_DeleteOnClose, True)
         widget.setWindowFlag(Qt.Window, True)
         widget.setWindowTitle("Feature Explorer")
+        self._register_aux_widget(view, widget)
         # widget.resize(1100, 700)
         widget.show()
 
-        self._feature_explorer_widget = widget
+        view._feature_explorer_widget = widget
         widget.destroyed.connect(
-            lambda _obj=None: setattr(self, "_feature_explorer_widget", None)
+            lambda _obj=None, v=view: setattr(v, "_feature_explorer_widget", None)
         )
 
     def show_meta_explorer(self):
-        """Open the meta data explorer dialog for the current project."""
+        """Open the meta data explorer dialog for the current view's project."""
         if not self._can_open_meta_explorer():
             return
 
-        existing = getattr(self, "_meta_explorer_dialog", None)
+        view = self.current_view()
+        if view is None:
+            return
+
+        existing = view._meta_explorer_dialog
         if existing is not None:
             try:
-                existing.showNormal()
-                existing.show()
-                existing.raise_()
-                existing.activateWindow()
+                self._present_aux_widget(existing)
                 return
             except RuntimeError:
-                self._meta_explorer_dialog = None
+                view._meta_explorer_dialog = None
 
-        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
+        data = view._data if isinstance(view._data, dict) else {}
+        meta_data = data.get("meta")
         if meta_data is None:
             return
 
         dialog = MetaExplorerDialog(
             meta_data,
-            figure=self.centralWidget().fig_scatter,
+            figure=view.fig_scatter,
             parent=self,
         )
+        self._register_aux_widget(view, dialog)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.show()
 
-        self._meta_explorer_dialog = dialog
+        view._meta_explorer_dialog = dialog
         dialog.destroyed.connect(
-            lambda _obj=None: setattr(self, "_meta_explorer_dialog", None)
+            lambda _obj=None, v=view: setattr(v, "_meta_explorer_dialog", None)
         )
 
-    def _sync_connectivity_widget(self, widget):
-        """Ensure the cached connectivity widget is synced to figure selection."""
-        if widget is None or self._connectivity_widget_synced:
+    def _sync_connectivity_widget(self, view, widget):
+        """Ensure a view's connectivity widget is synced to figure selection."""
+        if widget is None or view._connectivity_widget_synced:
             return
 
-        fig = self.centralWidget().fig_scatter
-        fig.sync_widget(widget)
-        self._connectivity_widget_synced = True
+        view.fig_scatter.sync_widget(widget)
+        view._connectivity_widget_synced = True
 
-    def _unsync_connectivity_widget(self, widget=None):
-        """Unsync the cached connectivity widget to avoid heavy updates while hidden."""
-        if not self._connectivity_widget_synced:
+    def _unsync_connectivity_widget(self, view, widget=None):
+        """Unsync a view's connectivity widget to avoid heavy updates while hidden."""
+        if not view._connectivity_widget_synced:
             return
 
         if widget is None:
-            widget = self._connectivity_widget
+            widget = view._connectivity_widget
         if widget is None:
-            self._connectivity_widget_synced = False
+            view._connectivity_widget_synced = False
             return
 
         try:
-            fig = self.centralWidget().fig_scatter
-            fig.unsync_widget(widget)
+            view.fig_scatter.unsync_widget(widget)
         finally:
-            self._connectivity_widget_synced = False
+            view._connectivity_widget_synced = False
 
-    def _dispose_connectivity_widget(self):
-        """Dispose the cached connectivity widget when project context changes."""
-        widget = self._connectivity_widget
+    def _dispose_view_aux_widgets(self, view):
+        """Dispose all auxiliary widgets owned by a view (project context change)."""
+        if view is None:
+            return
+        self._dispose_connectivity_widget(view)
+        self._dispose_feature_explorer_widget(view)
+        self._dispose_annotation_dialog(view)
+        self._dispose_meta_explorer_dialog(view)
+        self._dispose_distance_widgets(view)
+
+    def _dispose_connectivity_widget(self, view):
+        """Dispose a view's connectivity widget."""
+        widget = view._connectivity_widget
         if widget is None:
             return
 
-        self._connectivity_widget = None
-        self._unsync_connectivity_widget(widget)
+        view._connectivity_widget = None
+        self._unsync_connectivity_widget(view, widget)
 
         try:
             widget.removeEventFilter(self)
@@ -1583,13 +2117,13 @@ class MainWindow(QMainWindow):
             # Qt object may already be deleted.
             pass
 
-    def _dispose_feature_explorer_widget(self):
-        """Dispose the cached feature explorer widget when project context changes."""
-        widget = self._feature_explorer_widget
+    def _dispose_feature_explorer_widget(self, view):
+        """Dispose a view's feature explorer widget."""
+        widget = view._feature_explorer_widget
         if widget is None:
             return
 
-        self._feature_explorer_widget = None
+        view._feature_explorer_widget = None
         try:
             widget.close()
             widget.deleteLater()
@@ -1597,9 +2131,39 @@ class MainWindow(QMainWindow):
             # Qt object may already be deleted.
             pass
 
+    def _dispose_meta_explorer_dialog(self, view):
+        """Dispose a view's meta explorer dialog."""
+        dialog = view._meta_explorer_dialog
+        if dialog is None:
+            return
+
+        view._meta_explorer_dialog = None
+        try:
+            dialog.close()
+            dialog.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
+
+    def _dispose_distance_widgets(self, view):
+        """Dispose all of a view's distance heatmap widgets."""
+        widgets = list(view._distance_widgets)
+        view._distance_widgets = []
+        for widget in widgets:
+            try:
+                view.fig_scatter.unsync_widget(widget)
+            except Exception:
+                pass
+            try:
+                widget.close()
+                widget.deleteLater()
+            except RuntimeError:
+                # Qt object may already be deleted.
+                pass
+
     def _selected_annotation_records(self):
         """Build annotation dialog selection records from scatter selection."""
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
         selected_meta = getattr(fig, "selected_meta", None)
         if selected_meta is None or selected_meta.empty:
             return []
@@ -1632,14 +2196,19 @@ class MainWindow(QMainWindow):
 
     def show_annotation_dialog(self):
         """Show a single reusable annotation dialog for the current selection."""
+        view = self.current_view()
+        if view is None:
+            return
+
         selection = self._selected_annotation_records()
         project_datasets = self._project_annotation_datasets()
         if not selection:
-            fig = self.centralWidget().fig_scatter
-            fig.show_message("No points selected", color="red", duration=2)
+            view.fig_scatter.show_message(
+                "No points selected", color="red", duration=2
+            )
             return
 
-        existing = self._annotation_dialog
+        existing = view._annotation_dialog
         if existing is not None:
             try:
                 existing.set_selection(selection, project_datasets=project_datasets)
@@ -1650,21 +2219,22 @@ class MainWindow(QMainWindow):
                 return
             except RuntimeError:
                 # Underlying Qt object was deleted elsewhere; rebuild on demand.
-                self._annotation_dialog = None
+                view._annotation_dialog = None
 
         dialog = AnnotationDialog(
             selection=selection,
             parent=self,
             project_datasets=project_datasets,
         )
+        dialog._owner_view = view
         dialog.annotations_logged.connect(self._log_annotation_entries)
         dialog.show()
         dialog.raise_()
         dialog.activateWindow()
 
-        self._annotation_dialog = dialog
+        view._annotation_dialog = dialog
         dialog.destroyed.connect(
-            lambda _obj=None: setattr(self, "_annotation_dialog", None)
+            lambda _obj=None, v=view: setattr(v, "_annotation_dialog", None)
         )
 
     def on_annotation_submit_result(self, message, changed_neurons=None):
@@ -1683,7 +2253,7 @@ class MainWindow(QMainWindow):
         color = "red" if is_error else "green"
 
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             fig.show_message(text, color=color, duration=3)
         except Exception as e:
             logger.debug(f"Failed to show annotation submit status message: {e}")
@@ -1691,7 +2261,7 @@ class MainWindow(QMainWindow):
     def _handle_annotation_changed(self, changed_neurons):
         """Highlight labels for neurons whose annotations were changed."""
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             ids = getattr(fig, "ids", None)
             datasets = getattr(fig, "datasets", None)
             if ids is None or len(ids) == 0:
@@ -1744,13 +2314,13 @@ class MainWindow(QMainWindow):
         """Return the per-window annotation log."""
         return list(self._annotation_log)
 
-    def _dispose_annotation_dialog(self):
-        """Dispose the cached annotation dialog when project context changes."""
-        dialog = self._annotation_dialog
+    def _dispose_annotation_dialog(self, view):
+        """Dispose a view's annotation dialog."""
+        dialog = view._annotation_dialog
         if dialog is None:
             return
 
-        self._annotation_dialog = None
+        view._annotation_dialog = None
         try:
             dialog.close()
             dialog.deleteLater()
@@ -1759,13 +2329,18 @@ class MainWindow(QMainWindow):
             pass
 
     def show_distances_table(self):
-        """Open the pairwise distance heatmap widget for the current project."""
+        """Open the pairwise distance heatmap widget for the current view's project."""
         if not self._can_open_distances_table():
             return
 
-        distances = self._data.get("distances") if hasattr(self, "_data") else None
-        meta_data = self._data.get("meta") if hasattr(self, "_data") else None
-        fig = self.centralWidget().fig_scatter
+        view = self.current_view()
+        if view is None:
+            return
+
+        data = view._data if isinstance(view._data, dict) else {}
+        distances = data.get("distances")
+        meta_data = data.get("meta")
+        fig = view.fig_scatter
 
         if distances is None or meta_data is None:
             return
@@ -1776,14 +2351,15 @@ class MainWindow(QMainWindow):
             meta_data=meta_data,
             parent=self,
         )
+        self._register_aux_widget(view, widget)
         fig.sync_widget(widget)
         widget.show()
 
-        self._distance_widgets.append(widget)
+        view._distance_widgets.append(widget)
         widget.destroyed.connect(
-            lambda _obj=None, w=widget: (
-                self._distance_widgets.remove(w)
-                if w in self._distance_widgets
+            lambda _obj=None, w=widget, v=view: (
+                v._distance_widgets.remove(w)
+                if w in v._distance_widgets
                 else None
             )
         )
@@ -2010,9 +2586,9 @@ class MainWindow(QMainWindow):
                 self._load_project_from_dialog(dialog)
 
     def closeEvent(self, event):
-        main_widget = self.centralWidget()
-        if main_widget is not None and hasattr(main_widget, "teardown_rendering"):
-            main_widget.teardown_rendering()
+        for view in self.views():
+            if view is not None and hasattr(view, "teardown_rendering"):
+                self._teardown_view(view)
 
         # Persist geometry and maximized state
         try:
@@ -2030,7 +2606,7 @@ class MainWindow(QMainWindow):
         self._hover_columns_menu.clear()
 
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
         except Exception:
             fig = None
 
@@ -2066,7 +2642,7 @@ class MainWindow(QMainWindow):
     def _on_hover_column_toggled(self, col_name, checked):
         """Update hover column state and recompute hover_info immediately."""
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
         except Exception:
             return
 
@@ -2086,7 +2662,7 @@ class MainWindow(QMainWindow):
     def _on_hover_show_all(self):
         """Show all metadata columns in the hover tooltip."""
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             if getattr(fig, "_hover_col_names_all", None):
                 fig._hover_col_names_active = None  # None = all columns
         except Exception as e:
@@ -2095,7 +2671,7 @@ class MainWindow(QMainWindow):
     def _on_hover_hide_all(self):
         """Hide all metadata columns from the hover tooltip."""
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             if getattr(fig, "_hover_col_names_all", None):
                 fig._hover_col_names_active = []
         except Exception as e:
@@ -2104,19 +2680,19 @@ class MainWindow(QMainWindow):
     def _on_hover_columns_menu_hidden(self):
         """Apply the hover column selection after the Hover Columns menu closes."""
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             if getattr(fig, "metadata", None) is not None:
                 fig._recompute_hover_info()
         except Exception as e:
             logger.debug(f"Hover recompute on menu close failed: {e}")
 
     def on_select_all(self):
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
         fig.selected = np.arange(len(getattr(fig, "ids", [])))
 
     def on_deselect_all(self):
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             if hasattr(fig, "deselect_all"):
                 fig.deselect_all()
             elif hasattr(fig, "clear_selection"):
@@ -2128,7 +2704,7 @@ class MainWindow(QMainWindow):
 
     def on_invert_selection(self):
         try:
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             all_indices = np.arange(len(getattr(fig, "ids", [])))
             current = fig.selected
             current_set = set(np.asarray(current, dtype=int).tolist()) if current is not None and len(current) > 0 else set()
@@ -2139,16 +2715,16 @@ class MainWindow(QMainWindow):
     def on_open_in_neuroglancer(self):
         """Generate a Neuroglancer scene from current viewer state."""
         try:
-            scene = self.centralWidget().ngl_viewer.neuroglancer_scene()
+            scene = self.current_view().ngl_viewer.neuroglancer_scene()
             scene.open()
         except Exception as e:
             logger.error(f"Open in Neuroglancer failed: {e}")
 
-    def on_open_selection_in_new_window(self):
-        """Open currently selected scatter points in a new window."""
+    def on_open_selection_in_new_tab(self):
+        """Open currently selected scatter points in a new tab."""
         try:
-            source_main_widget = self.centralWidget()
-            source_fig = source_main_widget.fig_scatter
+            source_view = self.current_view()
+            source_fig = source_view.fig_scatter
             selected = source_fig.selected
             selected_indices = (
                 np.asarray(selected, dtype=int)
@@ -2221,83 +2797,117 @@ class MainWindow(QMainWindow):
                             source_matrices["features"]
                         )
 
-            window = MainWindow()
-            window.move(self.pos() + QPoint(40, 40))
-            window.show()
+            # Read the point size from the source view before the new tab
+            # becomes the current one.
+            source_data = (
+                source_view._data if isinstance(source_view._data, dict) else {}
+            )
+            point_size = source_data.get("point_size", 10)
 
-            main_widget = window.centralWidget()
-            fig = main_widget.fig_scatter
-            fig.clear()
-            fig.set_points(
+            title = f"selection ({len(selected_meta)})"
+            view = self.add_new_tab(title=title)
+            self._populate_view(
+                view,
+                meta=selected_meta,
                 points=selected_points,
-                metadata=selected_meta,
-                label_col="label",
-                id_col="id",
-                color_col="_color",
-                marker_col="dataset",
-                hover_col="\n".join(
-                    [
-                        f"{c}: {{{c}}}"
-                        for c in selected_meta.columns
-                        if not str(c).startswith("_")
-                    ]
-                ),
-                dataset_col="dataset",
-                point_size=self._data.get("point_size", 10),
+                entries=new_entries,
+                active=active,
                 distances=selected_distances,
                 features=selected_features,
+                point_size=point_size,
+                ngl_source_viewer=getattr(source_view, "ngl_viewer", None),
             )
-            fig.set_embeddings(new_entries, active=active)
-            main_widget.scatter_controls.update_controls()
-
-            try:
-                src_viewer = getattr(source_main_widget, "ngl_viewer", None)
-                src_data = getattr(src_viewer, "data", None)
-                if src_data is not None and len(src_data):
-                    if (
-                        isinstance(src_data.index, pd.MultiIndex)
-                        and "dataset" in selected_meta.columns
-                    ):
-                        keys = list(
-                            zip(
-                                selected_meta["id"].tolist(),
-                                selected_meta["dataset"].tolist(),
-                            )
-                        )
-                        ngl_data = src_data.loc[keys].copy()
-                    else:
-                        ngl_data = src_data.loc[selected_meta["id"].tolist()].copy()
-
-                    main_widget.ngl_viewer.set_data(ngl_data)
-
-                    neuropil_mesh = getattr(src_viewer, "neuropil_mesh", None)
-                    if neuropil_mesh is not None:
-                        main_widget.ngl_viewer.set_neuropil_mesh(
-                            neuropil_mesh,
-                            neuropil_source=getattr(
-                                src_viewer, "neuropil_source", None
-                            ),
-                        )
-            except Exception as e:
-                logger.debug(
-                    f"Failed to propagate Neuroglancer data to selection window: {e}"
-                )
-
-            window._data = {
-                "meta": selected_meta,
-                "embeddings": selected_points,
-                "distances": selected_distances,
-                "features": selected_features,
-                "embedding_entries": new_entries,
-                "active_embedding": active if new_entries else None,
-            }
-            window._update_view_actions()
-            window.setWindowTitle(f"BigClust - selection ({len(selected_meta)})")
+            self._update_view_actions()
+            self.set_view_title(view, title)
         except Exception as e:
-            logger.error(f"Open selection in new window failed: {e}")
+            logger.error(f"Open selection in new tab failed: {e}")
+
+    # Backwards-compatible alias: external code (e.g. the figure's canvas walk)
+    # looks this attribute up by name.
+    on_open_selection_in_new_window = on_open_selection_in_new_tab
+
+    def _populate_view(
+        self,
+        view,
+        *,
+        meta,
+        points,
+        entries,
+        active,
+        distances=None,
+        features=None,
+        point_size=10,
+        ngl_source_viewer=None,
+    ):
+        """Populate a view's figure and 3D viewer with a prepared data subset."""
+        fig = view.fig_scatter
+        fig.clear()
+        fig.set_points(
+            points=points,
+            metadata=meta,
+            label_col="label",
+            id_col="id",
+            color_col="_color",
+            marker_col="dataset",
+            hover_col="\n".join(
+                [
+                    f"{c}: {{{c}}}"
+                    for c in meta.columns
+                    if not str(c).startswith("_")
+                ]
+            ),
+            dataset_col="dataset",
+            point_size=point_size,
+            distances=distances,
+            features=features,
+        )
+        fig.set_embeddings(entries, active=active)
+        view.scatter_controls.update_controls()
+
+        try:
+            src_data = getattr(ngl_source_viewer, "data", None)
+            if src_data is not None and len(src_data):
+                if (
+                    isinstance(src_data.index, pd.MultiIndex)
+                    and "dataset" in meta.columns
+                ):
+                    keys = list(
+                        zip(
+                            meta["id"].tolist(),
+                            meta["dataset"].tolist(),
+                        )
+                    )
+                    ngl_data = src_data.loc[keys].copy()
+                else:
+                    ngl_data = src_data.loc[meta["id"].tolist()].copy()
+
+                view.ngl_viewer.set_data(ngl_data)
+
+                neuropil_mesh = getattr(ngl_source_viewer, "neuropil_mesh", None)
+                if neuropil_mesh is not None:
+                    view.ngl_viewer.set_neuropil_mesh(
+                        neuropil_mesh,
+                        neuropil_source=getattr(
+                            ngl_source_viewer, "neuropil_source", None
+                        ),
+                    )
+        except Exception as e:
+            logger.debug(
+                f"Failed to propagate Neuroglancer data to selection view: {e}"
+            )
+
+        view._data = {
+            "meta": meta,
+            "embeddings": points,
+            "distances": distances,
+            "features": features,
+            "embedding_entries": entries,
+            "active_embedding": active if entries else None,
+            "point_size": point_size,
+        }
 
     def on_copy_ids_to_clipboard(self):
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
         selected_ids = fig.selected_ids
 
         if selected_ids is not None:
@@ -2310,7 +2920,7 @@ class MainWindow(QMainWindow):
             logger.info("No selection to copy metadata from")
 
     def on_copy_meta_to_clipboard(self):
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
         selected_meta = fig.selected_meta
 
         if selected_meta is not None:
@@ -2374,7 +2984,7 @@ class MainWindow(QMainWindow):
 
     def on_export_embedding_to_plotly_html(self):
         """Export the current embedding to an interactive Plotly HTML file."""
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
 
         if getattr(fig, "positions", None) is None or len(fig) == 0:
             logger.info("No embedding available to export")
@@ -2413,7 +3023,7 @@ class MainWindow(QMainWindow):
 
     def on_export_embedding_to_plotly_dashboard_html(self):
         """Export a compact multi-panel Plotly dashboard HTML file."""
-        fig = self.centralWidget().fig_scatter
+        fig = self.current_view().fig_scatter
 
         if getattr(fig, "positions", None) is None or len(fig) == 0:
             logger.info("No embedding available to export")
@@ -2478,10 +3088,8 @@ class MainWindow(QMainWindow):
         """Load a resolved project loader into the current visualization."""
         embedding_mode = (embedding_mode or "").strip()
 
-        # Connectivity table is project-specific; reset cached instance on reload.
-        self._dispose_connectivity_widget()
-        self._dispose_feature_explorer_widget()
-        self._dispose_annotation_dialog()
+        # Auxiliary widgets are project-specific; reset cached instances on reload.
+        self._dispose_view_aux_widgets(self.current_view())
 
         # Create progress dialog with range
         progress = QProgressDialog("Loading project data...", None, 0, 100, self)
@@ -2547,7 +3155,7 @@ class MainWindow(QMainWindow):
             QApplication.processEvents()
 
             # First, let's clear existing data
-            fig = self.centralWidget().fig_scatter
+            fig = self.current_view().fig_scatter
             fig.clear()
 
             # Now set the new data
@@ -2574,7 +3182,7 @@ class MainWindow(QMainWindow):
             # into the active embedding's frame). No-op when there are none.
             fig.set_embeddings(entries, active=active if active is not None else 0)
             # We have to update bits and pieces on the controls panels based on the new data
-            self.centralWidget().scatter_controls.update_controls()
+            self.current_view().scatter_controls.update_controls()
             self._refresh_hover_columns_menu()
 
             # Set up the 3D viewer
@@ -2583,7 +3191,7 @@ class MainWindow(QMainWindow):
                 progress.setLabelText("Setting up neuroglancer viewer...")
                 QApplication.processEvents()
 
-                ngl_viewer = fig = self.centralWidget().ngl_viewer
+                ngl_viewer = self.current_view().ngl_viewer
                 ngl_data = self._data["meta"][["id"]].copy()
                 if "dataset" in self._data["meta"].columns:
                     ngl_data["dataset"] = self._data["meta"]["dataset"]
@@ -2624,7 +3232,11 @@ class MainWindow(QMainWindow):
 
             self._current_project_loader = project
             self._update_view_actions()
-            self.setWindowTitle(f"BigClust - {project.name}")
+            self.set_view_title(
+                self.current_view(),
+                project.name,
+                tooltip=str(getattr(project, "path", "") or project.name),
+            )
 
             progress.setValue(100)
         finally:

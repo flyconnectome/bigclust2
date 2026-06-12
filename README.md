@@ -118,6 +118,7 @@ The `info` file contains information about the dataset, including which files ar
         "color": "color"  # optional: column in meta to use for colors
     },
     # required: precomputed low-dimensional embeddings for scatter plot
+    # (this can also be a list of embeddings - see "Multiple Embeddings" below)
     "embeddings": {
         "file": "embeddings.parquet"  # alternatively: "columns": ["x_coord", "y_coord"]
     },
@@ -171,6 +172,35 @@ The distances file contains pairwise distances between observations (e.g. neuron
 ### `features` File (optional)
 
 The features file contains high-dimensional features for each observation (e.g. neuron) in the dataset. This is optional but can be used for feature selection and for exploring the relationship between features and embeddings. The file should be in Parquet (recommended) or Apache Arrow Feather format and contain a matrix of shape `(n_observations, n_features)`. The index should be integers matching the order of the `id` column in the `meta` file. You can use Multi-Index columns to organize features into groups (e.g. upstream vs downstream connections).
+
+### Multiple Embeddings
+
+A single project can contain more than one embedding. To do so, make `embeddings` a **list** of entries instead of a single object. Each entry may carry its own `features` and/or `distances` (the high-dimensional sources paired with that embedding); embeddings without sources are allowed, but features/distances must always belong to an embedding. Per-entry `features`/`distances` override the top-level ones (which act as a fallback/default).
+
+```json
+{
+    ...
+    "embeddings": [
+        {
+            "name": "connectivity (UMAP)",
+            "file": "embeddings_conn.parquet",
+            "features": {"file": "connections.parquet", "type": "connectivity"},
+            "distances": {"file": "distances.parquet", "metric": "cosine"}
+        },
+        {
+            "name": "morphology (NBLAST)",
+            "file": "embeddings_morph.parquet",
+            "distances": {"file": "nblast.parquet"}
+        },
+        {
+            "name": "raw layout",
+            "columns": ["x", "y"]
+        }
+    ]
+}
+```
+
+In the GUI, switch the active embedding from the dropdown at the top of the "Embeddings" tab or by pressing the space bar to cycle through them. Transitions are animated and all embeddings are scaled into a shared frame (the first embedding's) so points stay in view; recomputing an embedding from its features/distances replaces (supersedes) that embedding. The single-object form shown above remains fully supported.
 
 ### Multiple Datasets
 

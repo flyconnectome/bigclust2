@@ -77,6 +77,13 @@ class ScatterFigure(BaseFigure):
         self.point_visuals = None
         self.positions = None
         self.metadata = None
+        # Multiple-embedding support. `embedding_entries` is a list of dicts
+        # {"name", "embedding" (N,2), "features"|None, "distances"|None}; the
+        # active entry's features/distances populate `self.dists`.
+        self.embedding_entries = []
+        self.active_embedding = None
+        self._embedding_frame = None  # shared (center, scale) for normalization
+        self.controls = None  # back-reference set by ScatterControls once built
         self._selected = None
         self._selection_scope_mask = None
         self.deselect_on_empty = (
@@ -141,12 +148,15 @@ class ScatterFigure(BaseFigure):
         )
         self.key_events["Escape"] = lambda: self.deselect_all()
         self.key_events["l"] = lambda: self.toggle_labels()
+        # Space cycles through the available embeddings (the Qt rendercanvas key
+        # map has no entry for the space bar, so it arrives as " ").
+        self.key_events[" "] = lambda: self._cycle_embedding()
 
         self.debug = debug
 
         def _toggle_last_label():
             """Toggle between the last label and the original labels."""
-            if hasattr(self, "controls"):
+            if self.controls is not None:
                 self.controls.switch_labels()
 
         self.key_events["m"] = _toggle_last_label
@@ -205,6 +215,9 @@ class ScatterFigure(BaseFigure):
         self.point_visuals = None
         self.positions = None
         self.metadata = None
+        self.embedding_entries = []
+        self.active_embedding = None
+        self._embedding_frame = None
         self._selected = None
 
     @property
@@ -1036,10 +1049,12 @@ class ScatterFigure(BaseFigure):
         # Clear the group (we might call this function to update the lines)
         self.distance_edge_group.clear()
 
-        # Get the distances
+        # Get the distances. Distance edges need the square pairwise-distance
+        # matrix, so prefer the "distances" source and fall back to whatever is
+        # available.
         if isinstance(self.dists, dict):
-            if hasattr(self, "controls"):
-                dists = self.dists[self.controls.umap_dist_combo_box.currentText()]
+            if "distances" in self.dists:
+                dists = self.dists["distances"]
             else:
                 dists = list(self.dists.values())[0]
         else:
@@ -1634,10 +1649,6 @@ class ScatterFigure(BaseFigure):
         """Sync the figure with a neuroglancer viewer."""
         self.ngl_viewer = viewer
 
-        # Activate the neuroglancer controls tab
-        if hasattr(self, "controls"):
-            self.controls.tabs.setTabEnabled(2, True)
-
     @property
     def viewer_sync_enabled(self):
         """Whether scatter selection updates are synced to the 3D viewer."""
@@ -1998,6 +2009,144 @@ class ScatterFigure(BaseFigure):
                 self.show_knn_edges = False
                 self.show_knn_edges = knn_mode
             self._render_stale = True
+
+    @staticmethod
+    def _compute_frame(xy):
+        """Return ``(center, scale)`` for an (N, 2) embedding.
+
+        `center` is the bounding-box center; `scale` is a single scalar (the
+        larger of the two axis ranges) so normalization stays uniform and
+        preserves aspect ratio (and therefore 2D neighbor ordering / fidelity).
+        """
+        xy = np.asarray(xy, dtype=np.float64)
+        lo = xy.min(axis=0)
+        hi = xy.max(axis=0)
+        center = (lo + hi) / 2.0
+        scale = float((hi - lo).max())
+        if scale <= 0:
+            scale = 1.0
+        return center, scale
+
+    def normalize_to_frame(self, xy):
+        """Uniformly map `xy` into the shared embedding frame.
+
+        Used so freshly computed embeddings (or alternative embeddings) occupy
+        roughly the same region as the active one, keeping `space`/recompute
+        morphs in view. Returns `xy` unchanged if no frame has been set.
+        """
+        xy = np.asarray(xy, dtype=np.float32)
+        if self._embedding_frame is None:
+            return xy
+        frame_center, frame_scale = self._embedding_frame
+        own_center, own_scale = self._compute_frame(xy)
+        return (
+            (xy - own_center) * (frame_scale / own_scale) + frame_center
+        ).astype(np.float32)
+
+    def set_embeddings(self, entries, active=0):
+        """Register the full list of embedding entries (no animation).
+
+        Parameters
+        ----------
+        entries : list of dict
+            Each dict has keys "name", "embedding" (N, 2), "features" and
+            "distances" (either may be None).
+        active : int
+            Index of the currently displayed embedding. Its layout defines the
+            shared normalization frame; all other embeddings are scaled into it.
+
+        Notes
+        -----
+        The caller must have already shown the active embedding via
+        `set_points` (which frames the camera). This only stores the
+        collection and normalizes the non-active embeddings into the active
+        embedding's frame.
+        """
+        self.embedding_entries = list(entries) if entries else []
+
+        if not self.embedding_entries:
+            self.active_embedding = None
+            self._embedding_frame = None
+            if self.controls is not None:
+                self.controls.update_embedding_selector()
+            return
+
+        active = int(active) % len(self.embedding_entries)
+        self.active_embedding = active
+        self._embedding_frame = self._compute_frame(
+            self.embedding_entries[active]["embedding"]
+        )
+
+        # Normalize every non-active embedding into the active frame. The
+        # active embedding defines the frame, so it is left untouched (this
+        # also keeps it exactly equal to what `set_points` is displaying).
+        for i, entry in enumerate(self.embedding_entries):
+            emb = np.asarray(entry["embedding"], dtype=np.float32)
+            if i == active:
+                entry["embedding"] = emb
+            else:
+                entry["embedding"] = self.normalize_to_frame(emb)
+
+        if self.controls is not None:
+            self.controls.update_embedding_selector()
+
+    def switch_embedding(self, idx, animate=True):
+        """Make embedding `idx` the active one, animating the transition.
+
+        Swaps in the entry's paired features/distances, then moves the points
+        to the new (already normalized) layout via `move_points` and notifies
+        the controls so fidelity/options refresh.
+        """
+        if not self.embedding_entries:
+            return
+
+        idx = int(idx) % len(self.embedding_entries)
+        if idx == self.active_embedding:
+            return
+
+        self.active_embedding = idx
+        entry = self.embedding_entries[idx]
+
+        # Swap the high-dim sources paired with this embedding.
+        feats = entry.get("features")
+        dists_mat = entry.get("distances")
+        if feats is None and dists_mat is None:
+            self.dists = None
+        else:
+            new_dists = {}
+            if dists_mat is not None:
+                new_dists["distances"] = dists_mat
+            if feats is not None:
+                new_dists["features"] = feats
+            self.dists = new_dists
+
+        new_pos = np.asarray(entry["embedding"], dtype=np.float32)
+        if self.positions is not None and len(self.positions) == len(new_pos):
+            # Same number of points -> animate (or jump in a single frame).
+            self.move_points(new_pos, n_frames=20 if animate else 1)
+        else:
+            # No current positions (or a mismatch): assign directly.
+            self.positions = new_pos
+            if self.point_visuals is not None:
+                self.update_point_position()
+
+        if self.controls is not None:
+            self.controls.on_embedding_switched()
+
+    def _cycle_embedding(self):
+        """Advance to the next embedding (bound to the space key)."""
+        if len(self.embedding_entries) > 1 and self.active_embedding is not None:
+            self.switch_embedding(self.active_embedding + 1)
+
+    def update_active_embedding_positions(self, xy):
+        """Persist recomputed positions into the active entry (supersede).
+
+        `xy` is expected to already be normalized into the shared frame.
+        """
+        if self.active_embedding is not None and self.embedding_entries:
+            self.embedding_entries[self.active_embedding]["embedding"] = np.asarray(
+                xy, dtype=np.float32
+            )
 
     @update_figure
     def set_labels(self, indices, new_label):

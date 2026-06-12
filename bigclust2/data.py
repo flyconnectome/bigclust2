@@ -400,14 +400,83 @@ class SingleProjectLoader(BaseProjectLoader):
           - a dictionary with a "file" key.
         """
         value = self.info.get(key)
+        return self._spec_to_file(value, key=key)
+
+    @staticmethod
+    def _spec_to_file(value, key=None):
+        """Resolve a file spec (plain string or ``{"file": ...}`` dict) to a path.
+
+        Returns None if `value` is None.
+        """
         if value is None:
             return None
         if isinstance(value, dict):
             file = value.get("file")
             if file is None:
-                raise ValueError(f"Missing 'file' entry for '{key}' in info.")
+                raise ValueError(
+                    f"Missing 'file' entry for '{key or 'spec'}' in info: {value}"
+                )
             return file
         return value
+
+    @property
+    def normalized_embedding_specs(self):
+        """List of file-level embedding specs (no data is loaded).
+
+        Each spec is a dict with keys ``name``, ``emb_columns`` (or None),
+        ``emb_file`` (or None), ``feat_spec`` and ``dist_spec`` (the raw
+        features/distances sub-spec or None). Supports both the legacy
+        single-embedding format and the multi-embedding list format.
+        """
+        if not hasattr(self, "_embedding_specs"):
+            self._embedding_specs = self._normalize_embedding_specs()
+        return self._embedding_specs
+
+    def _normalize_embedding_specs(self):
+        """Build the canonical list of embedding specs from `self.info`."""
+        info = self.info
+        emb = info.get("embeddings", None)
+        top_feat = info.get("features", None)
+        top_dist = info.get("distances", None)
+
+        # Whether the project declares features/distances but no embeddings.
+        self._orphan_sources = (emb is None) and (
+            top_feat is not None or top_dist is not None
+        )
+
+        if emb is None:
+            return []
+
+        if isinstance(emb, list):
+            # New multi-embedding format: one entry per list item.
+            specs = []
+            for i, entry in enumerate(emb):
+                if not isinstance(entry, dict):
+                    raise ValueError(
+                        f"Each embedding entry must be a dict, got {type(entry)}."
+                    )
+                specs.append(self._make_embedding_spec(entry, i, top_feat, top_dist))
+            return specs
+
+        # Legacy single-embedding format (dict or plain path string).
+        entry = emb if isinstance(emb, dict) else {"file": emb}
+        return [self._make_embedding_spec(entry, 0, top_feat, top_dist)]
+
+    @staticmethod
+    def _make_embedding_spec(entry, i, top_feat, top_dist):
+        """Turn one embedding entry dict into a normalized spec."""
+        emb_columns = entry.get("columns", None)
+        emb_file = None if emb_columns is not None else SingleProjectLoader._spec_to_file(
+            entry, key="embeddings"
+        )
+        return {
+            "name": str(entry.get("name", f"embedding {i + 1}")),
+            "emb_columns": emb_columns,
+            "emb_file": emb_file,
+            # Per-entry features/distances override the top-level ones.
+            "feat_spec": entry.get("features", top_feat),
+            "dist_spec": entry.get("distances", top_dist),
+        }
 
     def load_meta(self):
         """Load or update the meta data."""
@@ -459,12 +528,141 @@ class SingleProjectLoader(BaseProjectLoader):
         else:
             return None
 
+    def _load_embedding_array(self, *, columns, file, filtered_meta, ind, cache):
+        """Load a single embedding as an (N, 2) array (filtered if `ind` given)."""
+        key = ("emb_cols", tuple(columns)) if columns is not None else ("emb_file", str(file))
+        if cache is not None and key in cache:
+            return cache[key]
+
+        if columns is not None:
+            # `filtered_meta` equals the full meta when no filter is applied.
+            emb = filtered_meta[columns].values
+        elif ind is None:
+            emb = self.load_file(file)
+            if isinstance(emb, pd.DataFrame):
+                emb = emb.values
+        else:
+            emb_lazy = self.load_file_lazy(file)
+            emb = (
+                emb_lazy.with_row_index(name="__index__")
+                .filter(pl.col("__index__").is_in(ind))
+                .collect()
+                .drop("__index__")
+                .to_numpy()
+            )
+
+        emb = np.asarray(emb)
+        if emb.ndim != 2 or emb.shape[1] != 2:
+            raise ValueError(
+                f"Embeddings must have exactly 2 dimensions, got shape {emb.shape}."
+            )
+
+        if cache is not None:
+            cache[key] = emb
+        return emb
+
+    @staticmethod
+    def _detect_id_column(cols, what):
+        """Find the id/index column among lazy-frame column names."""
+        for candidate in ("id", "index", "__index_level_0__"):
+            if candidate in cols:
+                return candidate
+        raise ValueError(
+            f"{what} file must have either an 'id', 'index' or '__index_level_0__' "
+            "column to filter on."
+        )
+
+    def _load_distances_df(self, *, file, ind, cache):
+        """Load a single (square) distance matrix (filtered if `ind` given)."""
+        key = ("dist", str(file))
+        if cache is not None and key in cache:
+            return cache[key]
+
+        if ind is None:
+            # No filter: read as-is (file is expected to carry its id index).
+            dists = self.load_file(file)
+        else:
+            dist_lazy = self.load_file_lazy(file)
+
+            # If these are pairwise distances, we need to filter on both rows and columns
+            cols = dist_lazy.collect_schema().names()
+            id_col = self._detect_id_column(cols, "Distance")
+
+            col_mask = np.zeros(len(cols), dtype=bool)
+            if cols.index(id_col) == 0:  # index/id column is the first column
+                col_mask[0] = True
+                col_mask[ind + 1] = True  # +1 because of the id/index column
+            elif cols.index(id_col) == len(cols) - 1:  # id column is the last column
+                col_mask[-1] = True
+                col_mask[ind] = True
+            else:
+                raise ValueError(
+                    "Distance file must have the 'id', 'index' or '__index_level_0__' column as the first or last column for correct filtering, "
+                    f" but got: index {cols.index(id_col)} of {len(cols)} columns"
+                )
+
+            # Which columns do we need to load? Keep `__index__` in the lazy
+            # selection so projection pushdown doesn't prune the column the
+            # filter depends on; drop it in pandas after collecting.
+            cols_to_load = list(np.array(cols)[col_mask])
+            dists = (
+                dist_lazy.with_row_index(name="__index__")
+                .filter(pl.col("__index__").is_in(ind))
+                .select(["__index__"] + cols_to_load)
+                .collect()
+                .to_pandas()
+                .drop(columns="__index__")
+                .set_index(id_col)
+            )
+
+            if dists.shape[0] != dists.shape[1]:
+                raise ValueError(
+                    f"Distance matrix must be square after filtering, but got shape {dists.shape} with {len(ind)} requested IDs."
+                )
+
+            # Columns are likely strings whereas indices are likely integers, so we need to make sure they match
+            dists.columns = dists.columns.astype(dists.index.dtype)
+            if (dists.index != dists.columns).any():
+                raise ValueError(
+                    "Distance matrix index and columns must match after filtering, but got mismatching indices and columns."
+                )
+
+        if cache is not None:
+            cache[key] = dists
+        return dists
+
+    def _load_features_df(self, *, file, ind, cache):
+        """Load a single feature matrix (filtered if `ind` given)."""
+        key = ("feat", str(file))
+        if cache is not None and key in cache:
+            return cache[key]
+
+        if ind is None:
+            # No filter: read as-is (file is expected to carry its id index).
+            features = self.load_file(file)
+        else:
+            features_lazy = self.load_file_lazy(file)
+            cols = features_lazy.collect_schema().names()
+            id_col = self._detect_id_column(cols, "Features")
+            features = (
+                features_lazy.with_row_index(name="__index__")
+                .filter(pl.col("__index__").is_in(ind))
+                .drop("__index__")
+                .collect()
+                .to_pandas()
+                .set_index(id_col)
+            )
+
+        if cache is not None:
+            cache[key] = features
+        return features
+
     def compile(self, progress_callback=None):
         """Load and return all dataset components.
 
         This is the main method to load the entire dataset at once as it takes care of:
           - loading the data with a given filter query
-          - aligning the metadata, distances, and embeddings
+          - aligning the metadata, distances, embeddings and features
           - sanity checking
 
         Returns
@@ -472,170 +670,106 @@ class SingleProjectLoader(BaseProjectLoader):
         dict
             Dictionary with keys:
             - "meta": Pandas DataFrame of metadata
-            - "distances": Pandas DataFrame of pairwise distances (or None)
-            - "features": Pandas DataFrame of feature vectors (or None)
-            - "embeddings": NumPy array of low-dimensional embeddings (or None)
+            - "distances": Pandas DataFrame of pairwise distances of the ACTIVE
+              embedding (or None) - kept for backward compatibility
+            - "features": Pandas DataFrame of feature vectors of the ACTIVE
+              embedding (or None) - kept for backward compatibility
+            - "embeddings": NumPy array of the ACTIVE low-dimensional embedding
+              (or None) - kept for backward compatibility
+            - "embedding_entries": list of all embedding entries, each a dict with
+              keys "name", "embedding", "features", "distances"
+            - "active_embedding": index of the active embedding (or None)
 
         """
-        # If no filter, we can just return everything
+        specs = self.normalized_embedding_specs
+
+        # Build the (possibly filtered) metadata and the row indices `ind` used to
+        # filter every other artifact. `ind is None` means "no filter".
         if self.filter_expr is None:
-            data = {}
-
-            for i, attr in enumerate(["meta", "distances", "features", "embeddings"]):
-                if attr != "meta" and self.info.get(attr, None) is None:
-                    data[attr] = None
-                    continue
-
-                report_if_callback(progress_callback, text=f"Loading {attr}...")
-
-                data[attr] = getattr(self, attr)
-                report_if_callback(progress_callback, value=int((i + 1) * 40 / 4))
+            report_if_callback(progress_callback, value=0, text="Loading meta data...")
+            filtered_meta = self.meta
+            ind = None
         else:
             report_if_callback(progress_callback, value=0, text="Loading meta data...")
-
             meta_lazy = self.load_file_lazy(self._get_file_spec("meta"))
             expr = string_to_polars_filter(self.filter_expr)
-
             filtered_meta = (
                 meta_lazy.with_row_index(name="__index__").filter(expr).collect().to_pandas()
             )
-
-            data = {
-                "meta": filtered_meta.drop(columns="__index__"),
-                "distances": None,
-                "features": None,
-                "embeddings": None,
-            }
-
             # We need to be weary of duplicate IDs here - that's why we're using indices
             # instead of IDs for filtering all other data artifacts.
             ind = filtered_meta["__index__"].values
+            filtered_meta = filtered_meta.drop(columns="__index__")
 
-            report_if_callback(progress_callback, value=10)
+        data = {
+            "meta": filtered_meta,
+            "embeddings": None,
+            "distances": None,
+            "features": None,
+            "embedding_entries": [],
+            "active_embedding": None,
+        }
 
-            if self.info.get("embeddings", None) is not None:
-                report_if_callback(progress_callback, text="Loading embeddings...")
-                # Embeddings can be a separate file or columns in the meta file
-                if "columns" in self.info["embeddings"]:
-                    cols = self.info["embeddings"]["columns"]
-                    data["embeddings"] = filtered_meta[cols].values
-                else:
-                    # Lazy load embeddings
-                    emb_lazy = self.load_file_lazy(self._get_file_spec("embeddings"))
+        report_if_callback(progress_callback, value=10)
 
-                    # Load the requests indices
-                    data["embeddings"] = (
-                        emb_lazy.with_row_index(
-                            name="__index__"
-                        )  # add index column for filtering
-                        .filter(pl.col("__index__").is_in(ind))  # filter on index
-                        .collect()  # materialize the filtered embeddings
-                        .drop("__index__")  # drop the index column again
-                        .to_numpy()  # turn into numpy
-                    )
-
-                    assert (
-                        data["embeddings"].shape[1] == 2
-                    ), f"Embeddings must have exactly 2 dimensions, got {data['embeddings'].shape[1]}"
-
-                report_if_callback(progress_callback, value=20)
-
-            if self.info.get("distances", None) is not None:
-                report_if_callback(progress_callback, text="Loading distances...")
-                # Lazy load distances
-                dist_lazy = self.load_file_lazy(self._get_file_spec("distances"))
-
-                # If these are pairwise distances, we need to filter on both rows and columns
-                cols = dist_lazy.collect_schema().names()
-
-                # It's quite likely that we have either an "index" or an "id" column which we
-                # must ignore in our indexing
-                id_col = None
-                if "id" in cols:
-                    id_col = "id"
-                elif "index" in cols:
-                    id_col = "index"
-                elif "__index_level_0__" in cols:
-                    id_col = "__index_level_0__"
-                else:
-                    raise ValueError(
-                        "Distance file must have either an 'id', 'index' or '__index_level_0__' column to filter on."
-                    )
-
-                col_mask = np.zeros(len(cols), dtype=bool)
-                if cols.index(id_col) == 0:  # index/id column is the first column
-                    col_mask[0] = True
-                    col_mask[ind + 1] = True  # +1 because of the id/index column
-                elif (
-                    cols.index(id_col) == len(cols) - 1
-                ):  # index/id column is the last column
-                    col_mask[-1] = True
-                    col_mask[ind] = True
-                else:
-                    raise ValueError(
-                        "Distance file must have the 'id', 'index' or '__index_level_0__' column as the first or last column for correct filtering, "
-                        f" but got: index {cols.index(id_col)} of {len(cols)} columns"
-                    )
-
-                # Which columns do we need to load?
-                cols_to_load = np.array(cols)[col_mask]
-                dists = (
-                    dist_lazy.with_row_index(name="__index__")
-                    .filter(pl.col("__index__").is_in(ind))
-                    .select(cols_to_load)
-                    .drop("__index__")  # drop the index column again after filtering
-                    .collect()
-                    .to_pandas()
-                    .set_index(id_col)
+        if not specs:
+            if getattr(self, "_orphan_sources", False):
+                logger.warning(
+                    "Project declares 'features'/'distances' but no 'embeddings'; "
+                    "these sources will be ignored."
+                )
+        else:
+            # A per-compile cache so a features/distances file shared by multiple
+            # embeddings is loaded (and filtered) only once.
+            cache = {}
+            entries = []
+            n = len(specs)
+            for i, spec in enumerate(specs):
+                report_if_callback(
+                    progress_callback, text=f"Loading embedding '{spec['name']}'..."
                 )
 
-                if dists.shape[0] != dists.shape[1]:
-                    raise ValueError(
-                        f"Distance matrix must be square after filtering, but got shape {dists.shape} with {len(ind)} requested IDs."
-                    )
-
-                # Column are likely strings whereas indices are likely integers, so we need to make sure they match
-                dists.columns = dists.columns.astype(dists.index.dtype)
-                if (dists.index != dists.columns).any():
-                    raise ValueError(
-                        "Distance matrix index and columns must match after filtering, but got mismatching indices and columns."
-                    )
-
-                # All good - assign to data dict
-                data["distances"] = dists
-
-                report_if_callback(progress_callback, value=30)
-
-            if self.info.get("features", None) is not None:
-                report_if_callback(progress_callback, text="Loading features...")
-
-                # Lazy load features
-                features_lazy = self.load_file_lazy(self._get_file_spec("features"))
-
-                # We're expecting either an `id` or `index` column for the rows
-                cols = features_lazy.collect_schema().names()
-                if "id" in cols:
-                    id_col = "id"
-                elif "index" in cols:
-                    id_col = "index"
-                elif "__index_level_0__" in cols:
-                    id_col = "__index_level_0__"
-                else:
-                    raise ValueError(
-                        "Features file must have either an 'id', 'index' or '__index_level_0__' column to filter on."
-                    )
-
-                features = (
-                    features_lazy.with_row_index(name="__index__")
-                    .filter(pl.col("__index__").is_in(ind))
-                    .drop("__index__")
-                    .collect()
-                    .to_pandas()
-                    .set_index(id_col)
+                emb = self._load_embedding_array(
+                    columns=spec["emb_columns"],
+                    file=spec["emb_file"],
+                    filtered_meta=filtered_meta,
+                    ind=ind,
+                    cache=cache,
                 )
-                data["features"] = features
 
-                report_if_callback(progress_callback, value=40)
+                feats = None
+                if spec["feat_spec"] is not None:
+                    feats = self._load_features_df(
+                        file=self._spec_to_file(spec["feat_spec"], key="features"),
+                        ind=ind,
+                        cache=cache,
+                    )
+
+                dists = None
+                if spec["dist_spec"] is not None:
+                    dists = self._load_distances_df(
+                        file=self._spec_to_file(spec["dist_spec"], key="distances"),
+                        ind=ind,
+                        cache=cache,
+                    )
+
+                entries.append(
+                    {
+                        "name": spec["name"],
+                        "embedding": emb,
+                        "features": feats,
+                        "distances": dists,
+                    }
+                )
+                report_if_callback(progress_callback, value=int(10 + (i + 1) * 30 / n))
+
+            # The first embedding is the active one; mirror its artifacts into the
+            # top-level keys for backward compatibility.
+            data["embedding_entries"] = entries
+            data["active_embedding"] = 0
+            data["embeddings"] = entries[0]["embedding"]
+            data["features"] = entries[0]["features"]
+            data["distances"] = entries[0]["distances"]
 
         if isinstance(self.info["meta"], dict):
             color = self.info["meta"].get("color", None)

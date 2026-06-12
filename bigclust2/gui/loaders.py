@@ -216,13 +216,19 @@ class OpenProjectDialog(QDialog):
             self.details_table.setItem(0, 1, QTableWidgetItem("No details available"))
         self.details_table.resizeColumnsToContents()
 
-        # Add options for embeddings
+        # Add options for embeddings. Detect available sources across all
+        # embedding entries (supports both the legacy single-embedding format
+        # and the multi-embedding list format).
         self.embedding_combo.clear()
-        if project.info.get("embeddings", None):
+        try:
+            specs = project.normalized_embedding_specs
+        except Exception:
+            specs = []
+        if specs:
             self.embedding_combo.addItem("use precomputed", 0)
-        if project.info.get("distances", None):
+        if any(s.get("dist_spec") is not None for s in specs):
             self.embedding_combo.addItem("calculate from distances", 0)
-        if project.info.get("features", None):
+        if any(s.get("feat_spec") is not None for s in specs):
             self.embedding_combo.addItem("calculate from features", 0)
         self.update_embedding_hint()
 

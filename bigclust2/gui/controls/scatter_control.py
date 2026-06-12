@@ -886,6 +886,9 @@ class ScatterControls(QtWidgets.QWidget):
     def __init__(self, figure):
         super().__init__()
         self.figure = figure
+        # Back-reference so the figure can notify the controls (e.g. on
+        # embedding switches and label toggles).
+        self.figure.controls = self
         self.setWindowTitle("Controls")
         self.label_overrides = {}
 
@@ -1371,9 +1374,38 @@ class ScatterControls(QtWidgets.QWidget):
 
     def build_embeddings_gui(self):
         """Build the GUI for the Embeddings tab."""
+        # Selector to switch between multiple embeddings (hidden when there is
+        # only one). It lives outside the recompute container so it stays usable
+        # even when the active embedding has no high-dim source to recompute from.
+        self.embedding_selector_group = QtWidgets.QGroupBox("Active embedding")
+        selector_row = QtWidgets.QHBoxLayout()
+        selector_row.setContentsMargins(6, 4, 6, 4)
+        self.embedding_selector_group.setLayout(selector_row)
+        self.embedding_selector_combo = QtWidgets.QComboBox()
+        self.embedding_selector_combo.setToolTip(
+            "Switch the active embedding (or press the space bar to cycle)."
+        )
+        # `activated` only fires on user interaction, so programmatic
+        # setCurrentIndex calls don't feed back into a switch.
+        self.embedding_selector_combo.activated.connect(
+            lambda idx: self.figure.switch_embedding(idx, animate=True)
+        )
+        selector_row.addWidget(self.embedding_selector_combo)
+        self.tab5_layout.addWidget(self.embedding_selector_group)
+        self.embedding_selector_group.setVisible(False)
+
+        # Everything below recomputes the active embedding; it is disabled when
+        # the active embedding has no paired features/distances.
+        self.embedding_recompute_widget = QtWidgets.QWidget()
+        recompute_layout = QtWidgets.QVBoxLayout()
+        recompute_layout.setContentsMargins(0, 0, 0, 0)
+        recompute_layout.setSpacing(4)
+        self.embedding_recompute_widget.setLayout(recompute_layout)
+        self.tab5_layout.addWidget(self.embedding_recompute_widget)
+
         # Top action row
         actions_row = QtWidgets.QHBoxLayout()
-        self.tab5_layout.addLayout(actions_row)
+        recompute_layout.addLayout(actions_row)
 
         self.umap_button = QtWidgets.QPushButton("Re-calculate positions")
         self.umap_button.setToolTip(
@@ -1398,7 +1430,7 @@ class ScatterControls(QtWidgets.QWidget):
         input_form.setContentsMargins(6, 4, 6, 4)
         input_form.setVerticalSpacing(6)
         input_group.setLayout(input_form)
-        self.tab5_layout.addWidget(input_group)
+        recompute_layout.addWidget(input_group)
 
         self.umap_method_combo_box = QtWidgets.QComboBox()
         self.umap_method_combo_box.setToolTip(
@@ -1450,7 +1482,7 @@ class ScatterControls(QtWidgets.QWidget):
         prep_form.setContentsMargins(6, 4, 6, 4)
         prep_form.setVerticalSpacing(2)
         self.feature_options_group.setLayout(prep_form)
-        self.tab5_layout.addWidget(self.feature_options_group)
+        recompute_layout.addWidget(self.feature_options_group)
 
         # For non-square inputs (feature vectors), allow choosing a distance metric.
         self.umap_feature_metric_widget = QtWidgets.QWidget()
@@ -1526,7 +1558,7 @@ class ScatterControls(QtWidgets.QWidget):
         settings_layout.setContentsMargins(6, 4, 6, 4)
         settings_layout.setSpacing(2)
         settings_group.setLayout(settings_layout)
-        self.tab5_layout.addWidget(settings_group)
+        recompute_layout.addWidget(settings_group)
 
         method_common_widget = QtWidgets.QWidget()
         method_common_form = QtWidgets.QFormLayout()
@@ -3215,6 +3247,7 @@ class ScatterControls(QtWidgets.QWidget):
     def update_controls(self):
         """Update the controls based on the current figure state."""
         # self.update_ann_combo_box()
+        self.update_embedding_selector()
         self.update_umap_options()
         self.update_fidelity_options()
         self.update_cluster_options()
@@ -3222,6 +3255,21 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
         self.update_scope_options()
+
+    def update_embedding_selector(self):
+        """Refresh the active-embedding selector from the figure's entries."""
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        combo = self.embedding_selector_combo
+        combo.blockSignals(True)
+        combo.clear()
+        for entry in entries:
+            combo.addItem(str(entry.get("name", "embedding")))
+        active = getattr(self.figure, "active_embedding", None)
+        if active is not None and 0 <= active < len(entries):
+            combo.setCurrentIndex(active)
+        combo.blockSignals(False)
+        # Only worth showing when there is something to switch between.
+        self.embedding_selector_group.setVisible(len(entries) > 1)
 
     def _scope_columns(self):
         """Columns available for scope filters."""
@@ -3362,22 +3410,81 @@ class ScatterControls(QtWidgets.QWidget):
         self.distance_edges_slider.setEnabled(True)
 
     def update_umap_options(self):
-        """Update the items in the UMAP distance combo box."""
+        """Update the Embeddings tab state and the data-source combo box."""
         self.umap_dist_combo_box.clear()
 
         embeddings_tab_index = self.tabs.indexOf(self.tab5)
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        dists = getattr(self.figure, "dists", None)
 
-        if getattr(self.figure, "dists", None) is None:
-            self.tabs.setTabEnabled(embeddings_tab_index, False)
-            return
-        self.tabs.setTabEnabled(embeddings_tab_index, True)
+        # The tab is usable whenever there is something to switch between or a
+        # high-dim source to recompute from. The recompute controls themselves
+        # are only enabled when the active embedding has a source.
+        self.tabs.setTabEnabled(
+            embeddings_tab_index, (len(entries) > 1) or (dists is not None)
+        )
+        self.embedding_recompute_widget.setEnabled(dists is not None)
 
-        # Add any distances we have
-        if isinstance(self.figure.dists, dict):
-            for key in self.figure.dists.keys():
+        # Add any distances/features we have for the active embedding
+        if isinstance(dists, dict):
+            for key in dists.keys():
                 self.umap_dist_combo_box.addItem(key)
 
         self._update_embedding_input_controls()
+
+    def on_embedding_switched(self):
+        """React to the figure switching its active embedding.
+
+        Syncs the selector, refreshes the data-source and fidelity options for
+        the new sources, recomputes the fidelity column if it currently drives
+        point size, and mirrors the active artifacts into the owning window.
+        """
+        active = getattr(self.figure, "active_embedding", None)
+        entries = getattr(self.figure, "embedding_entries", None) or []
+
+        # Sync the selector without re-triggering a switch.
+        self.embedding_selector_combo.blockSignals(True)
+        if active is not None and 0 <= active < len(entries):
+            self.embedding_selector_combo.setCurrentIndex(active)
+        self.embedding_selector_combo.blockSignals(False)
+
+        self.update_umap_options()
+        self.update_fidelity_options()
+
+        # Keep fidelity in sync with the new embedding when it drives sizing.
+        if self.size_combo_box.currentText() == FIDELITY_DATA_COLUMN:
+            if getattr(self.figure, "dists", None) is None:
+                # No source to compute fidelity from -> fall back to default.
+                self.size_combo_box.setCurrentText("Default")
+            else:
+                target = None
+                if active is not None and 0 <= active < len(entries):
+                    target = np.asarray(entries[active]["embedding"])
+                if self._compute_fidelity_column(positions=target):
+                    self._on_size_column_changed()
+
+        self._sync_window_data_active()
+
+    def _sync_window_data_active(self):
+        """Mirror the active embedding's artifacts into the owning window's _data."""
+        win = self.figure.canvas.window()
+        while win is not None and not isinstance(getattr(win, "_data", None), dict):
+            win = win.parent()
+        if win is None:
+            return
+
+        active = getattr(self.figure, "active_embedding", None)
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        if active is None or not (0 <= active < len(entries)):
+            return
+
+        entry = entries[active]
+        win._data["embeddings"] = entry["embedding"]
+        win._data["features"] = entry["features"]
+        win._data["distances"] = entry["distances"]
+        win._data["active_embedding"] = active
+        if hasattr(win, "_update_view_actions"):
+            win._update_view_actions()
 
     def update_fidelity_options(self):
         """Update fidelity controls based on available distances/features."""
@@ -4235,6 +4342,14 @@ class ScatterControls(QtWidgets.QWidget):
         with warnings.catch_warnings(action="ignore"):
             xy = fit.fit_transform(dists)
 
+        # Normalize into the shared frame so the recomputed layout stays in view
+        # and matches the scale of the other embeddings.
+        xy = self.figure.normalize_to_frame(xy)
+
+        # Recomputing supersedes the active embedding: persist the new positions
+        # into its entry so switching away and back keeps this layout.
+        self.figure.update_active_embedding_positions(xy)
+
         # This moves points to their new positions
         self.figure.move_points(xy)
 
@@ -4243,6 +4358,9 @@ class ScatterControls(QtWidgets.QWidget):
         if self.size_combo_box.currentText() == FIDELITY_DATA_COLUMN:
             if self._compute_fidelity_column(positions=xy):
                 self._on_size_column_changed()
+
+        # Keep the owning window's project data pointing at the new positions.
+        self._sync_window_data_active()
 
     def update_embedding_settings(self):
         """Update the embedding settings based on the selected method."""

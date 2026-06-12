@@ -2167,38 +2167,58 @@ class MainWindow(QMainWindow):
             selected_meta = (
                 source_fig.metadata.iloc[selected_indices].copy().reset_index(drop=True)
             )
-            selected_points = np.asarray(source_fig.positions)[selected_indices].copy()
-            selected_ids = selected_meta["id"].to_numpy()
 
-            selected_distances = None
-            selected_features = None
-            source_matrices = getattr(source_fig, "dists", None)
+            def _subset_features(feats):
+                """Subset features to the selection and drop now-empty columns."""
+                feats = feats.iloc[selected_indices]
+                return feats.loc[:, (feats.values.max(axis=0) > 0)].copy()
 
-            if isinstance(source_matrices, dict):
-                source_distances = source_matrices.get("distances")
-                source_features = source_matrices.get("features")
+            # Carry over EVERY embedding (each subset to the selection).
+            source_entries = getattr(source_fig, "embedding_entries", None) or []
+            new_entries = []
+            for entry in source_entries:
+                emb = np.asarray(entry["embedding"])[selected_indices].copy()
+                feats = entry.get("features")
+                if feats is not None:
+                    feats = _subset_features(feats)
+                dists = entry.get("distances")
+                if dists is not None:
+                    dists = dists.iloc[selected_indices, selected_indices].copy()
+                new_entries.append(
+                    {
+                        "name": entry["name"],
+                        "embedding": emb,
+                        "features": feats,
+                        "distances": dists,
+                    }
+                )
 
-                if source_distances is not None:
-                    if isinstance(source_distances, pd.DataFrame):
-                        selected_distances = source_distances.iloc[
+            active = source_fig.active_embedding
+            active = active if active is not None else 0
+
+            if new_entries:
+                active = active % len(new_entries)
+                active_entry = new_entries[active]
+                selected_points = active_entry["embedding"]
+                selected_distances = active_entry["distances"]
+                selected_features = active_entry["features"]
+            else:
+                # No entry list (shouldn't normally happen): fall back to the
+                # currently displayed positions and active sources.
+                selected_points = np.asarray(source_fig.positions)[
+                    selected_indices
+                ].copy()
+                selected_distances = None
+                selected_features = None
+                source_matrices = getattr(source_fig, "dists", None)
+                if isinstance(source_matrices, dict):
+                    if source_matrices.get("distances") is not None:
+                        selected_distances = source_matrices["distances"].iloc[
                             selected_indices, selected_indices
                         ].copy()
-                    else:
-                        raise ValueError(
-                            "Expected distances matrix to be a DataFrame with metadata-aligned index and columns for selection export"
-                        )
-
-                if source_features is not None:
-                    if isinstance(source_features, pd.DataFrame):
-                        selected_features = source_features.iloc[selected_indices]
-
-                        # Drop empty columns
-                        selected_features = selected_features.loc[
-                            :, (selected_features.values.max(axis=0) > 0)
-                        ].copy()
-                    else:
-                        raise ValueError(
-                            "Expected features matrix to be a DataFrame with metadata-aligned index for selection export"
+                    if source_matrices.get("features") is not None:
+                        selected_features = _subset_features(
+                            source_matrices["features"]
                         )
 
             window = MainWindow()
@@ -2223,10 +2243,11 @@ class MainWindow(QMainWindow):
                     ]
                 ),
                 dataset_col="dataset",
-                point_size=10,
+                point_size=self._data.get("point_size", 10),
                 distances=selected_distances,
                 features=selected_features,
             )
+            fig.set_embeddings(new_entries, active=active)
             main_widget.scatter_controls.update_controls()
 
             try:
@@ -2267,6 +2288,8 @@ class MainWindow(QMainWindow):
                 "embeddings": selected_points,
                 "distances": selected_distances,
                 "features": selected_features,
+                "embedding_entries": new_entries,
+                "active_embedding": active if new_entries else None,
             }
             window._update_view_actions()
             window.setWindowTitle(f"BigClust - selection ({len(selected_meta)})")
@@ -2477,6 +2500,9 @@ class MainWindow(QMainWindow):
             progress.setLabelText("Preparing embeddings...")
             QApplication.processEvents()
 
+            entries = self._data.get("embedding_entries", []) or []
+            active = self._data.get("active_embedding", 0 if entries else None)
+
             # (Re-)calculate embeddings if needed
             if embedding_mode in (
                 "calculate from distances",
@@ -2508,6 +2534,11 @@ class MainWindow(QMainWindow):
                         metric="cosine",
                     )
                     embeddings = reducer.fit_transform(self._data["features"])
+
+                # A load-time recompute supersedes the active embedding.
+                if entries and active is not None:
+                    entries[active]["embedding"] = embeddings
+                self._data["embeddings"] = embeddings
             else:
                 embeddings = self._data["embeddings"]
 
@@ -2535,10 +2566,13 @@ class MainWindow(QMainWindow):
                     ]
                 ),
                 dataset_col="dataset",
-                point_size=10,
+                point_size=self._data.get("point_size", 10),
                 distances=self._data.get("distances", None),
                 features=self._data.get("features", None),
             )
+            # Register the full set of embeddings (normalizes the non-active ones
+            # into the active embedding's frame). No-op when there are none.
+            fig.set_embeddings(entries, active=active if active is not None else 0)
             # We have to update bits and pieces on the controls panels based on the new data
             self.centralWidget().scatter_controls.update_controls()
             self._refresh_hover_columns_menu()

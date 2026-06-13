@@ -308,6 +308,7 @@ class NglViewer:
         self.viewer.canvas.request_draw()
 
     def close(self):
+        self.clear()  # make sure to clear futures
         self.viewer.close()
 
     def register(self):

@@ -3443,6 +3443,16 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_distance_edges_controls()
         self.update_scope_options()
 
+    def sync_point_scale_spinbox(self):
+        """Refresh the point-scale spinbox to match the figure's current scale.
+
+        ``set_points`` may auto-scale the global point size by dataset size, so
+        after a load the spinbox needs to be re-synced to show that value.
+        """
+        self.point_scale_spinbox.blockSignals(True)
+        self.point_scale_spinbox.setValue(float(self.figure.point_scale))
+        self.point_scale_spinbox.blockSignals(False)
+
     def capture_display_state(self):
         """Snapshot the label/color/size selections and their settings.
 

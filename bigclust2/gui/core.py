@@ -3769,7 +3769,8 @@ class MainWindow(QMainWindow):
                     ]
                 ),
                 dataset_col="dataset",
-                point_size=self._data.get("point_size", 10),
+                # None -> ScatterFigure.set_points auto-scales by dataset size.
+                point_size=self._data.get("point_size"),
                 distances=self._data.get("distances", None),
                 features=self._data.get("features", None),
                 knn=self._data.get("knn", None),
@@ -3779,6 +3780,9 @@ class MainWindow(QMainWindow):
             fig.set_embeddings(entries, active=active if active is not None else 0)
             # We have to update bits and pieces on the controls panels based on the new data
             self.current_view().scatter_controls.update_controls()
+            # set_points may have auto-scaled the point size by dataset size; make
+            # the point-scale spinbox reflect that.
+            self.current_view().scatter_controls.sync_point_scale_spinbox()
             self._refresh_hover_columns_menu()
 
             # Set up the 3D viewer

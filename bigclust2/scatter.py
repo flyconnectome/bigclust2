@@ -26,6 +26,18 @@ AVAILABLE_MARKERS.remove("ring")
 SCOPE_FADE_ALPHA = 0.15
 
 
+def auto_point_size(n, base=10.0, ref=1000, min_size=2.0):
+    """Default point size scaled by dataset size (inverse-sqrt, density-preserving).
+
+    Up to `ref` points the `base` size reads well; beyond that the plot gets
+    crowded, so shrink ~1/sqrt(n) (point area is proportional to 1/n, which keeps
+    the inked area roughly constant) down to a `min_size` floor.
+    """
+    if not n or n <= ref:
+        return base
+    return max(min_size, base * (ref / n) ** 0.5)
+
+
 def _pts_in_polygon(points, polygon):
     """Test which points lie inside a polygon (vectorised ray-casting).
 
@@ -1659,7 +1671,7 @@ class ScatterFigure(BaseFigure):
         marker_col="dataset",
         hover_col="hover_info",
         dataset_col="dataset",
-        point_size=10,
+        point_size=None,
         distances=None,
         features=None,
         knn=None,
@@ -1685,7 +1697,9 @@ class ScatterFigure(BaseFigure):
         dataset_col : str, optional
             Column name for dataset identifiers, by default "dataset"
         point_size : int, optional
-            Size of the points, by default 10
+            Size of the points. If ``None`` (default), the size is auto-scaled by
+            the number of points (see :func:`auto_point_size`): 10 for up to ~1000
+            points, shrinking for larger datasets to avoid overlap.
         distances/features : np.ndarray, optional
             An (N, N) array of pairwise distances between points, or an (N, M) array of features.
             If provided, these can be used to re-compute point positions based on dimensionality reduction techniques.
@@ -1788,6 +1802,8 @@ class ScatterFigure(BaseFigure):
         # (note that we're writing to the protected member variables here)
         self._selected = None
         self._point_size = 1
+        if point_size is None:
+            point_size = auto_point_size(len(metadata))
         self._point_scale = point_size
 
         # Grow/shrink-selection state (see `grow_selection`/`shrink_selection`)

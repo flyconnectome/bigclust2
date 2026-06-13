@@ -19,6 +19,7 @@ def run_clustering(
     *,
     method: str,
     is_precomputed: bool,
+    knn=None,
     metric: str = "euclidean",
     hdbscan_min_cluster_size: int = 5,
     hdbscan_min_samples: int | None = None,
@@ -59,6 +60,11 @@ def run_clustering(
         or ``"Spectral"``.
     is_precomputed : bool
         Whether ``data`` is a precomputed pairwise distance matrix.
+    knn : KNNGraph, optional
+        A precomputed k-nearest-neighbors graph. When provided, ``data`` is
+        ignored and clustering runs on the sparse graph. Only ``"HDBSCAN"``
+        (sparse precomputed) and ``"Spectral"`` (precomputed nearest neighbors)
+        are supported in this mode.
     metric : str
         Distance metric used when ``is_precomputed=False``.
     hdbscan_min_cluster_size : int
@@ -132,8 +138,31 @@ def run_clustering(
         Cluster label per point.  HDBSCAN assigns ``-1`` to noise points.
         All other methods return labels in ``[0, n_clusters)``.
     """
-    arr = np.asarray(data, dtype=np.float64)
     method = str(method)
+
+    if knn is not None:
+        labels = _run_clustering_knn(
+            knn,
+            method=method,
+            hdbscan_min_cluster_size=hdbscan_min_cluster_size,
+            hdbscan_min_samples=hdbscan_min_samples,
+            hdbscan_cluster_selection_epsilon=hdbscan_cluster_selection_epsilon,
+            hdbscan_cluster_selection_method=hdbscan_cluster_selection_method,
+            hbdscan_label_noise=hbdscan_label_noise,
+            spectral_n_clusters=spectral_n_clusters,
+            spectral_n_neighbors=spectral_n_neighbors,
+            spectral_n_init=spectral_n_init,
+            random_state=random_state,
+        )
+        if not allow_singletons:
+            unique_labels, counts = np.unique(labels, return_counts=True)
+            singleton_labels = unique_labels[counts == 1]
+            if singleton_labels.size:
+                labels = labels.copy()
+                labels[np.isin(labels, singleton_labels)] = -1
+        return labels.astype(int)
+
+    arr = np.asarray(data, dtype=np.float64)
 
     if method == "HDBSCAN":
         from sklearn.cluster import HDBSCAN
@@ -371,6 +400,136 @@ def run_clustering(
     return labels.astype(int)
 
 
+def _ensure_connected(G):
+    """Bridge a disconnected sparse distance graph into a single component.
+
+    HDBSCAN requires a connected graph. Components are chained together with
+    edges whose distance is larger than any real edge, so the bridges never
+    enter a point's core distance or cause clusters to merge.
+    """
+    import scipy.sparse as sp
+    from scipy.sparse.csgraph import connected_components
+
+    n_comp, comp_labels = connected_components(G, directed=False)
+    if n_comp <= 1:
+        return G
+
+    max_d = float(G.data.max()) if G.nnz else 1.0
+    bridge = max_d * 10.0 + 1.0
+    reps = [int(np.flatnonzero(comp_labels == c)[0]) for c in range(n_comp)]
+
+    G = sp.lil_matrix(G)
+    for a, b in zip(reps[:-1], reps[1:]):
+        G[a, b] = bridge
+        G[b, a] = bridge
+    return sp.csr_matrix(G)
+
+
+def _min_degree(G):
+    """Minimum row degree (stored neighbors per node) of a CSR graph."""
+    import scipy.sparse as sp
+
+    G = sp.csr_matrix(G)
+    return int(np.diff(G.indptr).min()) if G.shape[0] else 0
+
+
+def _fit_knn_clusterer(clusterer, G, method):
+    """Fit a graph clusterer, turning sparse-graph degeneracy into a clear error."""
+    try:
+        with warnings.catch_warnings(action="ignore"):
+            return clusterer.fit_predict(G)
+    except ValueError as e:
+        msg = str(e).lower()
+        if "neighbor" in msg:
+            raise ValueError(
+                f"The current subset is too sparse for {method} on a KNN graph: "
+                "some neurons have too few neighbors remaining. Widen the "
+                "selection/filter, or rebuild the KNN graph with a larger k."
+            ) from e
+        raise
+
+
+def _run_clustering_knn(
+    knn,
+    *,
+    method,
+    hdbscan_min_cluster_size,
+    hdbscan_min_samples,
+    hdbscan_cluster_selection_epsilon,
+    hdbscan_cluster_selection_method,
+    hbdscan_label_noise,
+    spectral_n_clusters,
+    spectral_n_neighbors,
+    spectral_n_init,
+    random_state,
+):
+    """Cluster a precomputed KNN graph (HDBSCAN or Spectral only).
+
+    Builds a single symmetric sparse distance graph and routes it to the
+    algorithms that can consume one. Agglomerative and K-Means require a full
+    distance matrix or feature vectors and raise here.
+    """
+    from .embeddings import knn_to_sparse
+
+    n = len(knn)
+    G = knn_to_sparse(knn.indices, knn.dists, n, symmetrize=True)
+
+    if method == "HDBSCAN":
+        from sklearn.cluster import HDBSCAN
+
+        if hbdscan_label_noise:
+            logger.warning(
+                "Forcing noise-point assignment is not supported with a KNN "
+                "graph (no dense distance matrix); ignoring the option."
+            )
+
+        # HDBSCAN requires a connected graph; a KNN graph of well-separated
+        # clusters can be disconnected. Bridge components with edges longer than
+        # any real edge so they never affect local density or cluster merging.
+        G = _ensure_connected(G)
+
+        # Every point must have at least `min_samples` neighbors in the graph.
+        # Filtering/subsetting can leave rows with far fewer than k neighbors,
+        # so cap against the graph's actual minimum degree (not the nominal k).
+        min_deg = _min_degree(G)
+        req = (
+            int(hdbscan_min_samples)
+            if hdbscan_min_samples is not None
+            else int(hdbscan_min_cluster_size)
+        )
+        min_samples = max(1, min(req, min_deg))
+
+        clusterer = HDBSCAN(
+            min_cluster_size=int(hdbscan_min_cluster_size),
+            min_samples=min_samples,
+            cluster_selection_epsilon=float(hdbscan_cluster_selection_epsilon),
+            cluster_selection_method=str(hdbscan_cluster_selection_method),
+            metric="precomputed",
+        )
+        return _fit_knn_clusterer(clusterer, G, method)
+
+    if method == "Spectral":
+        from sklearn.cluster import SpectralClustering
+
+        # Spectral needs `n_neighbors` stored entries per row; cap to the graph's
+        # actual minimum degree (a subset reduces it below k).
+        n_nb = max(1, min(int(spectral_n_neighbors), int(knn.k), _min_degree(G)))
+        clusterer = SpectralClustering(
+            n_clusters=int(spectral_n_clusters),
+            affinity="precomputed_nearest_neighbors",
+            n_neighbors=n_nb,
+            n_init=int(spectral_n_init),
+            random_state=random_state,
+        )
+        return _fit_knn_clusterer(clusterer, G, method)
+
+    raise ValueError(
+        f"Clustering method '{method}' is not available with a KNN graph. "
+        "Only 'HDBSCAN' and 'Spectral' are supported; 'Agglomerative' and "
+        "'K-Means' require a full distance matrix or feature vectors."
+    )
+
+
 def find_k(
     data,
     *,
@@ -434,6 +593,14 @@ def find_k(
     int
         Estimated optimal number of clusters.
     """
+    from .embeddings import is_knn_graph
+
+    if is_knn_graph(data):
+        raise ValueError(
+            "Automatic 'find k' is not supported with a KNN graph; it requires "
+            "a full distance matrix or feature vectors."
+        )
+
     method = str(method)
     if method not in ("K-Means", "Spectral"):
         raise ValueError("find_k supports only 'K-Means' or 'Spectral'.")

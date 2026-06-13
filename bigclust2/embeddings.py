@@ -1,8 +1,103 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 import numpy as np
 
 from sklearn.neighbors import NearestNeighbors
+
+
+@dataclass
+class KNNGraph:
+    """A precomputed k-nearest-neighbors graph.
+
+    Used as an alternative to a full pairwise distance matrix for large
+    projects. Neighbors are stored as **row positions** into the metadata (the
+    project file supplies these directly as 0-based ``nn_idx_*`` columns), so
+    the graph stays unambiguous even when neuron IDs are duplicated. Each row is
+    ordered nearest-first and excludes the point itself. Neighbors that were
+    dropped by filtering/subsetting are encoded as the sentinel ``-1`` and
+    left-compacted to the end of the row.
+
+    Attributes
+    ----------
+    indices : np.ndarray of shape (N, k), dtype int64
+        Neighbor row positions, nearest-first. ``-1`` marks a dropped neighbor
+        (one that fell outside a filter/selection), left-compacted to the tail.
+    dists : np.ndarray of shape (N, k), dtype float64
+        Distance to each neighbor, aligned with ``indices``. For a ``-1`` slot
+        this is the distance the neighbor had *before* it was dropped: edge
+        consumers (sparse graph, KNN lines, fidelity) mask by index and ignore
+        it, but UMAP keeps it so the local-scale estimate stays faithful to the
+        original neighborhood.
+    ids : np.ndarray of shape (N,)
+        Neuron IDs in metadata row order (used to validate alignment).
+    k : int
+        Number of neighbor columns (``indices.shape[1]``).
+    """
+
+    indices: np.ndarray
+    dists: np.ndarray
+    ids: np.ndarray
+    k: int
+
+    def __len__(self):
+        return self.indices.shape[0]
+
+
+def is_knn_graph(x):
+    """Whether ``x`` is a :class:`KNNGraph` instance."""
+    return isinstance(x, KNNGraph)
+
+
+def knn_to_sparse(indices, dists, n, *, symmetrize=True, eps=1e-9):
+    """Build a sparse CSR distance graph from neighbor indices + distances.
+
+    Parameters
+    ----------
+    indices : array-like of shape (N, k), int
+        Neighbor row positions; ``-1`` entries are skipped (missing neighbors).
+    dists : array-like of shape (N, k), float
+        Distance to each neighbor. Exact zeros are replaced with ``eps`` so
+        CSR's implicit-zero semantics do not silently drop those edges.
+    n : int
+        Number of nodes (``N``); the resulting matrix is ``(n, n)``.
+    symmetrize : bool, default True
+        If True, take the element-wise maximum with the transpose so the graph
+        is symmetric (required by ``SpectralClustering`` and well-behaved for
+        ``HDBSCAN``).
+    eps : float, default 1e-9
+        Minimum stored distance (see above).
+
+    Returns
+    -------
+    scipy.sparse.csr_matrix of shape (n, n)
+        Sparse distance graph, sorted by row values.
+    """
+    import scipy.sparse as sp
+
+    indices = np.asarray(indices)
+    dists = np.asarray(dists, dtype=np.float64)
+
+    valid = indices >= 0
+    rows = np.repeat(np.arange(indices.shape[0]), indices.shape[1])[valid.ravel()]
+    cols = indices.ravel()[valid.ravel()].astype(np.int64)
+    data = np.maximum(dists.ravel()[valid.ravel()], eps)
+
+    G = sp.csr_matrix((data, (rows, cols)), shape=(n, n))
+    if symmetrize:
+        G = G.maximum(G.T)
+
+    G = sp.csr_matrix(G)
+    try:
+        from sklearn.neighbors import sort_graph_by_row_values
+
+        sort_graph_by_row_values(G, warn_when_not_sorted=False)
+    except Exception:
+        # Sorting is purely an efficiency optimization for downstream
+        # estimators; skip it silently if the helper is unavailable.
+        pass
+    return G
 
 
 def is_precomputed_distance_matrix(arr):
@@ -120,6 +215,119 @@ def make_embedding_estimator(
     raise ValueError(f"Unsupported embedding method: {method}")
 
 
+def make_knn_embedding_estimator(
+    method,
+    *,
+    knn: KNNGraph,
+    random_state,
+    umap_n_neighbors=10,
+    umap_min_dist=0.1,
+    umap_spread=1.0,
+    umap_set_op_mix_ratio=0.5,
+    umap_densmap=False,
+    umap_dens_lambda=2.0,
+    tsne_perplexity=30.0,
+    tsne_learning_rate=200.0,
+    tsne_n_iter=1000,
+):
+    """Build an embedding estimator that consumes a precomputed KNN graph.
+
+    Only UMAP and t-SNE can be driven directly from a KNN graph; ``MDS``,
+    ``PCA`` and ``PaCMAP`` require a full distance matrix or feature vectors and
+    raise ``ValueError`` here.
+
+    Returns
+    -------
+    tuple[estimator, fit_input]
+        ``fit_input`` is the array/sparse-matrix to pass to
+        ``estimator.fit_transform(...)``: a placeholder ``(N, 1)`` array for
+        UMAP (which only reads ``X.shape[0]`` when ``precomputed_knn`` is set)
+        or the sparse CSR distance graph for t-SNE.
+    """
+    method = str(method).strip()
+    method_key = method.replace("-", "").upper()
+    n_samples = len(knn)
+
+    if method_key == "UMAP":
+        import umap
+
+        # n_neighbors must be < n_samples and <= the graph's k.
+        n_nb = max(1, min(int(umap_n_neighbors), int(knn.k), n_samples - 1))
+        knn_indices = knn.indices[:, :n_nb]
+
+        # With no edges at all (e.g. a scattered selection whose neurons aren't
+        # in each other's KNN), UMAP's fuzzy set is empty and it crashes on an
+        # empty-array reduction. Fail clearly instead.
+        if not bool((knn_indices >= 0).any()):
+            raise ValueError(
+                "The selected neurons share no nearest-neighbor links in the "
+                "KNN graph, so a UMAP layout cannot be computed from it. Widen "
+                "the selection, or recompute from a feature/distance source if "
+                "the project provides one."
+            )
+
+        estimator = umap.UMAP(
+            n_components=2,
+            n_neighbors=n_nb,
+            min_dist=umap_min_dist,
+            spread=umap_spread,
+            set_op_mix_ratio=umap_set_op_mix_ratio,
+            densmap=umap_densmap,
+            dens_lambda=umap_dens_lambda,
+            precomputed_knn=(knn_indices, knn.dists[:, :n_nb]),
+            random_state=random_state,
+        )
+        # UMAP only uses X for its row count when precomputed_knn is given.
+        fit_input = np.zeros((n_samples, 1), dtype=np.float32)
+        return estimator, fit_input
+
+    if method_key == "TSNE":
+        from sklearn.manifold import TSNE
+
+        graph = knn_to_sparse(knn.indices, knn.dists, n_samples, symmetrize=True)
+
+        # sklearn's t-SNE requests n_neighbors = int(3*perplexity + 1) and the
+        # precomputed-graph check additionally reserves one slot for the point
+        # itself, so each row must store at least n_neighbors + 1 edges. Cap
+        # perplexity against the *actual* minimum row degree (which can be < k
+        # once filtering drops neighbors) to stay safely under that bound.
+        min_nnz = int(np.diff(graph.indptr).min()) if graph.nnz else 0
+        max_neighbors = max(1, min_nnz - 1)
+        max_perp = max(1.0, (max_neighbors - 1) / 3.0)
+        perplexity = min(float(tsne_perplexity), max_perp)
+
+        # sklearn requests int(3*perplexity + 1) neighbors plus a self slot. If
+        # the sparsest row can't supply that even at the minimum perplexity, the
+        # graph is too sparse for t-SNE (e.g. isolated neurons); fail clearly
+        # rather than letting sklearn raise a cryptic error.
+        required = int(3.0 * perplexity + 1) + 1
+        if required > min_nnz:
+            raise ValueError(
+                "t-SNE cannot run on this KNN graph: some neurons have too few "
+                f"neighbors (need at least {required}, the sparsest has "
+                f"{min_nnz}). Use UMAP instead, widen the selection/filter, or "
+                "rebuild the KNN graph with a larger k."
+            )
+
+        estimator = TSNE(
+            n_components=2,
+            perplexity=perplexity,
+            learning_rate=float(tsne_learning_rate),
+            max_iter=int(tsne_n_iter),
+            metric="precomputed",
+            # "pca" init is incompatible with metric="precomputed".
+            init="random",
+            random_state=random_state,
+        )
+        return estimator, graph
+
+    raise ValueError(
+        f"Embedding method '{method}' cannot be computed from a KNN graph. "
+        "Only UMAP and t-SNE are supported; MDS/PCA/PaCMAP require a full "
+        "distance matrix or feature vectors."
+    )
+
+
 def prepare_embedding_input(
     data,
     *,
@@ -182,6 +390,7 @@ def neighborhood_fidelity(
     *,
     distances=None,
     features=None,
+    knn_neighbors=None,
     metric="euclidean",
     k=15,
     rank=False,
@@ -197,6 +406,10 @@ def neighborhood_fidelity(
     features : array-like of shape (N, D_feat), optional
         Feature matrix in the original space. If provided, pairwise distances are
         computed using ``metric``.
+    knn_neighbors : array-like of shape (N, k_graph), optional
+        Precomputed nearest-neighbor row positions (nearest-first), e.g. from a
+        :class:`KNNGraph`. The high-dimensional neighbor set is read directly
+        from the first ``k`` columns; no distance matrix is needed.
     metric : str, default "euclidean"
         Distance metric used when ``features`` are supplied.
     k : int, default 15
@@ -213,7 +426,8 @@ def neighborhood_fidelity(
 
     Notes
     -----
-    Exactly one of ``distances`` or ``features`` must be provided.
+    Exactly one of ``distances``, ``features`` or ``knn_neighbors`` must be
+    provided.
     """
     emb = np.asarray(embedding, dtype=np.float64)
     if emb.ndim != 2:
@@ -223,14 +437,26 @@ def neighborhood_fidelity(
     if n_samples < 2:
         raise ValueError("Need at least 2 samples to compute neighborhood fidelity.")
 
-    if (distances is None) == (features is None):
-        raise ValueError("Provide exactly one of `distances` or `features`.")
+    if sum(x is not None for x in (distances, features, knn_neighbors)) != 1:
+        raise ValueError(
+            "Provide exactly one of `distances`, `features` or `knn_neighbors`."
+        )
 
     k_eff = min(int(k), n_samples - 1)
+    if knn_neighbors is not None:
+        k_eff = min(k_eff, np.asarray(knn_neighbors).shape[1])
     if k_eff < 1:
         raise ValueError("`k` must be >= 1.")
 
-    if distances is not None:
+    if knn_neighbors is not None:
+        # High-dim neighbors come straight from the precomputed graph; the
+        # graph is nearest-first so the leading columns are the top-k.
+        high_neighbors = np.asarray(knn_neighbors)[:, :k_eff]
+        if high_neighbors.shape[0] != n_samples:
+            raise ValueError(
+                "`embedding` and `knn_neighbors` must contain the same number of samples."
+            )
+    elif distances is not None:
         high_d = np.asarray(distances, dtype=np.float64)
         if high_d.ndim != 2 or high_d.shape[0] != high_d.shape[1]:
             raise ValueError("`distances` must be a square matrix of shape (N, N).")

@@ -562,16 +562,28 @@ class ScatterFigure(BaseFigure):
             return
 
         if not x["mode"]:
-            self.neighbors_edge_group.visible = False
+            if getattr(self, "neighbors_edge_group", None):
+                self.neighbors_edge_group.visible = False
         else:
             if x["mode"] == "selected":
                 mask = np.zeros(len(self), dtype=bool)
-                mask[self.selected] = True
+
+                if self.selected is not None:
+                    mask[self.selected] = True
             else:
                 mask = None
 
             k = x.get("k", 15)
             metric = x.get("metric", "auto")
+            if not self._knn_edges_drawable(metric):
+                # The source backing these edges is gone (e.g. after switching
+                # to an embedding without a KNN graph). Degrade gracefully
+                # instead of raising inside a render/animation/selection
+                # callback; the controls reconcile the GUI on switch.
+                if getattr(self, "neighbors_edge_group", None):
+                    self.neighbors_edge_group.visible = False
+                self._show_knn_edges = False
+                return
             color = x.get("color", (1, 1, 1, 0.1))
             linewidth = x.get("linewidth", 1)
             self.make_neighbour_edges(
@@ -579,6 +591,38 @@ class ScatterFigure(BaseFigure):
             )
 
         self._show_knn_edges = x
+
+    def _knn_edges_drawable(self, metric):
+        """Whether KNN edges with `metric` can be drawn from the current sources.
+
+        Used to degrade gracefully (rather than raise) when an overlay is
+        re-applied after the active embedding's `self.dists` no longer carries
+        the source the edges were drawn from.
+        """
+        dists = getattr(self, "dists", None)
+        if dists is None:
+            return False
+        if not isinstance(dists, dict):
+            # Bare (legacy) distance matrix -> only "precomputed"/"auto" work.
+            return metric in ("precomputed", "auto")
+        if not dists:  # empty dict -> no sources
+            return False
+        if metric == "knn":
+            return "knn" in dists
+        if metric == "precomputed":
+            return "distances" in dists
+        if metric == "auto":
+            return bool(dists)
+        return "features" in dists
+
+    def _distance_edges_drawable(self):
+        """Whether distance edges can be drawn from the current sources."""
+        dists = getattr(self, "dists", None)
+        if dists is None:
+            return False
+        if isinstance(dists, dict):
+            return "distances" in dists
+        return True  # bare (legacy) distance matrix
 
     @property
     def debug(self):
@@ -1144,13 +1188,18 @@ class ScatterFigure(BaseFigure):
         if metric == "auto":
             if "distances" in self.dists:
                 metric = "precomputed"
+            elif "knn" in self.dists:
+                metric = "knn"
             else:
                 metric = "euclidean"
 
         if metric == "precomputed" and "distances" not in self.dists:
             raise ValueError("No precomputed distances available.")
 
-        if metric != "precomputed" and "features" not in self.dists:
+        if metric == "knn" and "knn" not in self.dists:
+            raise ValueError("No KNN graph available.")
+
+        if metric not in ("precomputed", "knn") and "features" not in self.dists:
             raise ValueError("No feature vectors available for distance calculation.")
 
         # Create a group and add to scene
@@ -1160,6 +1209,11 @@ class ScatterFigure(BaseFigure):
 
         # Clear the group (we might call this function to update the lines)
         self.neighbors_edge_group.clear()
+        # (Re)building edges means they should be shown. Without this, a group
+        # hidden by a prior "off" toggle — or by the move-completion re-apply,
+        # which toggles off-then-on — would stay invisible and the edges could
+        # never be brought back. (The distance-edge group does the same.)
+        self.neighbors_edge_group.visible = True
 
         # If nothing to show, we can just return here
         if mask is not None and mask.sum() == 0:
@@ -1172,7 +1226,18 @@ class ScatterFigure(BaseFigure):
         if mask is not None:
             ind = np.where(mask)[0]
 
-        if metric == "precomputed":
+        if metric == "knn":
+            # Neighbors come straight from the precomputed graph (nearest-first,
+            # already self-excluded). Cap k to what the graph stores; -1 padding
+            # marks missing neighbors and is dropped after edge construction.
+            graph = self.dists["knn"]
+            kk = min(k, int(graph.k))
+            if mask is None:
+                ind = np.arange(len(graph))
+                knn = graph.indices[:, :kk]
+            else:
+                knn = graph.indices[ind, :kk]
+        elif metric == "precomputed":
             dists = np.asarray(self.dists["distances"])
             if mask is None:
                 knn = np.argsort(dists, axis=1)[:, 1 : (k + 1)]
@@ -1202,15 +1267,25 @@ class ScatterFigure(BaseFigure):
                 )
                 knn = knn[:, 1:]
 
-        # Convert to edges (i.e. pairs of points)
+        # Convert to edges (i.e. pairs of points). `knn` may have fewer than `k`
+        # columns (KNN graph capped to its own k).
         edges = []
-        for i in range(k):
+        for i in range(knn.shape[1]):
             edges.append(np.stack((ind, knn[:, i]), axis=1))
         edges = np.concatenate(edges, axis=0)
+
+        # Drop edges to missing neighbors (sentinel -1 from a filtered KNN graph).
+        edges = edges[(edges >= 0).all(axis=1)]
 
         # Find unique edges (since the same edge can be found from both directions)
         edges = np.sort(edges, axis=1)  # sort each edge to make them comparable
         edges = np.unique(edges, axis=0)
+
+        # No surviving edges (e.g. a sparse KNN selection whose neighbors were
+        # all dropped to -1). Nothing to draw -> leave the cleared group empty
+        # rather than handing lines2gfx an empty list (np.vstack would raise).
+        if len(edges) == 0:
+            return
 
         # Translate edge into coordiantes
         lines = []
@@ -1498,6 +1573,7 @@ class ScatterFigure(BaseFigure):
         point_size=10,
         distances=None,
         features=None,
+        knn=None,
     ):
         """Set the scatter points and associated metadata.
 
@@ -1524,6 +1600,11 @@ class ScatterFigure(BaseFigure):
         distances/features : np.ndarray, optional
             An (N, N) array of pairwise distances between points, or an (N, M) array of features.
             If provided, these can be used to re-compute point positions based on dimensionality reduction techniques.
+        knn : KNNGraph, optional
+            A precomputed k-nearest-neighbors graph (see :class:`bigclust2.embeddings.KNNGraph`).
+            Used as a lightweight stand-in for a full distance matrix: enables
+            recomputing embeddings (UMAP/t-SNE), KNN-based clustering and fidelity
+            without the full (N, N) matrix.
         """
         # Make sure metadata has RangeIndex
         assert isinstance(
@@ -1553,7 +1634,7 @@ class ScatterFigure(BaseFigure):
         # Make sure distances and features have the same order as the points
         # N.B. we're tracking both distances and features in a dictionary
         # to allow for multiple distance metrics
-        if distances is None and features is None:
+        if distances is None and features is None and knn is None:
             self.dists = None
         else:
             self.dists = {}
@@ -1585,6 +1666,21 @@ class ScatterFigure(BaseFigure):
                 raise ValueError("Index of features must match IDs in metadata.")
 
             self.dists["features"] = features
+
+        if knn is not None:
+            if len(knn) != len(metadata):
+                raise ValueError(
+                    f"KNN graph must have the same number of rows as metadata, "
+                    f"got {len(knn)} and {len(metadata)}."
+                )
+            if self.ids is not None and not np.array_equal(
+                np.asarray(knn.ids), np.asarray(self.ids)
+            ):
+                raise ValueError(
+                    "KNN graph ids must match the IDs in metadata (same order)."
+                )
+
+            self.dists["knn"] = knn
 
         # Datasets are used to avoid collisions when the same ID is used in different datasets
         self.datasets = self.metadata[dataset_col].values if dataset_col else None
@@ -2006,8 +2102,15 @@ class ScatterFigure(BaseFigure):
             if self.show_label_lines:
                 self.make_label_lines()
             if self.show_distance_edges:
-                self.make_distance_edges()
+                # The active embedding may no longer carry a distance matrix
+                # (e.g. after a switch); turn the overlay off rather than raise.
+                if self._distance_edges_drawable():
+                    self.make_distance_edges()
+                else:
+                    self.show_distance_edges = False
             if self.show_knn_edges:
+                # The setter degrades gracefully if the stored metric's source
+                # is no longer available (see `_knn_edges_drawable`).
                 knn_mode = self.show_knn_edges
                 self.show_knn_edges = False
                 self.show_knn_edges = knn_mode
@@ -2113,7 +2216,8 @@ class ScatterFigure(BaseFigure):
         # Swap the high-dim sources paired with this embedding.
         feats = entry.get("features")
         dists_mat = entry.get("distances")
-        if feats is None and dists_mat is None:
+        knn = entry.get("knn")
+        if feats is None and dists_mat is None and knn is None:
             self.dists = None
         else:
             new_dists = {}
@@ -2121,6 +2225,8 @@ class ScatterFigure(BaseFigure):
                 new_dists["distances"] = dists_mat
             if feats is not None:
                 new_dists["features"] = feats
+            if knn is not None:
+                new_dists["knn"] = knn
             self.dists = new_dists
 
         new_pos = np.asarray(entry["embedding"], dtype=np.float32)
@@ -2241,13 +2347,32 @@ class ScatterFigure(BaseFigure):
 
         has_dist = "distances" in self.dists and self.dists["distances"] is not None
         has_feat = "features" in self.dists and self.dists["features"] is not None
-        if not (has_dist) and not (has_feat):
+        has_knn = "knn" in self.dists and self.dists["knn"] is not None
+        if not has_dist and not has_feat and not has_knn:
             raise ValueError(
-                "Must have either distance matrix or features to calculate embedding fidelity."
+                "Must have a distance matrix, features or a KNN graph to "
+                "calculate embedding fidelity."
             )
 
         if metric == "auto":
-            metric = "precomputed" if has_dist else "euclidean"
+            if has_dist:
+                metric = "precomputed"
+            elif has_knn:
+                metric = "knn"
+            else:
+                metric = "euclidean"
+
+        # A KNN graph supplies the true top-k neighbors directly.
+        if metric == "knn":
+            if not has_knn:
+                raise ValueError("KNN metric requires a KNN graph.")
+            graph = self.dists["knn"]
+            return neighborhood_fidelity(
+                embedding=positions if positions is not None else self.positions,
+                knn_neighbors=graph.indices,
+                k=min(int(k), int(graph.k)),
+                rank=rank,
+            )
 
         if metric == "precomputed" and not has_dist:
             raise ValueError("Precomputed metric requires a distance matrix.")

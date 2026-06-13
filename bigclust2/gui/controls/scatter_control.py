@@ -11,8 +11,10 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from concurrent.futures import ThreadPoolExecutor
 
 from ...embeddings import (
+    is_knn_graph,
     is_precomputed_distance_matrix,
     make_embedding_estimator,
+    make_knn_embedding_estimator,
     prepare_embedding_input,
 )
 from ...clusters import evaluate_clustering_sample
@@ -1436,10 +1438,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.umap_method_combo_box.setToolTip(
             "Select the method to use for dimensionality reduction."
         )
-        for item in ("UMAP", "MDS", "t-SNE"):
-            self.umap_method_combo_box.addItem(item)
-        if getattr(self.figure, "feats", None) is not None:
-            self.umap_method_combo_box.addItem("PaCMAP")
+        self._populate_embedding_methods()
         self.umap_method_combo_box.currentIndexChanged.connect(
             self.update_embedding_settings
         )
@@ -1729,6 +1728,73 @@ class ScatterControls(QtWidgets.QWidget):
     def build_fidelity_gui(self):
         """Build the GUI for the Fidelity tab."""
 
+        # Active-embedding indicator. Unlike the Embeddings tab (which offers a
+        # selector), fidelity always applies to whichever embedding is active,
+        # so this is a read-only label mirroring that selector's position.
+        self.fidelity_active_embedding_group = QtWidgets.QGroupBox("Active embedding")
+        active_row = QtWidgets.QHBoxLayout()
+        active_row.setContentsMargins(6, 4, 6, 4)
+        self.fidelity_active_embedding_group.setLayout(active_row)
+        self.fidelity_active_embedding_label = QtWidgets.QLabel("—")
+        self.fidelity_active_embedding_label.setToolTip(
+            "The embedding that fidelity is evaluated against. Switch it on the "
+            "Embeddings tab (or press the space bar to cycle)."
+        )
+        active_row.addWidget(self.fidelity_active_embedding_label)
+        self.tab6_layout.addWidget(self.fidelity_active_embedding_group)
+
+        # Shared input: which high-dimensional source defines the "true"
+        # neighborhood that fidelity scores and KNN edges compare the 2D layout
+        # against. Mirrors the Embeddings tab's "Input" group so the choice is
+        # made once instead of per-panel.
+        input_group = QtWidgets.QGroupBox("Input")
+        input_form = QtWidgets.QFormLayout()
+        input_form.setContentsMargins(6, 4, 6, 4)
+        input_form.setVerticalSpacing(6)
+        input_group.setLayout(input_form)
+        self.fidelity_input_form = input_form
+        self.tab6_layout.addWidget(input_group)
+
+        self.add_tooltip(
+            input_group,
+            "Select the high-dimensional source used as ground truth for "
+            "neighborhood fidelity and KNN edges. 'knn' uses the precomputed "
+            "KNN graph directly; 'precomputed' uses the full distance matrix; "
+            "'features' computes neighbors from feature vectors with the chosen "
+            "metric.",
+            anchor="group_label",
+        )
+
+        self.fidelity_data_combo_box = QtWidgets.QComboBox()
+        self.fidelity_data_combo_box.setToolTip(
+            "High-dimensional source used as ground truth for fidelity and KNN edges."
+        )
+        self.fidelity_data_combo_box.currentIndexChanged.connect(
+            self._on_fidelity_source_changed
+        )
+        input_form.addRow("Data:", self.fidelity_data_combo_box)
+
+        # The metric only applies to the feature source; the row is hidden for
+        # 'knn'/'precomputed' (which carry their own distances).
+        self.fidelity_metric_combo_box = QtWidgets.QComboBox()
+        self.fidelity_metric_combo_box.setToolTip(
+            "Distance metric used when neighbors are computed from feature vectors."
+        )
+        self.fidelity_metric_combo_box.addItems(
+            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+        )
+        self.fidelity_metric_combo_box.currentIndexChanged.connect(self.set_knn_edges)
+        input_form.addRow("Metric:", self.fidelity_metric_combo_box)
+
+        # Shape / KNN dimensions (+ metric) for the selected source.
+        self.fidelity_source_info_label = QtWidgets.QLabel("")
+        self.fidelity_source_info_label.setWordWrap(True)
+        self.fidelity_source_info_label.setStyleSheet(
+            "color: #8a8a8a; font-size: 11px;"
+        )
+        self.fidelity_source_info_label.setContentsMargins(0, 0, 0, 8)
+        input_form.addRow(self.fidelity_source_info_label)
+
         # Neighboorhood fidelity settings
         settings_group = QtWidgets.QGroupBox("Neighborhood Fidelity")
         settings_form = QtWidgets.QFormLayout()
@@ -1754,15 +1820,6 @@ class ScatterControls(QtWidgets.QWidget):
             "Number of nearest neighbors (k) used to compute neighborhood fidelity."
         )
         settings_form.addRow("k neighbors:", self.fidelity_k_slider)
-
-        self.fidelity_distance_combo_box = QtWidgets.QComboBox()
-        self.fidelity_distance_combo_box.setToolTip(
-            "Distance metric used when fidelity is computed from feature vectors."
-        )
-        self.fidelity_distance_combo_box.addItems(
-            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
-        )
-        settings_form.addRow("Distance:", self.fidelity_distance_combo_box)
 
         self.fidelity_use_rank_check = QtWidgets.QCheckBox("Use rank")
         self.fidelity_use_rank_check.setToolTip(
@@ -1790,14 +1847,17 @@ class ScatterControls(QtWidgets.QWidget):
 
         self.add_tooltip(
             settings_group,
-            "Show lines connecting each point to its k nearest neighbors in the original feature space. "
-            "This can help visualize how well local relationships are preserved in the embedding.",
+            "Show lines connecting each point to its k nearest neighbors in the "
+            "high-dimensional source selected above (Input → Data). This can "
+            "help visualize how well local relationships are preserved in the "
+            "embedding.",
             anchor="group_label",
         )
 
         self.fidelity_knn_combo_box = QtWidgets.QComboBox()
         self.fidelity_knn_combo_box.setToolTip(
-            "Show lines connecting each point to its k nearest neighbors in the original feature space."
+            "Show lines connecting each point to its k nearest neighbors in the "
+            "selected Data source."
         )
         self.fidelity_knn_combo_box.addItems(["Off", "Selected only", "All points"])
         self.fidelity_knn_combo_box.currentIndexChanged.connect(self.set_knn_edges)
@@ -1808,22 +1868,10 @@ class ScatterControls(QtWidgets.QWidget):
         self.fidelity_knn_k_slider.setSingleStep(1)
         self.fidelity_knn_k_slider.setValue(10)
         self.fidelity_knn_k_slider.setToolTip(
-            "Number of nearest neighbors (k) used to compute neighborhood fidelity."
+            "Number of nearest neighbors (k) to draw edges for."
         )
         self.fidelity_knn_k_slider.valueChanged.connect(self.set_knn_edges)
         settings_form.addRow("k neighbors:", self.fidelity_knn_k_slider)
-
-        self.fidelity_knn_distance_combo_box = QtWidgets.QComboBox()
-        self.fidelity_knn_distance_combo_box.setToolTip(
-            "Distance metric used when fidelity is computed from feature vectors."
-        )
-        self.fidelity_knn_distance_combo_box.addItems(
-            ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
-        )
-        self.fidelity_knn_distance_combo_box.currentIndexChanged.connect(
-            self.set_knn_edges
-        )
-        settings_form.addRow("Distance:", self.fidelity_knn_distance_combo_box)
 
         # Evaluate labels
         settings_group = QtWidgets.QGroupBox("Evaluate Labels")
@@ -1932,6 +1980,9 @@ class ScatterControls(QtWidgets.QWidget):
         settings_form.setContentsMargins(6, 4, 6, 4)
         settings_form.setVerticalSpacing(2)
         settings_group.setLayout(settings_form)
+        # Hidden entirely unless the project ships a full distance matrix
+        # (see `update_distance_edges_controls`).
+        self.distance_edges_group = settings_group
         self.tab6_layout.addWidget(settings_group)
 
         self.add_tooltip(
@@ -2014,7 +2065,7 @@ class ScatterControls(QtWidgets.QWidget):
         self.cluster_data_combo_box = QtWidgets.QComboBox()
         self.cluster_data_combo_box.setToolTip("Select the data source for clustering.")
         self.cluster_data_combo_box.currentIndexChanged.connect(
-            self._update_cluster_input_controls
+            self._refresh_cluster_source_gating
         )
         input_form.addRow("Data:", self.cluster_data_combo_box)
 
@@ -2026,6 +2077,15 @@ class ScatterControls(QtWidgets.QWidget):
             ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
         )
         input_form.addRow("Metric:", self.cluster_metric_combo_box)
+
+        # Small note shown only when a KNN graph is the selected input.
+        self.cluster_knn_input_note = QtWidgets.QLabel(
+            "Options limited when using KNN input"
+        )
+        self.cluster_knn_input_note.setWordWrap(True)
+        self.cluster_knn_input_note.setStyleSheet("color: #a00; font-size: 11px;")
+        self.cluster_knn_input_note.setVisible(False)
+        input_form.addRow(self.cluster_knn_input_note)
 
         # Algorithm group
         algo_group = QtWidgets.QGroupBox("Algorithm")
@@ -2040,9 +2100,7 @@ class ScatterControls(QtWidgets.QWidget):
         algo_layout.addLayout(algo_form)
 
         self.cluster_method_combo_box = QtWidgets.QComboBox()
-        self.cluster_method_combo_box.addItems(
-            ["HDBSCAN", "Agglomerative", "K-Means", "Spectral"]
-        )
+        self._populate_cluster_methods()
         self.cluster_method_combo_box.setToolTip("Select the clustering algorithm.")
         self.cluster_method_combo_box.currentIndexChanged.connect(
             self._update_cluster_method_settings
@@ -2475,6 +2533,38 @@ class ScatterControls(QtWidgets.QWidget):
     # Clusters tab helpers
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # KNN-graph mode helpers
+    # ------------------------------------------------------------------
+
+    def _active_knn(self):
+        """Return the active KNN graph, or None."""
+        dists = getattr(self.figure, "dists", None)
+        if isinstance(dists, dict):
+            return dists.get("knn")
+        return None
+
+    def _is_knn_only(self):
+        """Whether the active source is a KNN graph with no full distances/features."""
+        dists = getattr(self.figure, "dists", None)
+        if not isinstance(dists, dict):
+            return False
+        return (
+            dists.get("knn") is not None
+            and "distances" not in dists
+            and "features" not in dists
+        )
+
+    def _selected_embedding_knn(self):
+        """Return the selected embedding source iff it is a KNN graph, else None."""
+        arr = self._selected_embedding_data()
+        return arr if is_knn_graph(arr) else None
+
+    def _selected_clustering_knn(self):
+        """Return the selected clustering source iff it is a KNN graph, else None."""
+        arr = self._selected_clustering_data()
+        return arr if is_knn_graph(arr) else None
+
     def update_cluster_options(self):
         """Enable/disable the Clusters tab and populate the data combo box."""
         clusters_tab_index = self.tabs.indexOf(self.tab7)
@@ -2503,8 +2593,49 @@ class ScatterControls(QtWidgets.QWidget):
             self.cluster_data_combo_box.setCurrentText(current_text)
 
         self._update_homogeneous_label_options()
-        self._update_cluster_input_controls()
+        # Limit methods/sliders/metric and surface the warning for the selected
+        # source (also runs `_update_cluster_method_settings` -> input controls).
+        self._refresh_cluster_source_gating()
         self._refresh_manual_refinement_controls()
+
+    def _refresh_cluster_source_gating(self):
+        """Limit clustering methods/sliders/metric for the selected source.
+
+        A KNN-graph source allows only HDBSCAN/Spectral (capped to k); the 2D
+        embedding or a distance/feature source keeps all methods.
+        """
+        graph = self._selected_clustering_knn()
+        self._populate_cluster_methods(is_knn=graph is not None)
+        if graph is not None:
+            k = int(graph.k)
+            self.cluster_spectral_n_neighbors.setMaximum(max(1, k))
+            self.cluster_hdbscan_min_samples.setMaximum(max(1, k))
+        else:
+            self.cluster_spectral_n_neighbors.setMaximum(1000)
+            self.cluster_hdbscan_min_samples.setMaximum(10000)
+        if hasattr(self, "cluster_knn_input_note"):
+            self.cluster_knn_input_note.setVisible(graph is not None)
+        # Repopulating may have changed the current method (signals blocked),
+        # so re-sync which method-specific settings are shown + input controls.
+        self._update_cluster_method_settings()
+
+    def _populate_cluster_methods(self, is_knn=False):
+        """Populate the clustering method combo, limited to HDBSCAN/Spectral for KNN."""
+        combo = self.cluster_method_combo_box
+        methods = (
+            ["HDBSCAN", "Spectral"]
+            if is_knn
+            else ["HDBSCAN", "Agglomerative", "K-Means", "Spectral"]
+        )
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(methods)
+        combo.blockSignals(False)
+        if current in methods:
+            combo.setCurrentText(current)
+        elif methods:
+            combo.setCurrentIndex(0)
 
     def _update_homogeneous_label_options(self):
         """Populate homogeneous-composition label source choices."""
@@ -2562,15 +2693,21 @@ class ScatterControls(QtWidgets.QWidget):
     def _update_cluster_input_controls(self):
         """Adjust metric availability based on the selected input type."""
         arr = self._selected_clustering_data()
+        is_knn = is_knn_graph(arr)
         is_precomputed = arr is not None and is_precomputed_distance_matrix(arr)
-        self.cluster_metric_combo_box.setEnabled(not is_precomputed)
+        # No metric choice for a precomputed matrix or a KNN graph.
+        self.cluster_metric_combo_box.setEnabled(not is_precomputed and not is_knn)
         if hasattr(self, "cluster_kmeans_choose_k_button"):
             self.cluster_kmeans_choose_k_button.setEnabled(
-                not is_precomputed and self.cluster_method_combo_box.currentText() == "K-Means"
+                not is_precomputed and not is_knn
+                and self.cluster_method_combo_box.currentText() == "K-Means"
             )
         if hasattr(self, "cluster_spectral_choose_k_button"):
+            # "Find k" needs a full distance matrix (silhouette/precomputed),
+            # which a KNN graph cannot provide.
             self.cluster_spectral_choose_k_button.setEnabled(
-                self.cluster_method_combo_box.currentText() == "Spectral"
+                not is_knn
+                and self.cluster_method_combo_box.currentText() == "Spectral"
             )
 
     def _update_cluster_method_settings(self):
@@ -2757,6 +2894,11 @@ class ScatterControls(QtWidgets.QWidget):
             )
             return
 
+        # KNN graph: cluster the sparse graph directly (HDBSCAN/Spectral only).
+        if is_knn_graph(arr):
+            self._run_clustering_from_knn(arr)
+            return
+
         arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
         is_precomputed = is_precomputed_distance_matrix(arr_np)
         metric = self.cluster_metric_combo_box.currentText()
@@ -2854,6 +2996,35 @@ class ScatterControls(QtWidgets.QWidget):
         self._cluster_labels_original = labels.copy()
 
         # This function takes care of writing cluster labels to metadata, updating the label/color combo boxes, and refreshing the display
+        self._apply_cluster_labels()
+
+    def _run_clustering_from_knn(self, graph):
+        """Cluster a precomputed KNN graph (HDBSCAN/Spectral only)."""
+        from ...clusters import run_clustering
+
+        method = self.cluster_method_combo_box.currentText()
+        try:
+            labels = run_clustering(
+                None,
+                method=method,
+                is_precomputed=False,
+                knn=graph,
+                hdbscan_min_cluster_size=self.cluster_hdbscan_min_cluster_size.value(),
+                hdbscan_min_samples=(self.cluster_hdbscan_min_samples.value() or None),
+                hdbscan_cluster_selection_epsilon=self.cluster_hdbscan_epsilon.value(),
+                hdbscan_cluster_selection_method=self.cluster_hdbscan_method_combo.currentText(),
+                hbdscan_label_noise=self.cluster_hdbscan_label_noise_check.isChecked(),
+                spectral_n_clusters=self.cluster_spectral_n_clusters.value(),
+                spectral_n_neighbors=self.cluster_spectral_n_neighbors.value(),
+                spectral_n_init=self.cluster_spectral_n_init.value(),
+            )
+        except Exception as e:
+            logger.error(f"KNN clustering failed: {e}")
+            self.figure.show_message(f"Clustering error: {e}", color="red", duration=4)
+            return
+
+        self._cluster_labels = labels
+        self._cluster_labels_original = labels.copy()
         self._apply_cluster_labels()
 
     def _clear_cluster(self):
@@ -3393,29 +3564,38 @@ class ScatterControls(QtWidgets.QWidget):
             if self.size_combo_box.findText(item) < 0:
                 self.size_combo_box.addItem(item)
 
-    def update_distance_edges_controls(self):
-        """Update the distance edges controls."""
+    def _has_square_distance_matrix(self):
+        """Whether the active source provides a full (square) distance matrix."""
         dists = getattr(self.figure, "dists", None)
-        self.show_distance_edges_check.setEnabled(False)
-        self.show_distance_edges_check.setEnabled(False)
-        self.distance_edges_slider.setEnabled(False)
-
         if dists is None:
-            return
-        elif (
-            isinstance(dists, (np.ndarray, pd.DataFrame))
-            and dists.shape[0] != dists.shape[1]
-        ):
-            return
-        elif (
-            isinstance(dists, dict)
-            and ("distances" not in dists)
-            or (dists["distances"].shape[0] != dists["distances"].shape[1])
-        ):
-            return
+            return False
+        arr = dists.get("distances") if isinstance(dists, dict) else dists
+        return (
+            arr is not None
+            and hasattr(arr, "shape")
+            and len(arr.shape) == 2
+            and arr.shape[0] == arr.shape[1]
+        )
 
-        self.show_distance_edges_check.setEnabled(True)
-        self.distance_edges_slider.setEnabled(True)
+    def update_distance_edges_controls(self):
+        """Show distance-edge controls only when a full distance matrix exists.
+
+        The "Distances" edges feature needs all pairwise distances, so it's
+        hidden entirely for feature- or KNN-only projects rather than left
+        visible-but-disabled.
+        """
+        has_distances = self._has_square_distance_matrix()
+
+        self.distance_edges_group.setVisible(has_distances)
+        self.show_distance_edges_check.setEnabled(has_distances)
+
+        # Drop any stale edges when the source can no longer supply them.
+        if not has_distances and self.show_distance_edges_check.isChecked():
+            self.show_distance_edges_check.setChecked(False)
+
+        self.distance_edges_slider.setEnabled(
+            has_distances and self.show_distance_edges_check.isChecked()
+        )
 
     def update_umap_options(self):
         """Update the Embeddings tab state and the data-source combo box."""
@@ -3433,12 +3613,56 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.embedding_recompute_widget.setEnabled(dists is not None)
 
-        # Add any distances/features we have for the active embedding
+        # Add any distances/features/knn we have for the active embedding
         if isinstance(dists, dict):
             for key in dists.keys():
                 self.umap_dist_combo_box.addItem(key)
 
+        # `_update_embedding_input_controls` re-gates methods/sliders/warning
+        # for the (now repopulated) selected source.
         self._update_embedding_input_controls()
+
+    def _refresh_embedding_source_gating(self):
+        """Limit methods/sliders for the selected source.
+
+        Gating tracks the *selected* source: a KNN graph allows only UMAP/t-SNE
+        with capped neighbor counts, while distances/features keep all options.
+        The KNN limitation is surfaced via the data-source info label (see
+        `_update_embedding_source_info`).
+        """
+        graph = self._selected_embedding_knn()
+        self._populate_embedding_methods(is_knn=graph is not None)
+        if graph is not None:
+            k = int(graph.k)
+            self.umap_n_neighbors_slider.setMaximum(max(1, k))
+            # sklearn t-SNE needs ~3*perplexity+1 neighbors in the graph.
+            self.tsne_perplexity_slider.setMaximum(max(1.0, (k - 1) / 3.0))
+        else:
+            self.umap_n_neighbors_slider.setMaximum(200)
+            self.tsne_perplexity_slider.setMaximum(200.0)
+        # Repopulating may have changed the current method (signals blocked),
+        # so re-sync the method-specific settings widgets without recomputing.
+        self._sync_method_settings_widgets()
+
+    def _populate_embedding_methods(self, is_knn=False):
+        """Populate the embedding method combo, limited to UMAP/t-SNE for KNN."""
+        combo = self.umap_method_combo_box
+        if is_knn:
+            methods = ["UMAP", "t-SNE"]
+        else:
+            methods = ["UMAP", "MDS", "t-SNE"]
+            if getattr(self.figure, "feats", None) is not None:
+                methods.append("PaCMAP")
+
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(methods)
+        combo.blockSignals(False)
+        if current in methods:
+            combo.setCurrentText(current)
+        elif methods:
+            combo.setCurrentIndex(0)
 
     def on_embedding_switched(self):
         """React to the figure switching its active embedding.
@@ -3458,6 +3682,9 @@ class ScatterControls(QtWidgets.QWidget):
 
         self.update_umap_options()
         self.update_fidelity_options()
+        self.update_cluster_options()
+        self.update_distance_edges_controls()
+        self._reconcile_knn_edges()
 
         # Keep fidelity in sync with the new embedding when it drives sizing.
         if self.size_combo_box.currentText() == FIDELITY_DATA_COLUMN:
@@ -3493,6 +3720,7 @@ class ScatterControls(QtWidgets.QWidget):
         owner._data["embeddings"] = entry["embedding"]
         owner._data["features"] = entry["features"]
         owner._data["distances"] = entry["distances"]
+        owner._data["knn"] = entry.get("knn")
         owner._data["active_embedding"] = active
 
         # Menu enablement reflects the active tab only.
@@ -3508,56 +3736,159 @@ class ScatterControls(QtWidgets.QWidget):
         fidelity_tab_index = self.tabs.indexOf(self.tab6)
         dists = getattr(self.figure, "dists", None)
 
+        # The active-embedding indicator always reflects the current embedding.
+        self._update_fidelity_active_embedding_label()
+
         if dists is None:
             self.tabs.setTabEnabled(fidelity_tab_index, False)
             for box in (
-                self.fidelity_distance_combo_box,
-                self.fidelity_knn_distance_combo_box,
+                self.fidelity_data_combo_box,
+                self.fidelity_metric_combo_box,
             ):
                 box.blockSignals(True)
                 box.clear()
                 box.blockSignals(False)
+            self.fidelity_source_info_label.setText("")
             self.update_evaluate_labels_data_options()
             return
 
         self.tabs.setTabEnabled(fidelity_tab_index, True)
 
-        options = []
-        has_precomputed = False
-        has_features = False
-
+        # Available high-dimensional sources, in preference order. A feature
+        # metric (euclidean/cosine/...) is a separate choice surfaced only when
+        # the "features" source is selected (see `_update_fidelity_input_controls`).
+        sources = []
         if isinstance(dists, dict):
-            has_precomputed = "distances" in dists
-            has_features = "features" in dists
+            if dists.get("knn") is not None:
+                sources.append("knn")
+            if "distances" in dists:
+                sources.append("precomputed")
+            if "features" in dists:
+                sources.append("features")
         elif isinstance(dists, (np.ndarray, pd.DataFrame)):
-            has_precomputed = dists.shape[0] == dists.shape[1]
-            has_features = not has_precomputed
-
-        if has_precomputed:
-            options.append("precomputed")
-        if has_features:
-            options.extend(
-                ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+            sources.append(
+                "precomputed" if dists.shape[0] == dists.shape[1] else "features"
             )
 
-        for box in (
-            self.fidelity_distance_combo_box,
-            self.fidelity_knn_distance_combo_box,
-        ):
-            current_text = box.currentText()
-            box.blockSignals(True)
-            box.clear()
-            box.addItems(options)
-            box.blockSignals(False)
+        combo = self.fidelity_data_combo_box
+        current = combo.currentText()
+        combo.blockSignals(True)
+        combo.clear()
+        combo.addItems(sources)
+        if current in sources:
+            combo.setCurrentText(current)
+        elif sources:
+            combo.setCurrentIndex(0)
+        combo.blockSignals(False)
+        # Only worth interacting with when there's something to switch between.
+        combo.setEnabled(len(sources) > 1)
 
-            if current_text in options:
-                box.setCurrentText(current_text)
-            elif options:
-                box.setCurrentIndex(0)
+        # Repopulate the feature-metric combo (static; preserve the selection).
+        metric_combo = self.fidelity_metric_combo_box
+        if metric_combo.count() == 0:
+            metric_combo.blockSignals(True)
+            metric_combo.addItems(
+                ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+            )
+            metric_combo.blockSignals(False)
 
-            box.setEnabled(len(options) > 1)
-
+        self._update_fidelity_input_controls()
         self.update_evaluate_labels_data_options()
+
+    def _update_fidelity_active_embedding_label(self):
+        """Mirror the active embedding's name into the Fidelity tab indicator."""
+        label = getattr(self, "fidelity_active_embedding_label", None)
+        if label is None:
+            return
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        active = getattr(self.figure, "active_embedding", None)
+        if active is not None and 0 <= active < len(entries):
+            label.setText(str(entries[active].get("name", "embedding")))
+        else:
+            label.setText("—")
+
+    def _fidelity_source(self):
+        """Return the selected fidelity Data source ('knn'/'precomputed'/'features')."""
+        combo = getattr(self, "fidelity_data_combo_box", None)
+        if combo is None:
+            return None
+        return combo.currentText() or None
+
+    def _fidelity_metric(self):
+        """Resolve the selected Data source + metric to a `metric` argument.
+
+        'knn'/'precomputed' pass straight through; 'features' resolves to the
+        chosen feature metric (euclidean/cosine/...). Falls back to 'auto'.
+        """
+        source = self._fidelity_source()
+        if source == "features":
+            return self.fidelity_metric_combo_box.currentText() or "euclidean"
+        return source or "auto"
+
+    def _on_fidelity_source_changed(self):
+        """React to a Data-source change: re-gate controls and refresh edges."""
+        self._update_fidelity_input_controls()
+        # Keep any live KNN edges in sync with the new source.
+        self.set_knn_edges()
+
+    def _update_fidelity_input_controls(self):
+        """Toggle the metric row, cap k, and refresh the source info label."""
+        if not hasattr(self, "fidelity_data_combo_box"):
+            return
+
+        source = self._fidelity_source()
+        is_features = source == "features"
+        # The metric only applies to the feature source.
+        self.fidelity_input_form.setRowVisible(
+            self.fidelity_metric_combo_box, is_features
+        )
+
+        # Cap neighbor counts to what the KNN graph stores when it's the source.
+        graph = self._active_knn() if source == "knn" else None
+        kmax = max(1, int(graph.k)) if graph is not None else 200
+        self.fidelity_k_slider.setMaximum(kmax)
+        self.fidelity_knn_k_slider.setMaximum(kmax)
+
+        self._update_fidelity_source_info()
+
+    def _update_fidelity_source_info(self):
+        """Show shape (and type/metric, if available) for the selected source."""
+        label = getattr(self, "fidelity_source_info_label", None)
+        if label is None:
+            return
+
+        dists = getattr(self.figure, "dists", None)
+        source = self._fidelity_source()
+        if not isinstance(dists, dict) or not source:
+            label.setText("")
+            return
+
+        if source == "knn":
+            graph = dists.get("knn")
+            if graph is None:
+                label.setText("")
+                return
+            parts = [f"KNN: {len(graph)}×{graph.k}"]
+            info = self._active_source_info("knn")
+            if isinstance(info, dict) and info.get("metric"):
+                parts.append(f"metric: {info['metric']}")
+            label.setText("  ·  ".join(parts))
+            return
+
+        key = "distances" if source == "precomputed" else "features"
+        arr = dists.get(key)
+        if arr is None or not hasattr(arr, "shape"):
+            label.setText("")
+            return
+
+        parts = [f"shape: {tuple(arr.shape)}"]
+        info = self._active_source_info(key)
+        if isinstance(info, dict):
+            if info.get("type"):
+                parts.append(f"type: {info['type']}")
+            if info.get("metric"):
+                parts.append(f"metric: {info['metric']}")
+        label.setText("  ·  ".join(parts))
 
     def _selected_embedding_data(self):
         """Return the currently selected distance/feature matrix."""
@@ -3652,9 +3983,15 @@ class ScatterControls(QtWidgets.QWidget):
         if not hasattr(self, "pca_check"):
             return
 
+        # Re-gate available methods/sliders/warning for the selected source.
+        self._refresh_embedding_source_gating()
+
         arr = self._selected_embedding_data()
-        is_feature_input = (arr is not None) and (
-            not is_precomputed_distance_matrix(arr)
+        is_knn_input = is_knn_graph(arr)
+        is_feature_input = (
+            (arr is not None)
+            and (not is_knn_input)
+            and (not is_precomputed_distance_matrix(arr))
         )
         self._update_embedding_feature_partition_controls(arr, is_feature_input)
         arr_filtered = self._apply_embedding_feature_partition_filter(arr)
@@ -3695,7 +4032,9 @@ class ScatterControls(QtWidgets.QWidget):
         entry = entries[active]
         if key == "features":
             return entry.get("features_info")
-        if key == "distances":
+        # A KNN graph is parsed from the `distances` spec, so its type/metric
+        # live in `distances_info`.
+        if key in ("distances", "knn"):
             return entry.get("distances_info")
         return None
 
@@ -3708,6 +4047,17 @@ class ScatterControls(QtWidgets.QWidget):
         dists = getattr(self.figure, "dists", None)
         key = self.umap_dist_combo_box.currentText()
         arr = dists.get(key) if isinstance(dists, dict) else None
+
+        if is_knn_graph(arr):
+            parts = [f"KNN: {len(arr)}×{arr.k}"]
+            info = self._active_source_info(key)
+            if isinstance(info, dict) and info.get("metric"):
+                parts.append(f"metric: {info['metric']}")
+            # KNN graphs only support a subset of methods/options.
+            parts.append("some options unavailable")
+            label.setText("  ·  ".join(parts))
+            return
+
         if arr is None or not hasattr(arr, "shape"):
             label.setText("")
             return
@@ -3988,7 +4338,7 @@ class ScatterControls(QtWidgets.QWidget):
         try:
             scores = self.figure.calculate_embedding_fidelity(
                 k=self.fidelity_k_slider.value(),
-                metric=self.fidelity_distance_combo_box.currentText(),
+                metric=self._fidelity_metric(),
                 rank=self.fidelity_use_rank_check.isChecked(),
                 positions=positions,
             )
@@ -4032,12 +4382,45 @@ class ScatterControls(QtWidgets.QWidget):
         if mode == "Off":
             self.figure.show_knn_edges = False
         else:
+            metric = self._fidelity_metric()
             self.figure.show_knn_edges = {
                 "mode": "selected" if mode == "Selected only" else "all",
                 "k": self.fidelity_knn_k_slider.value(),
-                "metric": self.fidelity_knn_distance_combo_box.currentText(),
-                "distance": self.fidelity_knn_distance_combo_box.currentText(),
+                "metric": metric,
+                "distance": metric,
             }
+
+    def _knn_edges_source_available(self, metric):
+        """Whether the figure can still draw KNN edges with `metric`."""
+        check = getattr(self.figure, "_knn_edges_drawable", None)
+        return bool(check(metric)) if callable(check) else False
+
+    def _reconcile_knn_edges(self):
+        """Turn off KNN edges when the active embedding lacks their source.
+
+        Mirrors the distance-edge auto-disable in
+        `update_distance_edges_controls`: switching to an embedding without the
+        source the edges were drawn from would otherwise crash the figure's
+        move-completion / selection re-apply (see `make_neighbour_edges`).
+        """
+        edges = getattr(self.figure, "show_knn_edges", False)
+        if not isinstance(edges, dict) or not edges.get("mode"):
+            return
+        if self._knn_edges_source_available(edges.get("metric", "auto")):
+            return
+
+        # Reset the Show combo (the signal turns the figure edges off); fall
+        # back to clearing the figure flag directly if it was already "Off".
+        if self.fidelity_knn_combo_box.currentText() != "Off":
+            self.fidelity_knn_combo_box.setCurrentText("Off")
+        else:
+            self.figure.show_knn_edges = False
+
+        self.figure.show_message(
+            "KNN edges turned off: source unavailable for this embedding.",
+            color="orange",
+            duration=3,
+        )
 
     def _on_evaluate_labels_toggle(self):
         """React to changes in the evaluate labels checkbox."""
@@ -4329,6 +4712,12 @@ class ScatterControls(QtWidgets.QWidget):
         if dists is None:
             return
 
+        # KNN graph: feed neighbors straight into UMAP/t-SNE (bypassing the
+        # feature-vector preprocessing, which would densify the sparse input).
+        if is_knn_graph(dists):
+            self._calculate_embeddings_from_knn(dists)
+            return
+
         dists = self._apply_embedding_feature_partition_filter(dists)
         if (
             hasattr(dists, "shape")
@@ -4395,6 +4784,42 @@ class ScatterControls(QtWidgets.QWidget):
         with warnings.catch_warnings(action="ignore"):
             xy = fit.fit_transform(dists)
 
+        self._apply_recomputed_positions(xy)
+
+    def _calculate_embeddings_from_knn(self, graph):
+        """Recompute the embedding directly from a precomputed KNN graph."""
+        method = self.umap_method_combo_box.currentText()
+        random_state = (
+            int(self.umap_random_seed.text()) if self.umap_random_seed.text() else None
+        )
+        try:
+            estimator, fit_input = make_knn_embedding_estimator(
+                method,
+                knn=graph,
+                random_state=random_state,
+                umap_n_neighbors=self.umap_n_neighbors_slider.value(),
+                umap_min_dist=self.umap_min_dist_slider.value(),
+                umap_spread=self.umap_spread_slider.value(),
+                umap_set_op_mix_ratio=self.umap_set_op_mix_ratio_spinbox.value(),
+                umap_densmap=self.umap_densmap_check.isChecked(),
+                umap_dens_lambda=self.umap_dens_lambda_spinbox.value(),
+                tsne_perplexity=self.tsne_perplexity_slider.value(),
+                tsne_learning_rate=self.tsne_learning_rate_slider.value(),
+                tsne_n_iter=self.tsne_n_iter_slider.value(),
+            )
+            with warnings.catch_warnings(action="ignore"):
+                xy = estimator.fit_transform(fit_input)
+        except Exception as e:
+            logger.error(f"KNN embedding failed: {e}")
+            self.figure.show_message(
+                f"Embedding error: {e}", color="red", duration=4
+            )
+            return
+
+        self._apply_recomputed_positions(xy)
+
+    def _apply_recomputed_positions(self, xy):
+        """Normalize, persist and animate to freshly recomputed positions."""
         # Normalize into the shared frame so the recomputed layout stays in view
         # and matches the scale of the other embeddings.
         xy = self.figure.normalize_to_frame(xy)
@@ -4415,8 +4840,10 @@ class ScatterControls(QtWidgets.QWidget):
         # Keep the owning window's project data pointing at the new positions.
         self._sync_window_data_active()
 
-    def update_embedding_settings(self):
-        """Update the embedding settings based on the selected method."""
+    def _sync_method_settings_widgets(self):
+        """Show the settings widget for the current method (no recompute)."""
+        if not hasattr(self, "umap_settings_widget"):
+            return
         method = self.umap_method_combo_box.currentText()
         if method == "UMAP":
             self.umap_settings_widget.show()
@@ -4439,6 +4866,9 @@ class ScatterControls(QtWidgets.QWidget):
             self.tsne_settings_widget.hide()
             self.umap_button.setText(f"Run {method}")
 
+    def update_embedding_settings(self):
+        """Update the embedding settings based on the selected method."""
+        self._sync_method_settings_widgets()
         self.calculate_embeddings_maybe()
 
     def update_searchbar_completer(self):

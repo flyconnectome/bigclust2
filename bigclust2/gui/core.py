@@ -49,6 +49,7 @@ from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
+from ..embeddings import KNNGraph
 from ..__version__ import __version__
 
 
@@ -56,6 +57,45 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 
 
 logger = logging.getLogger(__name__)
+
+
+def _subset_knn(graph, selected_indices):
+    """Subset a KNNGraph to a selection, remapping neighbor row positions.
+
+    Neighbor positions are translated from the old (full) index space to the
+    new (selection) index space; neighbors that fall outside the selection (or
+    were already missing) become the sentinel ``-1`` and are left-compacted to
+    the end of each row so valid neighbors stay first. ``k`` is preserved.
+
+    The distance of a dropped slot is *retained* (not zeroed): edge-building
+    consumers mask by index, but UMAP's local-scale estimate benefits from
+    knowing how far the now-absent neighbor was (see ``KNNGraph``).
+    """
+    sel = np.asarray(selected_indices, dtype=np.int64)
+    n_old = len(graph)
+
+    # old position -> new position (-1 for rows not in the selection)
+    remap = np.full(n_old, -1, dtype=np.int64)
+    remap[sel] = np.arange(sel.shape[0])
+
+    sub_idx = graph.indices[sel]
+    sub_dist = graph.dists[sel]
+
+    valid = sub_idx >= 0
+    # Look up remapped positions; invalid/dropped neighbors -> -1.
+    mapped = np.where(valid, remap[np.where(valid, sub_idx, 0)], -1)
+
+    # Left-compact so valid neighbors come first; keep distances aligned.
+    order = np.argsort(mapped < 0, axis=1, kind="stable")
+    mapped = np.take_along_axis(mapped, order, axis=1)
+    sub_dist = np.take_along_axis(sub_dist, order, axis=1).astype(np.float64, copy=True)
+
+    return KNNGraph(
+        indices=mapped.astype(np.int64),
+        dists=sub_dist,
+        ids=np.asarray(graph.ids)[sel],
+        k=int(graph.k),
+    )
 
 
 # Ask for confirmation before Select All / Invert Selection grabs more
@@ -2899,12 +2939,16 @@ class MainWindow(QMainWindow):
                 dists = entry.get("distances")
                 if dists is not None:
                     dists = dists.iloc[selected_indices, selected_indices].copy()
+                knn = entry.get("knn")
+                if knn is not None:
+                    knn = _subset_knn(knn, selected_indices)
                 new_entries.append(
                     {
                         "name": entry["name"],
                         "embedding": emb,
                         "features": feats,
                         "distances": dists,
+                        "knn": knn,
                         "features_info": entry.get("features_info"),
                         "distances_info": entry.get("distances_info"),
                     }
@@ -2919,6 +2963,7 @@ class MainWindow(QMainWindow):
                 selected_points = active_entry["embedding"]
                 selected_distances = active_entry["distances"]
                 selected_features = active_entry["features"]
+                selected_knn = active_entry["knn"]
             else:
                 # No entry list (shouldn't normally happen): fall back to the
                 # currently displayed positions and active sources.
@@ -2927,6 +2972,7 @@ class MainWindow(QMainWindow):
                 ].copy()
                 selected_distances = None
                 selected_features = None
+                selected_knn = None
                 source_matrices = getattr(source_fig, "dists", None)
                 if isinstance(source_matrices, dict):
                     if source_matrices.get("distances") is not None:
@@ -2936,6 +2982,10 @@ class MainWindow(QMainWindow):
                     if source_matrices.get("features") is not None:
                         selected_features = _subset_features(
                             source_matrices["features"]
+                        )
+                    if source_matrices.get("knn") is not None:
+                        selected_knn = _subset_knn(
+                            source_matrices["knn"], selected_indices
                         )
 
             # Read the point size from the source view before the new tab
@@ -2955,6 +3005,7 @@ class MainWindow(QMainWindow):
                 active=active,
                 distances=selected_distances,
                 features=selected_features,
+                knn=selected_knn,
                 point_size=point_size,
                 ngl_source_viewer=getattr(source_view, "ngl_viewer", None),
             )
@@ -2977,6 +3028,7 @@ class MainWindow(QMainWindow):
         active,
         distances=None,
         features=None,
+        knn=None,
         point_size=10,
         ngl_source_viewer=None,
     ):
@@ -3001,6 +3053,7 @@ class MainWindow(QMainWindow):
             point_size=point_size,
             distances=distances,
             features=features,
+            knn=knn,
         )
         fig.set_embeddings(entries, active=active)
         view.scatter_controls.update_controls()
@@ -3042,6 +3095,7 @@ class MainWindow(QMainWindow):
             "embeddings": points,
             "distances": distances,
             "features": features,
+            "knn": knn,
             "embedding_entries": entries,
             "active_embedding": active if entries else None,
             "point_size": point_size,
@@ -3318,6 +3372,7 @@ class MainWindow(QMainWindow):
                 point_size=self._data.get("point_size", 10),
                 distances=self._data.get("distances", None),
                 features=self._data.get("features", None),
+                knn=self._data.get("knn", None),
             )
             # Register the full set of embeddings (normalizes the non-active ones
             # into the active embedding's frame). No-op when there are none.

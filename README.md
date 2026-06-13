@@ -143,6 +143,13 @@ The `info` file contains information about the dataset, including which files ar
         "file": "distances.parquet",
         "metric": "cosine"
     },
+    # optional alternative to a full distance matrix for large projects:
+    # a precomputed k-nearest-neighbors graph (see "KNN graph" below)
+    # "distances": {
+    #     "type": "knn",
+    #     "file": "knn.parquet",
+    #     "metric": "cosine"
+    # },
     # optional: feature vector
     "features": {
         "type": "connectivity",
@@ -168,6 +175,34 @@ Any additional columns are loaded and can be used for coloring, filtering, etc. 
 ### `distances` File (optional)
 
 The distances file contains pairwise distances between observations (e.g. neurons) in the dataset. This is optional but can be used for computing fidelity metrics and for feature selection. The file should be in Parquet (recommended) or Apache Arrow Feather format and contain a square matrix of shape `(n_observations, n_observations)`. Index and column names should be IDs matching the order of the `id` column in the `meta` file.
+
+### KNN graph (optional alternative to a full distance matrix)
+
+For large projects a full `(n_observations, n_observations)` distance matrix is often prohibitive to compute, store and load. Instead you can provide a precomputed **k-nearest-neighbors graph** by giving the `distances` spec `type: "knn"`:
+
+```json
+"distances": {
+    "type": "knn",
+    "file": "knn.parquet",
+    "metric": "cosine"
+}
+```
+
+The `type` may also be prefixed with the source the neighbors came from, in the form `"<source>:knn"` (e.g. `"nblast:knn"`); the prefix is for your own bookkeeping/display and is still recognised as a KNN graph.
+
+The KNN file is a **wide** table with one row per observation, in the **same order as the `meta` file**. For `k` neighbors it must contain:
+
+- `nn_idx_1, nn_idx_2, …, nn_idx_k` — the **0-based row indices** of each neighbor into the `meta` file (i.e. the neighbor's position, not its `id`), ordered **nearest-first**
+- `nn_dist_1, nn_dist_2, …, nn_dist_k` — the distance to each corresponding neighbor
+
+`k` is inferred from the number of `nn_idx_*` columns. Using row indices (rather than IDs) keeps the graph unambiguous even when a project has duplicate neuron IDs. When the dataset is filtered, neighbors that fall outside the kept subset are dropped automatically. The `metric` field is informational only.
+
+When a project supplies a KNN graph instead of a full distance matrix, BigClust limits the options that genuinely require all pairwise distances and shows a red note in the affected tabs:
+
+- The **distance heatmap** is disabled.
+- **Recompute embeddings** is limited to **UMAP** and **t-SNE** (which accept the graph directly); MDS/PaCMAP, the feature metric, rebalancing and PCA are disabled. UMAP's `n_neighbors` and t-SNE's `perplexity` are capped to what `k` supports.
+- **Clustering** is limited to **HDBSCAN** and **Spectral** (Agglomerative, K-Means and automatic "Find k" require a full matrix or feature vectors).
+- **Neighborhood fidelity** and KNN edge lines are computed directly from the graph (capped at `k`).
 
 ### `features` File (optional)
 

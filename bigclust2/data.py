@@ -10,6 +10,7 @@ import polars as pl
 from abc import ABC
 from pathlib import Path
 
+from .embeddings import KNNGraph
 from .utils import is_url, string_to_polars_filter, Url
 
 
@@ -403,6 +404,19 @@ class SingleProjectLoader(BaseProjectLoader):
         return self._spec_to_file(value, key=key)
 
     @staticmethod
+    def _spec_is_knn(spec):
+        """Whether a distances spec declares a KNN graph.
+
+        Accepts ``type: "knn"`` as well as a prefixed ``type: "<source>:knn"``
+        (e.g. ``"nblast:knn"``), so the distance source can be recorded in the
+        ``type`` field while still routing to the KNN loader.
+        """
+        if not isinstance(spec, dict):
+            return False
+        t = str(spec.get("type", "")).strip().lower()
+        return t == "knn" or t.endswith(":knn")
+
+    @staticmethod
     def _spec_to_file(value, key=None):
         """Resolve a file spec (plain string or ``{"file": ...}`` dict) to a path.
 
@@ -657,6 +671,141 @@ class SingleProjectLoader(BaseProjectLoader):
             cache[key] = features
         return features
 
+    def _load_knn_graph(self, *, file, ids, ind, cache):
+        """Load a precomputed KNN graph from a wide nearest-neighbor file.
+
+        The file is one row per neuron, in the **same order as the metadata**,
+        with ``nn_idx_1 .. nn_idx_k`` (0-based neighbor **row indices** into the
+        metadata, nearest-first) and ``nn_dist_1 .. nn_dist_k`` (distance to each
+        neighbor). Indices reference positions in the full (unfiltered) dataset;
+        under an active filter they are remapped to the kept subset, and
+        neighbors that fall outside it become the sentinel ``-1`` (left-compacted
+        to the end of each row). Working in index space keeps the graph
+        unambiguous even when neuron IDs are duplicated.
+
+        Parameters
+        ----------
+        file : str
+            Path/URL of the KNN file.
+        ids : array-like of shape (N,)
+            Neuron IDs of the kept rows, in metadata row order. Used only for
+            row-count validation and to tag the resulting graph.
+        ind : array-like or None
+            Original row positions kept by the active filter (None = no filter).
+            Used both to load only the relevant rows lazily and to remap the
+            neighbor indices into the kept subset.
+        cache : dict or None
+            Per-compile cache to avoid re-loading a shared file.
+
+        Returns
+        -------
+        KNNGraph
+        """
+        key = ("knn", str(file))
+        if cache is not None and key in cache:
+            return cache[key]
+
+        if ind is None:
+            knn_df = self.load_file(file)
+        else:
+            # Row-wise filter only (no id column needed): keep the rows whose
+            # original position is in `ind`, preserving original order.
+            knn_df = (
+                self.load_file_lazy(file)
+                .with_row_index(name="__index__")
+                .filter(pl.col("__index__").is_in(ind))
+                .drop("__index__")
+                .collect()
+                .to_pandas()
+            )
+
+        if not isinstance(knn_df, pd.DataFrame):
+            knn_df = pd.DataFrame(knn_df)
+
+        # Identify the nn_idx_* / nn_dist_* columns, ordered by their integer
+        # suffix so column order matches the nearest-first ranking.
+        def _ranked(prefix):
+            pairs = []
+            for col in knn_df.columns:
+                name = str(col)
+                if name.startswith(prefix):
+                    suffix = name[len(prefix):]
+                    if suffix.isdigit():
+                        pairs.append((int(suffix), col))
+            return [col for _, col in sorted(pairs)]
+
+        idx_cols = _ranked("nn_idx_")
+        dist_cols = _ranked("nn_dist_")
+        if len(idx_cols) == 0:
+            raise ValueError(
+                "KNN file must contain 'nn_idx_1', 'nn_idx_2', ... columns "
+                "(0-based neighbor row indices)."
+            )
+        if len(idx_cols) != len(dist_cols):
+            raise ValueError(
+                f"KNN file has {len(idx_cols)} 'nn_idx_*' columns but "
+                f"{len(dist_cols)} 'nn_dist_*' columns; they must match."
+            )
+        k = len(idx_cols)
+
+        ids = np.asarray(ids)
+        n = len(ids)
+        if knn_df.shape[0] != n:
+            raise ValueError(
+                f"KNN file has {knn_df.shape[0]} rows but metadata has "
+                f"{n} rows; they must be aligned 1:1."
+            )
+
+        # Read indices as float first so a producer's "missing neighbor" marker
+        # (NaN/inf) doesn't corrupt the int cast (NaN -> int is undefined and
+        # could otherwise land on a valid-but-wrong row). Non-finite values are
+        # treated as missing (-1); negatives/out-of-range are handled below.
+        nn_idx_f = np.asarray(knn_df[idx_cols].to_numpy(), dtype=np.float64)
+        nn_idx = np.where(np.isfinite(nn_idx_f), nn_idx_f, -1.0).astype(np.int64)
+        nn_dists = np.asarray(knn_df[dist_cols].to_numpy(), dtype=np.float64)
+
+        # Build an original-position -> kept-position remap. With no filter this
+        # is the identity over [0, n); under a filter it maps the kept original
+        # positions in `ind` to their new 0..n-1 positions, and everything else
+        # (filtered-out neighbors, out-of-range values) to -1.
+        ind_eff = np.arange(n) if ind is None else np.asarray(ind, dtype=np.int64)
+        size = int(max(ind_eff.max(initial=-1), nn_idx.max(initial=-1))) + 1
+        remap = np.full(max(size, 1), -1, dtype=np.int64)
+        remap[ind_eff] = np.arange(n)
+
+        flat = nn_idx.ravel()
+        in_range = (flat >= 0) & (flat < remap.shape[0])
+        mapped = np.where(in_range, remap[np.where(in_range, flat, 0)], -1)
+        indices = mapped.reshape(nn_idx.shape)
+
+        # Drop any neighbor that points at the row itself.
+        indices[indices == np.arange(n)[:, None]] = -1
+
+        # Left-compact each row so valid neighbors stay first (nearest-first)
+        # and -1 padding moves to the tail; keep distances aligned. The distance
+        # of a dropped neighbor is retained (edge-building consumers mask by
+        # index; UMAP uses it only for local-scale estimation - see KNNGraph).
+        order = np.argsort(indices < 0, axis=1, kind="stable")
+        indices = np.take_along_axis(indices, order, axis=1)
+        nn_dists = np.take_along_axis(nn_dists, order, axis=1)
+
+        # Flag neurons left with no valid neighbors: usually a data-prep issue,
+        # and they will be isolated in the graph (placed loosely by UMAP/t-SNE,
+        # treated as noise by graph clustering).
+        n_isolated = int(np.all(indices < 0, axis=1).sum())
+        if n_isolated and ind is None:
+            logger.warning(
+                "KNN graph '%s': %d of %d neurons have no valid neighbors "
+                "(all nn_idx_* missing/out-of-range/self). They will be "
+                "isolated nodes in the graph.",
+                file, n_isolated, n,
+            )
+
+        graph = KNNGraph(indices=indices, dists=nn_dists, ids=ids, k=k)
+        if cache is not None:
+            cache[key] = graph
+        return graph
+
     def compile(self, progress_callback=None):
         """Load and return all dataset components.
 
@@ -706,6 +855,7 @@ class SingleProjectLoader(BaseProjectLoader):
             "embeddings": None,
             "distances": None,
             "features": None,
+            "knn": None,
             "embedding_entries": [],
             "active_embedding": None,
         }
@@ -746,12 +896,24 @@ class SingleProjectLoader(BaseProjectLoader):
                     )
 
                 dists = None
-                if spec["dist_spec"] is not None:
-                    dists = self._load_distances_df(
-                        file=self._spec_to_file(spec["dist_spec"], key="distances"),
-                        ind=ind,
-                        cache=cache,
-                    )
+                knn = None
+                ds = spec["dist_spec"]
+                if ds is not None:
+                    if self._spec_is_knn(ds):
+                        # A KNN graph stands in for the full distance matrix.
+                        # We leave `distances` None so the heatmap stays disabled.
+                        knn = self._load_knn_graph(
+                            file=self._spec_to_file(ds, key="distances"),
+                            ids=filtered_meta["id"].values,
+                            ind=ind,
+                            cache=cache,
+                        )
+                    else:
+                        dists = self._load_distances_df(
+                            file=self._spec_to_file(ds, key="distances"),
+                            ind=ind,
+                            cache=cache,
+                        )
 
                 entries.append(
                     {
@@ -759,6 +921,7 @@ class SingleProjectLoader(BaseProjectLoader):
                         "embedding": emb,
                         "features": feats,
                         "distances": dists,
+                        "knn": knn,
                         # Raw source specs (carry `type`/`metric` for display).
                         "features_info": spec["feat_spec"]
                         if isinstance(spec["feat_spec"], dict)
@@ -777,6 +940,7 @@ class SingleProjectLoader(BaseProjectLoader):
             data["embeddings"] = entries[0]["embedding"]
             data["features"] = entries[0]["features"]
             data["distances"] = entries[0]["distances"]
+            data["knn"] = entries[0]["knn"]
 
         if isinstance(self.info["meta"], dict):
             color = self.info["meta"].get("color", None)

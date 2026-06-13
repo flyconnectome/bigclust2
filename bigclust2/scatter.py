@@ -212,6 +212,23 @@ class ScatterFigure(BaseFigure):
         if self.positions is None:
             return
 
+        # If any point is non-finite, pygfx can't build a bounding sphere for the
+        # group and raises. Compute one from the finite points and pass it
+        # explicitly (the form pygfx itself suggests in that error).
+        finite = np.isfinite(self.positions).all(axis=1)
+        if not finite.any():
+            return
+        if not finite.all():
+            pts = np.asarray(self.positions[finite], dtype=np.float64)
+            lo = pts.min(axis=0)
+            hi = pts.max(axis=0)
+            center = (lo + hi) / 2.0
+            radius = float(np.linalg.norm(hi - lo)) / 2.0
+            if not np.isfinite(radius) or radius <= 0:
+                radius = 1.0
+            self.camera.show_object((center[0], center[1], 1.0, radius))
+            return
+
         self.camera.show_object(self.scatter_group)
 
     def clear(self):
@@ -2237,6 +2254,12 @@ class ScatterFigure(BaseFigure):
         preserves aspect ratio (and therefore 2D neighbor ordering / fidelity).
         """
         xy = np.asarray(xy, dtype=np.float64)
+        # Ignore non-finite rows: a single NaN/inf would otherwise propagate
+        # through min/max and turn the whole normalized layout into NaN.
+        finite = np.isfinite(xy).all(axis=1)
+        if not finite.any():
+            return np.zeros(xy.shape[1]), 1.0
+        xy = xy[finite]
         lo = xy.min(axis=0)
         hi = xy.max(axis=0)
         center = (lo + hi) / 2.0

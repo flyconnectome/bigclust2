@@ -328,6 +328,58 @@ def make_knn_embedding_estimator(
     )
 
 
+def sanitize_embedding(xy):
+    """Relocate non-finite embedding rows to the layout periphery.
+
+    UMAP/t-SNE leave fully disconnected vertices (neurons whose KNN neighbors
+    all fall outside the current subset/selection, so they have no edges at all)
+    at ``NaN``. A single non-finite row poisons the whole layout downstream: the
+    shared-frame normalization computes ``min``/``max`` over every point, so one
+    ``NaN`` turns *all* coordinates into ``NaN`` and the entire scatter vanishes.
+
+    To keep the layout usable, the bad rows are replaced with finite coordinates
+    fanned out around the edge of the placed (finite) points -- they read as
+    outliers, matching how UMAP normally banishes disconnected vertices, instead
+    of corrupting the embedding.
+
+    Parameters
+    ----------
+    xy : array-like of shape (N, 2)
+        Freshly computed embedding coordinates.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        ``(xy_clean, bad_mask)`` -- a float64 copy with non-finite rows relocated,
+        and the boolean mask (shape ``(N,)``) of the rows that were relocated.
+    """
+    xy = np.array(xy, dtype=np.float64, copy=True)
+    bad = ~np.isfinite(xy).all(axis=1)
+    if not bad.any():
+        return xy, bad
+
+    good = ~bad
+    if good.any():
+        lo = xy[good].min(axis=0)
+        hi = xy[good].max(axis=0)
+        center = (lo + hi) / 2.0
+        span = float((hi - lo).max())
+        if not np.isfinite(span) or span <= 0:
+            span = 1.0
+    else:
+        center = np.zeros(xy.shape[1])
+        span = 1.0
+
+    # Fan the disconnected points out around the periphery so they don't stack
+    # on top of one another.
+    n_bad = int(bad.sum())
+    angles = 2.0 * np.pi * np.arange(n_bad) / n_bad
+    radius = span * 0.65
+    offsets = np.column_stack([np.cos(angles), np.sin(angles)]) * radius
+    xy[bad] = center + offsets
+    return xy, bad
+
+
 def prepare_embedding_input(
     data,
     *,

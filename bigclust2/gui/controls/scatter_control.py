@@ -16,6 +16,7 @@ from ...embeddings import (
     make_embedding_estimator,
     make_knn_embedding_estimator,
     prepare_embedding_input,
+    sanitize_embedding,
 )
 from ...clusters import evaluate_clustering_sample
 from ...utils import labels_to_colors, is_color_column
@@ -4976,6 +4977,20 @@ class ScatterControls(QtWidgets.QWidget):
 
     def _apply_recomputed_positions(self, xy):
         """Normalize, persist and animate to freshly recomputed positions."""
+        # Fully disconnected neurons (no KNN links in this subset) come back from
+        # UMAP/t-SNE at NaN; a single non-finite row would otherwise turn the
+        # whole normalized layout into NaN and make every point vanish. Relocate
+        # them to the edge of the layout instead.
+        xy, relocated = sanitize_embedding(xy)
+        if relocated.any():
+            n = int(relocated.sum())
+            self.figure.show_message(
+                f"{n} neuron(s) had no neighbors in this subset and were placed "
+                f"at the edge of the layout.",
+                color="orange",
+                duration=4,
+            )
+
         # Normalize into the shared frame so the recomputed layout stays in view
         # and matches the scale of the other embeddings.
         xy = self.figure.normalize_to_frame(xy)

@@ -3468,6 +3468,13 @@ class MainWindow(QMainWindow):
 
                 view.ngl_viewer.set_data(ngl_data)
 
+                # Share already-loaded meshes from the source viewer's cache (by
+                # reference, no copy) so the new tab can display selected neurons
+                # without re-downloading. Restricted to the selection's keys.
+                view.ngl_viewer.adopt_cache_from(
+                    ngl_source_viewer, keys=list(ngl_data.index)
+                )
+
                 neuropil_mesh = getattr(ngl_source_viewer, "neuropil_mesh", None)
                 if neuropil_mesh is not None:
                     view.ngl_viewer.set_neuropil_mesh(

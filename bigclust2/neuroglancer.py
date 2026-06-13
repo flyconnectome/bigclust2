@@ -72,6 +72,10 @@ class LRUCache:
         while len(self._data) > self._maxsize:
             self._data.popitem(last=False)
 
+    def items(self):
+        """Iterate (key, value) pairs without affecting LRU ordering."""
+        return self._data.items()
+
     def clear(self):
         self._data.clear()
 
@@ -478,6 +482,32 @@ class NglViewer:
     def clear_cache(self):
         """Clear the cache."""
         self.cache.clear()
+
+    def adopt_cache_from(self, other, keys=None):
+        """Share cached visuals from another viewer into this viewer's cache.
+
+        Entries are shared *by reference* (no copy): the same pygfx visual objects
+        are reused. Because a pygfx WorldObject has a single parent, displaying the
+        same neuron in both viewers at once will move it to whichever scene added it
+        last.
+
+        Parameters
+        ----------
+        other : NglViewer
+            Viewer whose cache entries to adopt.
+        keys : iterable of (id, dataset), optional
+            If given, only adopt these keys (others are skipped). Used to restrict
+            sharing to a selection.
+
+        """
+        src = getattr(other, "cache", None)
+        if not getattr(self, "use_cache", True) or src is None or not len(src):
+            return
+        keep = None if keys is None else {k for k in keys}
+        for key, visual in src.items():
+            if keep is not None and key not in keep:
+                continue
+            self.cache[key] = visual
 
     def neuroglancer_scene(self, group_by="source", use_colors="viewer"):
         """Generate neuroglancer scene for the current state.

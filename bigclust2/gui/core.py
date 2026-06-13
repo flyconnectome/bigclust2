@@ -1645,6 +1645,13 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⇧", "mouse:double-left"], "Select points with the same label")
         _add_row(cl, ["⌘", "⇧", "mouse:double-left"], "Add same-label points to selection")
 
+        _add_section(cl, "Selection")
+        _add_row(cl, ["⌘", "A"], "Select all points")
+        _add_row(cl, ["⌘", "I"], "Invert the selection")
+        _add_row(cl, ["⌘", "+"], "Grow the selection (add nearest points)")
+        _add_row(cl, ["⌘", "−"], "Shrink the selection (undo last grow)")
+        _add_row(cl, ["⌘", "C"], "Copy selected IDs to the clipboard")
+
         _add_section(cl, "Tabs")
         _add_row(cl, ["⌘", "T"], "Open a new tab")
         _add_row(cl, ["⌘", "W"], "Close the current tab")

@@ -721,7 +721,7 @@ class ScatterFigure(BaseFigure):
 
         self._gs_history.append(np.asarray(self._selected, dtype=int))
         self._gs_apply(np.union1d(self._selected, added))
-        self.show_message(f"Grew selection by {len(added):,}", duration=1.5)
+        self.show_message(f"Selection grown by {len(added):,}", duration=1.5)
 
     def shrink_selection(self):
         """Reverse the last grow step, restoring the prior selection.
@@ -736,7 +736,7 @@ class ScatterFigure(BaseFigure):
         prev = self._gs_history.pop()
         removed = len(self._selected) - len(prev)
         self._gs_apply(prev)
-        self.show_message(f"Shrank selection by {removed:,}", duration=1.5)
+        self.show_message(f"Selection shrunk by {removed:,}", duration=1.5)
 
     def highlight_points(self, points, color="y"):
         """Highlight given points in the plot.

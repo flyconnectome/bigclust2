@@ -274,15 +274,15 @@ class MainWidget(QWidget):
         # Create a vertical splitter with two widgets
         self.splitter = QSplitter(Qt.Vertical)
 
-        # Create top and bottom widgets
-        self.top_widget = QWidget()
-        self.setup_top_widget()
-        self.bottom_widget = QWidget()
-        self.setup_bottom_widget()
+        # Create the scatter and viewer panes
+        self.scatter_widget = QWidget()
+        self.setup_scatter_widget()
+        self.viewer_widget = QWidget()
+        self.setup_viewer_widget()
 
         # Add widgets to splitter
-        self.splitter.addWidget(self.top_widget)
-        self.splitter.addWidget(self.bottom_widget)
+        self.splitter.addWidget(self.scatter_widget)
+        self.splitter.addWidget(self.viewer_widget)
 
         # Make the divider more visible
         self.splitter.setHandleWidth(1)
@@ -297,6 +297,11 @@ class MainWidget(QWidget):
             [int(self.splitter.height() / 2), int(self.splitter.height() / 2)]
         )
 
+        # Current arrangement of the two panes; persisted across sessions so the
+        # window reopens the way it was left (see MainWindow save/restore). Kept
+        # in sync by show_only / show_side_by_side / show_stacked.
+        self._layout_mode = "stacked"
+
         layout.addWidget(self.splitter)
         self.setLayout(layout)
 
@@ -306,33 +311,80 @@ class MainWidget(QWidget):
     @resize_figures
     def show_only(self, target_widget):
         """Show only the target widget inside the splitter."""
-        self.top_widget.setVisible(True)
-        self.bottom_widget.setVisible(True)
+        self.scatter_widget.setVisible(True)
+        self.viewer_widget.setVisible(True)
 
-        if target_widget is self.top_widget:
-            self.top_widget.show()
-            self.bottom_widget.hide()
+        if target_widget is self.scatter_widget:
+            self.scatter_widget.show()
+            self.viewer_widget.hide()
             self.splitter.setSizes([1, 0])
-        elif target_widget is self.bottom_widget:
-            self.bottom_widget.show()
-            self.top_widget.hide()
+            self._layout_mode = "only_scatter"
+        elif target_widget is self.viewer_widget:
+            self.viewer_widget.show()
+            self.scatter_widget.hide()
             self.splitter.setSizes([0, 1])
+            self._layout_mode = "only_viewer"
 
     @resize_figures
     def show_side_by_side(self):
         """Show both widgets side-by-side (horizontal)."""
-        self.top_widget.show()
-        self.bottom_widget.show()
+        self.scatter_widget.show()
+        self.viewer_widget.show()
         self.splitter.setOrientation(Qt.Horizontal)
         self._set_equal_sizes_horizontal()
+        self._layout_mode = "side_by_side"
 
     @resize_figures
     def show_stacked(self):
         """Show both widgets stacked vertically."""
-        self.top_widget.show()
-        self.bottom_widget.show()
+        self.scatter_widget.show()
+        self.viewer_widget.show()
         self.splitter.setOrientation(Qt.Vertical)
         self._set_equal_sizes_vertical()
+        self._layout_mode = "stacked"
+
+    def apply_layout_mode(self, mode, ratio=None):
+        """Restore a saved arrangement; defaults to stacked for unknown values.
+
+        ``ratio`` is the fraction of the splitter the scatter pane should get,
+        applied on top of the two-pane layouts (ignored when one pane is
+        maximised). It overrides the 50/50 split the show_* methods set.
+        """
+        if mode == "side_by_side":
+            self.show_side_by_side()
+        elif mode == "only_scatter":
+            self.show_only(self.scatter_widget)
+        elif mode == "only_viewer":
+            self.show_only(self.viewer_widget)
+        else:
+            self.show_stacked()
+
+        if ratio is not None and self._layout_mode in ("stacked", "side_by_side"):
+            self._apply_ratio(ratio)
+
+    def layout_ratio(self):
+        """Fraction of the splitter allotted to the scatter pane, or None.
+
+        Only meaningful for the two-pane layouts; returns None when one pane is
+        maximised (where the split reads as all-or-nothing).
+        """
+        if self._layout_mode not in ("stacked", "side_by_side"):
+            return None
+        sizes = self.splitter.sizes()
+        total = sum(sizes)
+        if total <= 0 or len(sizes) < 2:
+            return None
+        return sizes[0] / total
+
+    def _apply_ratio(self, ratio):
+        """Position the divider so the scatter pane gets ``ratio`` of the extent."""
+        ratio = min(max(float(ratio), 0.0), 1.0)
+        if self.splitter.orientation() == Qt.Horizontal:
+            total = max(1, self.splitter.size().width())
+        else:
+            total = max(1, self.splitter.size().height())
+        first = int(total * ratio)
+        self.splitter.setSizes([first, max(0, total - first)])
 
     def _set_equal_sizes_horizontal(self):
         width = max(1, self.splitter.size().width())
@@ -352,25 +404,25 @@ class MainWidget(QWidget):
 
     def configure_overlay_actions(self):
         """Connect overlay buttons to actions."""
-        if hasattr(self.top_widget, "buttons") and self.top_widget.buttons:
-            # Left-most button: fullscreen top
-            self.top_widget.buttons[0].clicked.connect(
-                lambda: self.show_only(self.top_widget)
+        if hasattr(self.scatter_widget, "buttons") and self.scatter_widget.buttons:
+            # Left-most button: fullscreen scatter
+            self.scatter_widget.buttons[0].clicked.connect(
+                lambda: self.show_only(self.scatter_widget)
             )
             # Middle button: stacked vertically
-            self.top_widget.buttons[1].clicked.connect(self.show_side_by_side)
+            self.scatter_widget.buttons[1].clicked.connect(self.show_side_by_side)
             # Right button: side-by-side
-            self.top_widget.buttons[2].clicked.connect(self.show_stacked)
+            self.scatter_widget.buttons[2].clicked.connect(self.show_stacked)
 
-        if hasattr(self.bottom_widget, "buttons") and self.bottom_widget.buttons:
-            # Left-most button: fullscreen bottom
-            self.bottom_widget.buttons[0].clicked.connect(
-                lambda: self.show_only(self.bottom_widget)
+        if hasattr(self.viewer_widget, "buttons") and self.viewer_widget.buttons:
+            # Left-most button: fullscreen viewer
+            self.viewer_widget.buttons[0].clicked.connect(
+                lambda: self.show_only(self.viewer_widget)
             )
             # Middle button: stacked vertically
-            self.bottom_widget.buttons[1].clicked.connect(self.show_side_by_side)
+            self.viewer_widget.buttons[1].clicked.connect(self.show_side_by_side)
             # Right button: side-by-side
-            self.bottom_widget.buttons[2].clicked.connect(self.show_stacked)
+            self.viewer_widget.buttons[2].clicked.connect(self.show_stacked)
 
     def update_left_button_position(self, host_widget):
         """Position the left sidebar toggle relative to sidebar visibility."""
@@ -391,7 +443,7 @@ class MainWidget(QWidget):
 
     def toggle_figure_controls(self):
         """Toggle visibility of the scatter figure controls sidebar."""
-        sidebar = getattr(self.top_widget, "sidebar", None)
+        sidebar = getattr(self.scatter_widget, "sidebar", None)
         if sidebar is None:
             return
 
@@ -399,10 +451,10 @@ class MainWidget(QWidget):
         # Size the sidebar on first open: the splitter is laid out at its real
         # width here, unlike during construction (tab pages get an early layout
         # pass at a junk size that would corrupt the splitter's size state).
-        if sidebar.isVisible() and not self.top_widget._initial_sidebar_width_applied:
-            self._set_sidebar_width(self.top_widget.splitter, 300)
-            self.top_widget._initial_sidebar_width_applied = True
-        self.update_left_button_position(self.top_widget)
+        if sidebar.isVisible() and not self.scatter_widget._initial_sidebar_width_applied:
+            self._set_sidebar_width(self.scatter_widget.splitter, 300)
+            self.scatter_widget._initial_sidebar_width_applied = True
+        self.update_left_button_position(self.scatter_widget)
 
         # Force an update to prevent transparency artifacts on sidebar toggles.
         self.force_update()
@@ -412,15 +464,15 @@ class MainWidget(QWidget):
 
     def toggle_viewer_controls(self):
         """Toggle visibility of the neuroglancer viewer controls sidebar."""
-        sidebar = getattr(self.bottom_widget, "sidebar", None)
+        sidebar = getattr(self.viewer_widget, "sidebar", None)
         if sidebar is None:
             return
 
         sidebar.setVisible(not sidebar.isVisible())
-        if sidebar.isVisible() and not self.bottom_widget._initial_sidebar_width_applied:
-            self._set_sidebar_width(self.bottom_widget.splitter, 300)
-            self.bottom_widget._initial_sidebar_width_applied = True
-        self.update_left_button_position(self.bottom_widget)
+        if sidebar.isVisible() and not self.viewer_widget._initial_sidebar_width_applied:
+            self._set_sidebar_width(self.viewer_widget.splitter, 300)
+            self.viewer_widget._initial_sidebar_width_applied = True
+        self.update_left_button_position(self.viewer_widget)
 
         # Force an update to prevent transparency artifacts on sidebar toggles.
         self.force_update()
@@ -428,13 +480,13 @@ class MainWidget(QWidget):
         self.fig_scatter.force_single_render()
         self.ngl_viewer.force_single_render()
 
-    def setup_top_widget(self):
-        """Set up the top widget with overlay buttons and a left-positioned button."""
-        # Initialize and connect the figure to the top widgets
-        self.fig_scatter = ScatterFigure(selection_counter=self._selection_counter, parent=self.top_widget)
+    def setup_scatter_widget(self):
+        """Set up the scatter pane with overlay buttons and a left-positioned button."""
+        # Initialize and connect the figure to the scatter pane
+        self.fig_scatter = ScatterFigure(selection_counter=self._selection_counter, parent=self.scatter_widget)
         self.fig_scatter.show()
 
-        # Create main layout for top widget
+        # Create main layout for scatter pane
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -453,7 +505,7 @@ class MainWidget(QWidget):
         # Add scatter controls to sidebar
         self.scatter_controls = ScatterControls(self.fig_scatter)
         # Keep controls usable in short panes by scrolling instead of enforcing
-        # a large minimum height on the top widget.
+        # a large minimum height on the scatter pane.
         scatter_controls_scroll = QScrollArea()
         scatter_controls_scroll.setWidgetResizable(True)
         scatter_controls_scroll.setFrameShape(QFrame.NoFrame)
@@ -498,16 +550,16 @@ class MainWidget(QWidget):
         splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
-        self.top_widget.setLayout(main_layout)
-        self.top_widget.splitter = splitter
-        self.top_widget.sidebar = sidebar
-        self.top_widget.content = content
-        self.top_widget._initial_sidebar_width_applied = False
+        self.scatter_widget.setLayout(main_layout)
+        self.scatter_widget.splitter = splitter
+        self.scatter_widget.sidebar = sidebar
+        self.scatter_widget.content = content
+        self.scatter_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
         left_button.setFixedSize(40, 40)
-        left_button.setParent(self.top_widget)
+        left_button.setParent(self.scatter_widget)
         left_button.setFlat(True)
         left_button.setAutoFillBackground(True)
         left_button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -518,7 +570,7 @@ class MainWidget(QWidget):
             "QPushButton:pressed { background-color: rgba(0, 0, 0, 0.12); border-radius: 4px; }"
             "QPushButton:focus { outline: none; }"
         )
-        left_button.setToolTip("Toggle top sidebar")
+        left_button.setToolTip("Toggle scatter sidebar")
 
         def toggle_sidebar():
             self.toggle_figure_controls()
@@ -534,7 +586,7 @@ class MainWidget(QWidget):
         icon_defs = [
             (
                 str(ASSETS_FILE_PATH / "button_fullscreen.png"),
-                "Show only top widget",
+                "Show only scatter",
             ),
             (
                 str(ASSETS_FILE_PATH / "button_split_vertical.png"),
@@ -551,7 +603,7 @@ class MainWidget(QWidget):
             button.setFixedSize(button_size, button_size)
             button.setIcon(QIcon(str(icon_path)))
             button.setIconSize(QSize(button_size - 12, button_size - 12))
-            button.setParent(self.top_widget)
+            button.setParent(self.scatter_widget)
             button.setFlat(True)
             button.setAutoFillBackground(False)
             button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -568,7 +620,7 @@ class MainWidget(QWidget):
         # Position buttons in the top right corner
         for i, button in enumerate(buttons):
             x = (
-                self.top_widget.width()
+                self.scatter_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
@@ -576,50 +628,50 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         # Initial position of left button
-        self.update_left_button_position(self.top_widget)
+        self.update_left_button_position(self.scatter_widget)
 
         # Store reference to adjust position on resize
-        self.top_widget.left_button = left_button
-        self.top_widget.sidebar = sidebar
-        self.top_widget.buttons = buttons
-        self.top_widget.button_size = button_size
-        self.top_widget.button_spacing = button_spacing
+        self.scatter_widget.left_button = left_button
+        self.scatter_widget.sidebar = sidebar
+        self.scatter_widget.buttons = buttons
+        self.scatter_widget.button_size = button_size
+        self.scatter_widget.button_spacing = button_spacing
 
         # Override resizeEvent to reposition buttons
-        original_resize = self.top_widget.resizeEvent
+        original_resize = self.scatter_widget.resizeEvent
 
         def on_resize(event):
             original_resize(event)
             for i, button in enumerate(buttons):
                 x = (
-                    self.top_widget.width()
+                    self.scatter_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
                 y = button_spacing
                 button.move(x, y)
             # Reposition left button
-            self.update_left_button_position(self.top_widget)
+            self.update_left_button_position(self.scatter_widget)
             # Resize figure if necessary
             self.resize_figures()
 
-        self.top_widget.resizeEvent = on_resize
+        self.scatter_widget.resizeEvent = on_resize
 
         # Update button position when splitter is moved
         splitter.splitterMoved.connect(
-            lambda: self.update_left_button_position(self.top_widget)
+            lambda: self.update_left_button_position(self.scatter_widget)
         )
 
-    def setup_bottom_widget(self):
-        """Set up the bottom widget with a left-positioned button and sidebar."""
-        # Initialize and connect the neuroglancer viewer in the bottom widgets
-        self.ngl_viewer = NglViewer(figure=self.fig_scatter, viewer_kwargs=dict(parent=self.bottom_widget))
+    def setup_viewer_widget(self):
+        """Set up the viewer pane with a left-positioned button and sidebar."""
+        # Initialize and connect the neuroglancer viewer in the viewer pane
+        self.ngl_viewer = NglViewer(figure=self.fig_scatter, viewer_kwargs=dict(parent=self.viewer_widget))
         self.ngl_viewer.viewer.show()
 
         # Hook the viewer up to the figure
         self.fig_scatter.sync_viewer(self.ngl_viewer)
 
-        # Create main layout for bottom widget
+        # Create main layout for viewer pane
         main_layout = QHBoxLayout()
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(0)
@@ -680,16 +732,16 @@ class MainWidget(QWidget):
         splitter.setStretchFactor(1, 1)
 
         main_layout.addWidget(splitter)
-        self.bottom_widget.setLayout(main_layout)
-        self.bottom_widget.splitter = splitter
-        self.bottom_widget.sidebar = sidebar
-        self.bottom_widget.content = content
-        self.bottom_widget._initial_sidebar_width_applied = False
+        self.viewer_widget.setLayout(main_layout)
+        self.viewer_widget.splitter = splitter
+        self.viewer_widget.sidebar = sidebar
+        self.viewer_widget.content = content
+        self.viewer_widget._initial_sidebar_width_applied = False
 
         # Create a button positioned on the left, centered vertically
         left_button = QPushButton()
         left_button.setFixedSize(40, 40)
-        left_button.setParent(self.bottom_widget)
+        left_button.setParent(self.viewer_widget)
         left_button.setFlat(True)
         left_button.setAutoFillBackground(False)
         left_button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -700,7 +752,7 @@ class MainWidget(QWidget):
             "QPushButton:pressed { background-color: rgba(0, 0, 0, 0.12); border-radius: 4px; }"
             "QPushButton:focus { outline: none; }"
         )
-        left_button.setToolTip("Toggle bottom sidebar")
+        left_button.setToolTip("Toggle viewer sidebar")
 
         def toggle_sidebar():
             self.toggle_viewer_controls()
@@ -718,7 +770,7 @@ class MainWidget(QWidget):
         icon_defs = [
             (
                 str(ASSETS_FILE_PATH / "button_fullscreen.png"),
-                "Show only bottom widget",
+                "Show only 3D viewer",
             ),
             (
                 str(ASSETS_FILE_PATH / "button_split_vertical.png"),
@@ -735,7 +787,7 @@ class MainWidget(QWidget):
             button.setFixedSize(button_size, button_size)
             button.setIcon(QIcon(icon_path))
             button.setIconSize(QSize(button_size - 12, button_size - 12))
-            button.setParent(self.bottom_widget)
+            button.setParent(self.viewer_widget)
             button.setFlat(True)
             button.setAutoFillBackground(False)
             button.setAttribute(Qt.WA_TranslucentBackground, True)
@@ -752,7 +804,7 @@ class MainWidget(QWidget):
         # Position overlay buttons in the top right corner
         for i, button in enumerate(buttons):
             x = (
-                self.bottom_widget.width()
+                self.viewer_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
@@ -760,23 +812,23 @@ class MainWidget(QWidget):
             button.move(x, y)
 
         # Initial position of left button
-        self.update_left_button_position(self.bottom_widget)
+        self.update_left_button_position(self.viewer_widget)
 
         # Store reference to adjust position on resize
-        self.bottom_widget.left_button = left_button
-        self.bottom_widget.buttons = buttons
-        self.bottom_widget.button_size = button_size
-        self.bottom_widget.button_spacing = button_spacing
-        self.bottom_widget.sidebar = sidebar
+        self.viewer_widget.left_button = left_button
+        self.viewer_widget.buttons = buttons
+        self.viewer_widget.button_size = button_size
+        self.viewer_widget.button_spacing = button_spacing
+        self.viewer_widget.sidebar = sidebar
 
         # Override resizeEvent to reposition buttons
-        original_resize = self.bottom_widget.resizeEvent
+        original_resize = self.viewer_widget.resizeEvent
 
         def on_resize(event):
             original_resize(event)
             for i, button in enumerate(buttons):
                 x = (
-                    self.bottom_widget.width()
+                    self.viewer_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
@@ -784,30 +836,30 @@ class MainWidget(QWidget):
                 button.move(x, y)
                 button.raise_()
             # Reposition left button
-            self.update_left_button_position(self.bottom_widget)
+            self.update_left_button_position(self.viewer_widget)
 
-        self.bottom_widget.resizeEvent = on_resize
+        self.viewer_widget.resizeEvent = on_resize
 
         # Update button position when splitter is moved
         splitter.splitterMoved.connect(
-            lambda: self.update_left_button_position(self.bottom_widget)
+            lambda: self.update_left_button_position(self.viewer_widget)
         )
 
         # Initial positions
-        self.update_left_button_position(self.bottom_widget)
+        self.update_left_button_position(self.viewer_widget)
         for i, button in enumerate(buttons):
             x = (
-                self.bottom_widget.width()
+                self.viewer_widget.width()
                 - (button_size + button_spacing) * (3 - i)
                 + button_spacing
             )
             y = button_spacing
             button.move(x, y)
 
-        def apply_initial_bottom_overlay_layout():
+        def apply_initial_viewer_overlay_layout():
             for i, button in enumerate(buttons):
                 x = (
-                    self.bottom_widget.width()
+                    self.viewer_widget.width()
                     - (button_size + button_spacing) * (3 - i)
                     + button_spacing
                 )
@@ -815,20 +867,20 @@ class MainWidget(QWidget):
                 button.move(x, y)
                 button.raise_()
 
-            self.update_left_button_position(self.bottom_widget)
+            self.update_left_button_position(self.viewer_widget)
 
         # Ensure overlays are correctly placed after the first real layout pass.
-        QTimer.singleShot(0, apply_initial_bottom_overlay_layout)
+        QTimer.singleShot(0, apply_initial_viewer_overlay_layout)
 
     def resize_figures(self):
         """Resize figures to match their parent widgets."""
         self.fig_scatter.size = (
-            self.top_widget.content.width(),
-            self.top_widget.content.height(),
+            self.scatter_widget.content.width(),
+            self.scatter_widget.content.height(),
         )
         self.ngl_viewer.size = (
-            self.bottom_widget.content.width(),
-            self.bottom_widget.content.height(),
+            self.viewer_widget.content.width(),
+            self.viewer_widget.content.height(),
         )
 
     def force_update(self):
@@ -1255,7 +1307,17 @@ class MainWindow(QMainWindow):
                 title=getattr(view, "view_title", "untitled"), view=view
             )
         else:
-            self.add_new_tab(title="untitled")
+            view = self.add_new_tab(title="untitled")
+            # Reopen the initial tab in the arrangement (and divider position)
+            # last used, saved in closeEvent. Deferred a turn so the splitter
+            # has a real size by the time the sizing runs. New mid-session tabs
+            # keep the default stacked 50/50 layout.
+            mode = self.settings.value("mainWindow/layoutMode", "stacked")
+            ratio = self._read_layout_ratio_setting()
+            if (mode and mode != "stacked") or ratio is not None:
+                QTimer.singleShot(
+                    0, lambda v=view, m=mode, r=ratio: v.apply_layout_mode(m, r)
+                )
 
         # Menu bar with File -> Open Project
         menu_bar = self.menuBar()
@@ -1348,6 +1410,13 @@ class MainWindow(QMainWindow):
             lambda: self.current_view().toggle_viewer_controls()
         )
         view_menu.addAction(toggle_viewer_controls_action)
+
+        reset_layout_action = QAction("Reset Layout", self)
+        reset_layout_action.setToolTip(
+            "Restore the default stacked 50/50 arrangement of the two panes."
+        )
+        reset_layout_action.triggered.connect(self.on_reset_layout)
+        view_menu.addAction(reset_layout_action)
 
         self.sync_viewer_action = QAction("Synchronize Viewer", self)
         self.sync_viewer_action.setCheckable(True)
@@ -2855,13 +2924,36 @@ class MainWindow(QMainWindow):
             if view is not None and hasattr(view, "teardown_rendering"):
                 self._teardown_view(view)
 
-        # Persist geometry and maximized state
+        # Persist geometry, maximized state and the active view's layout
         try:
             self.settings.setValue("mainWindow/geometry", self.saveGeometry())
             self.settings.setValue("mainWindow/isMaximized", self.isMaximized())
+            view = self.current_view()
+            if view is not None:
+                self.settings.setValue("mainWindow/layoutMode", view._layout_mode)
+                ratio = view.layout_ratio()
+                if ratio is not None:
+                    self.settings.setValue("mainWindow/layoutRatio", ratio)
         except Exception:
             pass
         super().closeEvent(event)
+
+    def on_reset_layout(self):
+        """Reset the active view to the default stacked 50/50 arrangement."""
+        view = self.current_view()
+        if view is not None:
+            view.show_stacked()
+
+    def _read_layout_ratio_setting(self):
+        """Read the persisted splitter ratio as a float in (0, 1), or None."""
+        try:
+            raw = self.settings.value("mainWindow/layoutRatio", None)
+            if raw in (None, ""):
+                return None
+            ratio = float(raw)
+            return ratio if 0.0 < ratio < 1.0 else None
+        except (TypeError, ValueError):
+            return None
 
     def _refresh_hover_columns_menu(self):
         """Rebuild the Hover Columns submenu with checkable column items."""
@@ -3243,6 +3335,10 @@ class MainWindow(QMainWindow):
             # read before the new tab becomes the current one.
             display_state = source_view.scatter_controls.capture_display_state()
 
+            # Carry the source view's pane arrangement into the new tab too.
+            source_layout_mode = getattr(source_view, "_layout_mode", "stacked")
+            source_layout_ratio = source_view.layout_ratio()
+
             title = f"selection ({len(selected_meta)})"
             view = self.add_new_tab(title=title)
             self._populate_view(
@@ -3260,6 +3356,16 @@ class MainWindow(QMainWindow):
             )
             self._update_view_actions()
             self.set_view_title(view, title)
+
+            # Apply the carried-over arrangement once the new tab has a real
+            # size (deferred a turn, like the startup restore in init_ui).
+            if source_layout_mode != "stacked" or source_layout_ratio is not None:
+                QTimer.singleShot(
+                    0,
+                    lambda v=view, m=source_layout_mode, r=source_layout_ratio: (
+                        v.apply_layout_mode(m, r)
+                    ),
+                )
         except Exception as e:
             logger.error(f"Open selection in new tab failed: {e}")
 

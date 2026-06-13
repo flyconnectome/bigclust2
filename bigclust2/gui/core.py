@@ -46,6 +46,7 @@ from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
 from .widgets.features import FeatureExplorerWidget
 from .widgets.meta_explorer import MetaExplorerDialog
+from .widgets.project_details import ProjectDetailsDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
@@ -947,6 +948,84 @@ class _MouseGlyph(QWidget):
         p.end()
 
 
+def build_project_summary(loader, data):
+    """Assemble an ordered dict of derived project stats for the details dialog.
+
+    ``loader`` is a :class:`SingleProjectLoader` (or None) and ``data`` is the
+    compiled project dict (or None). Every field is guarded so a missing source
+    is omitted rather than rendered as ``"None"``. Kept as a free function (no
+    ``MainWindow``) so it stays unit-testable with a duck-typed fake loader.
+    """
+    summary = {}
+    if loader is not None:
+        name = getattr(loader, "name", None)
+        if name is not None:
+            summary["name"] = str(name)
+        path = getattr(loader, "path", None)
+        if path is not None:
+            summary["path"] = str(path)
+        try:
+            summary["location"] = "remote" if loader.is_remote else "local"
+        except Exception:
+            pass
+
+    if isinstance(data, dict) and data.get("meta") is not None:
+        try:
+            summary["observations"] = len(data["meta"])
+        except Exception:
+            pass
+
+    # Column count: prefer the loader's lazy schema (no meta materialisation);
+    # fall back to the compiled meta frame.
+    n_columns = None
+    if loader is not None:
+        try:
+            n_columns = len(loader.meta_columns)
+        except Exception:
+            n_columns = None
+    if n_columns is None and isinstance(data, dict) and data.get("meta") is not None:
+        try:
+            n_columns = len(data["meta"].columns)
+        except Exception:
+            n_columns = None
+    if n_columns is not None:
+        summary["meta columns"] = n_columns
+
+    # Embedding names, with the active one marked. Prefer the compiled entries
+    # (they carry the active index); fall back to the loader's specs.
+    names = None
+    active = None
+    if isinstance(data, dict):
+        entries = data.get("embedding_entries")
+        if entries:
+            names = [str(e.get("name", i)) for i, e in enumerate(entries)]
+            idx = data.get("active_embedding")
+            if isinstance(idx, int) and 0 <= idx < len(names):
+                active = idx
+    if names is None and loader is not None:
+        try:
+            names = [str(s["name"]) for s in loader.normalized_embedding_specs]
+        except Exception:
+            names = None
+    if names:
+        summary["embeddings"] = [
+            f"{n} (active)" if i == active else n for i, n in enumerate(names)
+        ]
+
+    if loader is not None:
+        has_distances = getattr(loader, "has_distances", None)
+        if has_distances is not None:
+            summary["has distances"] = bool(has_distances)
+        has_features = getattr(loader, "has_features", None)
+        if has_features is not None:
+            feat_type = getattr(loader, "feature_type", None)
+            summary["has features"] = (
+                f"yes ({feat_type})" if has_features and feat_type else bool(has_features)
+            )
+
+    return summary
+
+
 class AnnotationLogDialog(QDialog):
     """Dialog that shows the current window's annotation log."""
 
@@ -1464,6 +1543,10 @@ class MainWindow(QMainWindow):
         show_annotation_log_action = QAction("Show Annotation Log", self)
         show_annotation_log_action.triggered.connect(self.show_annotation_log)
         window_menu.addAction(show_annotation_log_action)
+
+        show_project_details_action = QAction("Show Project Details", self)
+        show_project_details_action.triggered.connect(self.show_project_details)
+        window_menu.addAction(show_project_details_action)
 
         # Help menu
         help_menu = menu_bar.addMenu("Help")
@@ -2470,6 +2553,17 @@ class MainWindow(QMainWindow):
         """Open a dialog showing the current window's annotation log."""
         dialog = AnnotationLogDialog(self, entries=self._annotation_log)
         dialog.exec()
+
+    def show_project_details(self):
+        """Open a dialog summarizing the current project's metadata."""
+        loader = self._current_project_loader
+        data = self._data
+        summary = build_project_summary(loader, data)
+        try:
+            info = loader.info if loader is not None else None
+        except Exception:
+            info = None
+        ProjectDetailsDialog(self, summary=summary, info=info).exec()
 
     @property
     def annotation_log(self):

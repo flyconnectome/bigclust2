@@ -49,7 +49,7 @@ This will install the latest released version of `bigclust2` from this repositor
 
 ### Controls
 
-Most GUI elements are hopefully self-explanatory - when in doubt look for the tooltip.
+Most UI elements are hopefully self-explanatory - when in doubt look for the tooltip.
 
 #### Scatterplot
 

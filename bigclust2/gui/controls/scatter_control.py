@@ -3579,6 +3579,7 @@ class ScatterControls(QtWidgets.QWidget):
         combo.blockSignals(False)
         # Only worth showing when there is something to switch between.
         self.embedding_selector_group.setVisible(len(entries) > 1)
+        self._sync_window_embedding_status()
 
     def _scope_columns(self):
         """Columns available for scope filters."""
@@ -3829,15 +3830,30 @@ class ScatterControls(QtWidgets.QWidget):
                     self._on_size_column_changed()
 
         self._sync_window_data_active()
+        self._sync_window_embedding_status()
 
-    def _sync_window_data_active(self):
-        """Mirror the active embedding's artifacts into the owning view's _data."""
-        # Walk up from the canvas to the view (MainWidget) that owns this
-        # figure. Views live as tabs inside the main window, so we must stop at
-        # the owning view rather than the top-level window.
+    def _owner_view(self):
+        """Walk up from the canvas to the view (MainWidget) owning this figure.
+
+        Views live as tabs inside the main window, so we stop at the owning
+        view rather than the top-level window. Returns None before the figure
+        is attached to a view (e.g. during construction).
+        """
         owner = self.figure.canvas
         while owner is not None and getattr(owner, "fig_scatter", None) is not self.figure:
             owner = owner.parentWidget()
+        return owner
+
+    def _sync_window_embedding_status(self):
+        """Ask the owning window to refresh its status-bar embedding indicator."""
+        owner = self._owner_view()
+        window = owner.window() if owner is not None else None
+        if window is not None and hasattr(window, "_update_embedding_status"):
+            window._update_embedding_status()
+
+    def _sync_window_data_active(self):
+        """Mirror the active embedding's artifacts into the owning view's _data."""
+        owner = self._owner_view()
         if owner is None or not isinstance(getattr(owner, "_data", None), dict):
             return
 

@@ -1290,6 +1290,13 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready", timeout=5000)
 
+        # Permanent indicator mirroring the active view's "Active embedding"
+        # selector. Added before any per-view selection counter so it sits to
+        # the left of it. Hidden until a view has more than one embedding.
+        self.embedding_status_label = QLabel("")
+        self.status_bar.addPermanentWidget(self.embedding_status_label)
+        self.embedding_status_label.hide()
+
         # Tab widget hosting one view (MainWidget) per tab
         self._tabs = ViewTabWidget()
         self._tabs.currentChanged.connect(self._on_current_tab_changed)
@@ -1910,6 +1917,9 @@ class MainWindow(QMainWindow):
                 counter.show()
             self._active_selection_counter = counter
 
+        # Reflect the newly active view's embedding in the status bar.
+        self._update_embedding_status()
+
         # A freshly exposed view may hold a stale frame; force one render.
         # Skip while hidden (e.g. during startup) - rendering to a canvas
         # whose surface doesn't exist yet can upset the wgpu backend.
@@ -1920,6 +1930,29 @@ class MainWindow(QMainWindow):
                 view.ngl_viewer.force_single_render()
             except Exception as e:
                 logger.debug(f"Failed to refresh canvases after tab switch: {e}")
+
+    def _update_embedding_status(self):
+        """Sync the status-bar embedding indicator with the active view.
+
+        Mirrors the controls' "Active embedding" selector: shows the active
+        embedding's name and is hidden unless the view has more than one
+        embedding to switch between. Safe to call from any view's controls;
+        it always reads the currently visible view.
+        """
+        label = getattr(self, "embedding_status_label", None)
+        if label is None:
+            return
+        view = self.current_view()
+        fig = getattr(view, "fig_scatter", None) if view is not None else None
+        entries = getattr(fig, "embedding_entries", None) or []
+        active = getattr(fig, "active_embedding", None)
+        if len(entries) > 1 and active is not None and 0 <= active < len(entries):
+            name = entries[active].get("name", f"#{active + 1}")
+            label.setText(f"Embedding: {name}  ")
+            label.show()
+        else:
+            label.clear()
+            label.hide()
 
     def _reassert_native_key_focus(self):
         """Point the OS-level key routing back at this window.

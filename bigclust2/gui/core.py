@@ -34,7 +34,7 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialogButtonBox,
 )
-from PySide6.QtGui import QIcon, QAction, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
+from PySide6.QtGui import QIcon, QAction, QActionGroup, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
 from importlib.resources import files
 
@@ -1334,6 +1334,24 @@ class MainWindow(QMainWindow):
         )
         set_annotations_action.triggered.connect(self.show_annotation_dialog)
         selection_menu.addAction(set_annotations_action)
+
+        selection_menu.addSeparator()
+        grow_action = QAction("Grow Selection", self)
+        # On macOS Qt maps Ctrl -> Cmd. Bind both "=" and "+" so the grow
+        # shortcut fires whether or not Shift is held for the "+" key.
+        grow_action.setShortcuts([QKeySequence("Ctrl+="), QKeySequence("Ctrl++")])
+        grow_action.triggered.connect(self.on_grow_selection)
+        selection_menu.addAction(grow_action)
+
+        shrink_action = QAction("Shrink Selection", self)
+        shrink_action.setShortcut(QKeySequence("Ctrl+-"))
+        shrink_action.triggered.connect(self.on_shrink_selection)
+        selection_menu.addAction(shrink_action)
+
+        # Rebuilt on show so it reflects the current tab's figure (see
+        # `_refresh_grow_shrink_menu`).
+        self._grow_shrink_menu = selection_menu.addMenu("Grow/Shrink Options")
+        self._grow_shrink_menu.aboutToShow.connect(self._refresh_grow_shrink_menu)
 
         selection_menu.addSeparator()
         open_selection_in_new_tab_action = QAction("Open in New Tab", self)
@@ -2831,6 +2849,130 @@ class MainWindow(QMainWindow):
                 fig._recompute_hover_info()
         except Exception as e:
             logger.debug(f"Hover recompute on menu close failed: {e}")
+
+    def _refresh_grow_shrink_menu(self):
+        """Rebuild the Grow/Shrink Options submenu for the current tab's figure."""
+        from .. import grow_shrink as gs
+
+        menu = self._grow_shrink_menu
+        menu.clear()
+
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            fig = None
+
+        if fig is None or getattr(fig, "positions", None) is None:
+            no_data = QAction("No data loaded", self)
+            no_data.setEnabled(False)
+            menu.addAction(no_data)
+            return
+
+        source, metric, step = fig._gs_resolve_settings()
+        sources = gs.available_sources(fig.dists, fig.positions)
+
+        # --- Source radio group ---
+        src_labels = {
+            gs.SOURCE_EMBEDDING: "Embedding (screen)",
+            gs.SOURCE_KNN: "KNN graph",
+            gs.SOURCE_DISTANCES: "Distance matrix",
+            gs.SOURCE_FEATURES: "Feature space",
+        }
+        src_group = QActionGroup(self)
+        src_group.setExclusive(True)
+        for sid, label in src_labels.items():
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setEnabled(sid in sources)
+            action.setChecked(sid == source)
+            action.triggered.connect(lambda checked, s=sid: self._on_gs_set_source(s))
+            src_group.addAction(action)
+            menu.addAction(action)
+
+        # --- Feature metric (only meaningful for the feature source) ---
+        if source == gs.SOURCE_FEATURES:
+            menu.addSeparator()
+            metric_menu = menu.addMenu("Feature Metric")
+            metric_group = QActionGroup(self)
+            metric_group.setExclusive(True)
+            for mname in ("euclidean", "cosine", "cityblock", "correlation"):
+                action = QAction(mname, self)
+                action.setCheckable(True)
+                action.setChecked(mname == metric)
+                action.triggered.connect(
+                    lambda checked, m=mname: self._on_gs_set_metric(m)
+                )
+                metric_group.addAction(action)
+                metric_menu.addAction(action)
+
+        # --- Step size ---
+        menu.addSeparator()
+        step_menu = menu.addMenu("Step Size")
+        step_group = QActionGroup(self)
+        step_group.setExclusive(True)
+        presets = [1, 5, 10, 50, 100]
+        for preset in presets:
+            action = QAction(str(preset), self)
+            action.setCheckable(True)
+            action.setChecked(preset == step)
+            action.triggered.connect(lambda checked, n=preset: self._on_gs_set_step(n))
+            step_group.addAction(action)
+            step_menu.addAction(action)
+        step_menu.addSeparator()
+        custom = QAction(
+            "Custom…" if step in presets else f"Custom… ({step})", self
+        )
+        custom.setCheckable(True)
+        custom.setChecked(step not in presets)
+        step_group.addAction(custom)
+        custom.triggered.connect(self._on_gs_set_step_custom)
+        step_menu.addAction(custom)
+
+    def on_grow_selection(self):
+        """Grow the current selection (Selection > Grow Selection)."""
+        try:
+            self.current_view().fig_scatter.grow_selection()
+        except Exception as e:
+            logger.debug(f"Grow Selection failed: {e}")
+
+    def on_shrink_selection(self):
+        """Shrink (reverse the last grow of) the current selection."""
+        try:
+            self.current_view().fig_scatter.shrink_selection()
+        except Exception as e:
+            logger.debug(f"Shrink Selection failed: {e}")
+
+    def _on_gs_set_source(self, source):
+        try:
+            self.current_view().fig_scatter._gs_source = source
+        except Exception as e:
+            logger.debug(f"Set grow/shrink source failed: {e}")
+
+    def _on_gs_set_metric(self, metric):
+        try:
+            self.current_view().fig_scatter._gs_metric = metric
+        except Exception as e:
+            logger.debug(f"Set grow/shrink metric failed: {e}")
+
+    def _on_gs_set_step(self, step):
+        try:
+            self.current_view().fig_scatter._gs_step = int(step)
+        except Exception as e:
+            logger.debug(f"Set grow/shrink step failed: {e}")
+
+    def _on_gs_set_step_custom(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        try:
+            fig = self.current_view().fig_scatter
+            current = int(getattr(fig, "_gs_step", 10))
+            value, ok = QInputDialog.getInt(
+                self, "Step Size", "Points per grow/shrink:", current, 1, 100000, 1
+            )
+            if ok:
+                fig._gs_step = int(value)
+        except Exception as e:
+            logger.debug(f"Set custom grow/shrink step failed: {e}")
 
     def _confirm_large_selection(self, n):
         """Ask the user to confirm a selection of `n` neurons if it is large."""

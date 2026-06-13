@@ -307,6 +307,12 @@ class ScatterFigure(BaseFigure):
     @update_figure
     def selected(self, x):
         """Select given points in the plot (indices!)."""
+        # Any selection change that does not come from grow/shrink itself resets
+        # the grow history, so shrinking only ever reverses our own grow steps
+        # (see `grow_selection`/`shrink_selection`).
+        if not getattr(self, "_gs_internal_update", False):
+            self._gs_history = []
+
         if isinstance(x, type(None)):
             x = []
         elif isinstance(x, int):
@@ -648,6 +654,89 @@ class ScatterFigure(BaseFigure):
 
     def deselect_all(self):
         self.selected = None
+
+    def _gs_resolve_settings(self):
+        """Resolve the effective (source, metric, step) for grow/shrink.
+
+        Falls back to the embedding (always available) when no source is set or
+        the stored source is no longer valid for the current data.
+        """
+        from . import grow_shrink as gs
+
+        sources = gs.available_sources(self.dists, self.positions)
+        source = self._gs_source
+        if source not in sources:
+            source = sources[0] if sources else None
+        return source, self._gs_metric, int(getattr(self, "_gs_step", 10))
+
+    def _gs_apply(self, new_selected):
+        """Assign `new_selected` without clearing the grow history."""
+        self._gs_internal_update = True
+        try:
+            self.selected = new_selected
+        finally:
+            self._gs_internal_update = False
+
+    def grow_selection(self, step=None):
+        """Grow the current selection by pulling in the nearest unselected points.
+
+        Adds the `step` (default :attr:`_gs_step`) points closest to the current
+        selection, measured in the configured distance source (embedding by
+        default). Each grow is pushed onto a history stack so it can be reversed
+        by :meth:`shrink_selection`.
+        """
+        from . import grow_shrink as gs
+
+        if self._selected is None or not len(self._selected):
+            self.show_message(
+                "Select at least one point first", color="red", duration=2
+            )
+            return
+
+        source, metric, default_step = self._gs_resolve_settings()
+        if source is None:
+            self.show_message(
+                "No data available for grow/shrink", color="red", duration=2
+            )
+            return
+        step = int(step) if step else default_step
+
+        try:
+            added = gs.grow_selection(
+                self._selected,
+                step,
+                source=source,
+                positions=self.positions,
+                dists=self.dists,
+                metric=metric,
+                scope_mask=self._selection_scope_mask,
+            )
+        except gs.GrowShrinkUnavailable as e:
+            self.show_message(str(e), color="red", duration=2)
+            return
+
+        if not len(added):
+            self.show_message("All in-scope points already selected", duration=2)
+            return
+
+        self._gs_history.append(np.asarray(self._selected, dtype=int))
+        self._gs_apply(np.union1d(self._selected, added))
+        self.show_message(f"Grew selection by {len(added):,}", duration=1.5)
+
+    def shrink_selection(self):
+        """Reverse the last grow step, restoring the prior selection.
+
+        Cannot shrink below the initial (pre-grow) selection; any manual
+        selection change resets the history (see the `selected` setter).
+        """
+        if not self._gs_history:
+            self.show_message("Nothing to shrink — grow first", duration=2)
+            return
+
+        prev = self._gs_history.pop()
+        removed = len(self._selected) - len(prev)
+        self._gs_apply(prev)
+        self.show_message(f"Shrank selection by {removed:,}", duration=1.5)
 
     def highlight_points(self, points, color="y"):
         """Highlight given points in the plot.
@@ -1700,6 +1789,13 @@ class ScatterFigure(BaseFigure):
         self._selected = None
         self._point_size = 1
         self._point_scale = point_size
+
+        # Grow/shrink-selection state (see `grow_selection`/`shrink_selection`)
+        self._gs_source = None  # None => default to embedding at call time
+        self._gs_metric = "euclidean"  # only used when source == "features"
+        self._gs_step = 10  # points added per grow press
+        self._gs_history = []  # stack of pre-grow selection snapshots
+        self._gs_internal_update = False  # True while we drive the `selected` setter
 
         # Generate the visuals
         self.make_visuals()

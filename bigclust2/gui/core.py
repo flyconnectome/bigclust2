@@ -270,6 +270,8 @@ class MainWidget(QWidget):
     def init_ui(self):
         """Initialize the user interface."""
         layout = QVBoxLayout()
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
         # Create a vertical splitter with two widgets
         self.splitter = QSplitter(Qt.Vertical)

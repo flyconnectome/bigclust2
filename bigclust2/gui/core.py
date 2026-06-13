@@ -2995,6 +2995,11 @@ class MainWindow(QMainWindow):
             )
             point_size = source_data.get("point_size", 10)
 
+            # Snapshot the source view's display configuration (label/color/size
+            # selections and their settings) so the new tab mirrors it. Must be
+            # read before the new tab becomes the current one.
+            display_state = source_view.scatter_controls.capture_display_state()
+
             title = f"selection ({len(selected_meta)})"
             view = self.add_new_tab(title=title)
             self._populate_view(
@@ -3008,6 +3013,7 @@ class MainWindow(QMainWindow):
                 knn=selected_knn,
                 point_size=point_size,
                 ngl_source_viewer=getattr(source_view, "ngl_viewer", None),
+                display_state=display_state,
             )
             self._update_view_actions()
             self.set_view_title(view, title)
@@ -3031,6 +3037,7 @@ class MainWindow(QMainWindow):
         knn=None,
         point_size=10,
         ngl_source_viewer=None,
+        display_state=None,
     ):
         """Populate a view's figure and 3D viewer with a prepared data subset."""
         fig = view.fig_scatter
@@ -3089,6 +3096,15 @@ class MainWindow(QMainWindow):
             logger.debug(
                 f"Failed to propagate Neuroglancer data to selection view: {e}"
             )
+
+        # Mirror the source view's display configuration. Runs after
+        # update_controls() so the child's combo boxes already hold the items
+        # we select from.
+        if display_state is not None:
+            try:
+                view.scatter_controls.apply_display_state(display_state)
+            except Exception as e:
+                logger.debug(f"Failed to apply display state to selection view: {e}")
 
         view._data = {
             "meta": meta,

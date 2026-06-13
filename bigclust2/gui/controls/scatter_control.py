@@ -165,6 +165,14 @@ class _MultiHandleSlider(QtWidgets.QWidget):
     def show_center(self) -> bool:
         return self._show_center
 
+    @property
+    def lo(self) -> float:
+        return self._lo
+
+    @property
+    def hi(self) -> float:
+        return self._hi
+
     def set_data_range(self, lo: float, hi: float) -> None:
         """Update the track bounds. Does not emit."""
         self._lo = float(lo)
@@ -3434,6 +3442,128 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
         self.update_scope_options()
+
+    def capture_display_state(self):
+        """Snapshot the label/color/size selections and their settings.
+
+        Returns a plain dict that ``apply_display_state`` can restore onto
+        another ``ScatterControls`` instance (e.g. when opening a selection in a
+        new tab) to make it mirror this view's appearance.
+        """
+
+        def _slider_state(slider):
+            if not slider.isVisible():
+                return None
+            return {
+                "lo": slider.lo,
+                "hi": slider.hi,
+                "vmin": slider.vmin,
+                "vcenter": slider.vcenter,
+                "vmax": slider.vmax,
+                "show_center": slider.show_center,
+            }
+
+        return {
+            "label_col": self.label_combo_box.currentText(),
+            "label_counts": self.label_count_check.isChecked(),
+            "label_outlines": self.label_outlines_check.isChecked(),
+            "color_col": self.color_combo_box.currentText(),
+            "palette": self.palette_combo_box.currentText(),
+            "color_range": _slider_state(self.color_range_slider),
+            "size_col": self.size_combo_box.currentText(),
+            "size_range": _slider_state(self.size_range_slider),
+            "font_size": self.figure.font_size,
+            "point_scale": self.figure.point_scale,
+            "label_vis_limit": self.figure.label_vis_limit,
+        }
+
+    def _set_combo_text(self, combo_box, text):
+        """Select ``text`` in ``combo_box`` (signals blocked); no-op if absent.
+
+        Silently skips values not offered by this box — e.g. the cluster option
+        when the target view has no clustering — leaving the default selection.
+        """
+        if not text:
+            return
+        idx = combo_box.findText(text)
+        if idx < 0:
+            return
+        combo_box.blockSignals(True)
+        combo_box.setCurrentIndex(idx)
+        combo_box.blockSignals(False)
+
+    def _apply_slider_state(self, slider, slider_state):
+        """Configure ``slider`` to match a captured snapshot, or hide it."""
+        if not slider_state:
+            slider.setVisible(False)
+            return
+        slider.blockSignals(True)
+        slider.set_data_range(slider_state["lo"], slider_state["hi"])
+        slider.set_values(
+            slider_state["vmin"], slider_state["vcenter"], slider_state["vmax"]
+        )
+        slider.set_diverging(slider_state["show_center"])
+        slider.blockSignals(False)
+        slider.setVisible(True)
+
+    def apply_display_state(self, state):
+        """Restore a ``capture_display_state`` snapshot onto this instance.
+
+        Widget values are set with their signals blocked, then applied once via
+        the public setters. The explicit apply ensures the configuration takes
+        effect even when a selection matches the current index (which would emit
+        no change signal) and that the parent's palette/range are honored.
+        """
+        if not state:
+            return
+
+        # Settings-tab knobs first; their valueChanged lambdas write to the
+        # figure, and set_labels/set_sizes below pick up the new font/scale.
+        if state.get("font_size") is not None:
+            self.font_size_slider.setValue(float(state["font_size"]))
+        if state.get("point_scale") is not None:
+            self.point_scale_spinbox.setValue(float(state["point_scale"]))
+        if state.get("label_vis_limit") is not None:
+            self.max_label_vis_slider.setValue(int(state["label_vis_limit"]))
+
+        # --- Labels ---
+        self._set_combo_text(self.label_combo_box, state.get("label_col"))
+        self.label_count_check.blockSignals(True)
+        self.label_count_check.setChecked(bool(state.get("label_counts")))
+        self.label_count_check.blockSignals(False)
+        self.label_outlines_check.blockSignals(True)
+        self.label_outlines_check.setChecked(bool(state.get("label_outlines")))
+        self.label_outlines_check.blockSignals(False)
+        # set_label_outlines only flips this flag; mirror it since we blocked
+        # the checkbox's signal above.
+        self.figure.show_label_lines = self.label_outlines_check.isChecked()
+
+        # --- Colors --- configure the range slider directly (rather than via
+        # _on_color_column_changed, which would re-fit it to the subset).
+        self._set_combo_text(self.color_combo_box, state.get("color_col"))
+        self._set_combo_text(self.palette_combo_box, state.get("palette"))
+        self._apply_slider_state(self.color_range_slider, state.get("color_range"))
+        # Palette is meaningless for colour-typed or cluster columns; mirror the
+        # enabled state that _on_color_column_changed would set.
+        color_col = self.color_combo_box.currentText()
+        is_color_col = (
+            color_col not in ("", "Default", CLUSTER_DATA_OPTION)
+            and self.meta_data is not None
+            and color_col in self.meta_data.columns
+            and is_color_column(self.meta_data[color_col])
+        )
+        self.palette_combo_box.setEnabled(
+            not is_color_col and color_col != CLUSTER_DATA_OPTION
+        )
+
+        # --- Sizes ---
+        self._set_combo_text(self.size_combo_box, state.get("size_col"))
+        self._apply_slider_state(self.size_range_slider, state.get("size_range"))
+
+        # Apply everything once now that all widgets are configured.
+        self.set_labels()
+        self.set_colors()
+        self.set_sizes()
 
     def update_embedding_selector(self):
         """Refresh the active-embedding selector from the figure's entries."""

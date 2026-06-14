@@ -5,7 +5,7 @@ import io
 import itertools
 import json
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 from html import escape
 
 import numpy as np
@@ -33,6 +33,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QCheckBox,
     QDialogButtonBox,
+    QStyle,
 )
 from PySide6.QtGui import QIcon, QAction, QActionGroup, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
@@ -41,12 +42,14 @@ from importlib.resources import files
 from .loaders import OpenProjectDialog
 from .project import Project
 from .tabs import ViewTabWidget
-from ..data import parse_directory, SingleProjectLoader
+from ..data import parse_directory, SingleProjectLoader, apply_meta_color
+from ..meta_sources import ensure_meta_dict, source_entry_datasets, parse_meta_sources
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
 from .widgets.features import FeatureExplorerWidget
 from .widgets.meta_explorer import MetaExplorerDialog
+from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
@@ -199,6 +202,7 @@ class MainWidget(QWidget):
         self._feature_explorer_widgets = {}
         self._annotation_dialog = None
         self._meta_explorer_dialog = None
+        self._meta_sources_dialog = None
         self._distance_widgets = []
 
         self.init_ui()
@@ -218,6 +222,7 @@ class MainWidget(QWidget):
             *self._connectivity_widgets.values(),
             *self._feature_explorer_widgets.values(),
             self._meta_explorer_dialog,
+            self._meta_sources_dialog,
             *self._distance_widgets,
         ]
         widgets = []
@@ -1300,6 +1305,9 @@ class MainWindow(QMainWindow):
         self._hover_columns_menu = None
         self._adopt_view = adopt_view
         self._active_selection_counter = None
+        # Out-of-date meta banner (built lazily) and per-project dismissals.
+        self._meta_staleness_banner = None
+        self._meta_staleness_dismissed = set()
         # Window this one was detached from (for "merge back"), if any.
         self._parent_window = None
         # Whether widgets of background views are hidden (global preference).
@@ -2057,6 +2065,9 @@ class MainWindow(QMainWindow):
         # Reflect the newly active view's embedding in the status bar.
         self._update_embedding_status()
 
+        # Reflect the newly active view's meta freshness.
+        self._update_meta_staleness_banner()
+
         # A freshly exposed view may hold a stale frame; force one render.
         # Skip while hidden (e.g. during startup) - rendering to a canvas
         # whose surface doesn't exist yet can upset the wgpu backend.
@@ -2067,6 +2078,103 @@ class MainWindow(QMainWindow):
                 view.ngl_viewer.force_single_render()
             except Exception as e:
                 logger.debug(f"Failed to refresh canvases after view switch: {e}")
+
+    def _ensure_meta_staleness_banner(self):
+        """Lazily build the left-side status-bar 'meta out of date' banner."""
+        if self._meta_staleness_banner is not None:
+            return self._meta_staleness_banner
+        bar = getattr(self, "status_bar", None)
+        if bar is None:
+            return None
+
+        widget = QWidget()
+        row = QHBoxLayout(widget)
+        row.setContentsMargins(6, 0, 6, 0)
+        row.setSpacing(6)
+
+        icon = QLabel()
+        icon.setPixmap(
+            self.style().standardIcon(QStyle.SP_MessageBoxWarning).pixmap(14, 14)
+        )
+        label = QLabel("Project's meta data may be out of date")
+        update_btn = QPushButton("Update")
+        update_btn.setFlat(True)
+        update_btn.clicked.connect(self._on_meta_staleness_update)
+        dismiss_btn = QPushButton("Dismiss")
+        dismiss_btn.setFlat(True)
+        dismiss_btn.clicked.connect(self._on_meta_staleness_dismiss)
+
+        row.addWidget(icon)
+        row.addWidget(label)
+        row.addWidget(update_btn)
+        row.addWidget(dismiss_btn)
+
+        widget.hide()
+        bar.addWidget(widget)  # addWidget -> left side of the status bar
+        self._meta_staleness_banner = widget
+        return widget
+
+    def _current_loader_key(self):
+        """Stable per-project key (the loader path) for the active view."""
+        view = self.current_view()
+        loader = getattr(view, "_current_project_loader", None) if view else None
+        if loader is None:
+            return None, None
+        return loader, str(getattr(loader, "path", "") or getattr(loader, "name", ""))
+
+    def _meta_is_stale(self, loader):
+        """Whether a loader's meta snapshot looks out of date (>1 day).
+
+        Only relevant when the project declares meta sources (otherwise it can't
+        be refreshed). A missing ``last_updated`` counts as stale.
+        """
+        info = getattr(loader, "info", None) if loader is not None else None
+        if not isinstance(info, dict):
+            return False
+        if not parse_meta_sources(info):
+            return False
+
+        meta = info.get("meta")
+        last = meta.get("last_updated") if isinstance(meta, dict) else None
+        if not last:
+            return True
+
+        try:
+            dt = datetime.fromisoformat(str(last))
+        except ValueError:
+            return False  # unparseable -> don't nag
+        return (datetime.now() - dt) > timedelta(days=1)
+
+    def _update_meta_staleness_banner(self):
+        """Show/hide the out-of-date banner for the active view's project."""
+        loader, key = self._current_loader_key()
+        stale = (
+            loader is not None
+            and key not in self._meta_staleness_dismissed
+            and self._meta_is_stale(loader)
+        )
+        if not stale:
+            if self._meta_staleness_banner is not None:
+                self._meta_staleness_banner.hide()
+            return
+
+        banner = self._ensure_meta_staleness_banner()
+        if banner is not None:
+            # A transient status message would otherwise hide left-side widgets.
+            self.status_bar.clearMessage()
+            banner.show()
+
+    def _on_meta_staleness_update(self):
+        """Banner 'Update' -> open the meta sources dialog."""
+        self.show_meta_sources_dialog()
+
+    def _on_meta_staleness_dismiss(self):
+        """Banner 'Dismiss' -> hide for this project for the session."""
+        _, key = self._current_loader_key()
+        if key is not None:
+            self._meta_staleness_dismissed.add(key)
+        if self._meta_staleness_banner is not None:
+            self._meta_staleness_banner.hide()
 
     def _update_embedding_status(self):
         """Sync the status-bar embedding indicator with the active view.
@@ -2554,6 +2662,7 @@ class MainWindow(QMainWindow):
             figure=view.fig_scatter,
             parent=self,
         )
+        dialog.manageSourcesRequested.connect(self.show_meta_sources_dialog)
         self._register_aux_widget(view, dialog)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.show()
@@ -2562,6 +2671,112 @@ class MainWindow(QMainWindow):
         dialog.destroyed.connect(
             lambda _obj=None, v=view: setattr(v, "_meta_explorer_dialog", None)
         )
+
+    def show_meta_sources_dialog(self):
+        """Open the meta-data sources dialog for the current view's project."""
+        view = self.current_view()
+        if view is None:
+            return
+
+        data = view._data if isinstance(view._data, dict) else {}
+        meta_data = data.get("meta")
+        if not isinstance(meta_data, pd.DataFrame) or meta_data.empty:
+            return
+
+        loader = getattr(view, "_current_project_loader", None)
+        info = getattr(loader, "info", None)
+        if not isinstance(info, dict):
+            info = {}
+
+        existing = view._meta_sources_dialog
+        if existing is not None:
+            try:
+                self._present_aux_widget(existing)
+                return
+            except RuntimeError:
+                view._meta_sources_dialog = None
+
+        dialog = MetaSourcesDialog(meta=meta_data, info=info, parent=self)
+        dialog.metaUpdated.connect(
+            lambda updated, report, v=view: self._apply_meta_update(v, updated, report)
+        )
+        self._register_aux_widget(view, dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        view._meta_sources_dialog = dialog
+        dialog.destroyed.connect(
+            lambda _obj=None, v=view: setattr(v, "_meta_sources_dialog", None)
+        )
+
+    def _apply_meta_update(self, view, updated_meta, report):
+        """Apply a refreshed meta DataFrame to a view (in-memory) and redraw.
+
+        Preserves the position-alignment invariant (same length/row order as the
+        embeddings/distances), recomputes ``_color`` in case the color column
+        changed, swaps the data, refreshes the scatter and any open meta
+        explorer, and stamps ``last_updated`` in the project info.
+        """
+        if view is None or not isinstance(view._data, dict):
+            return
+
+        old_meta = view._data.get("meta")
+        if old_meta is None or updated_meta is None:
+            return
+
+        if len(updated_meta) != len(old_meta) or not updated_meta.index.equals(
+            old_meta.index
+        ):
+            logger.error("Meta update changed row count/order; refusing to apply.")
+            view.fig_scatter.show_message(
+                "Meta update misaligned; not applied", color="red", duration=4
+            )
+            return
+
+        loader = getattr(view, "_current_project_loader", None)
+        info = getattr(loader, "info", None)
+        info = info if isinstance(info, dict) else {}
+
+        # The color column may have been refreshed; recompute the derived _color.
+        apply_meta_color(updated_meta, info)
+
+        view._data["meta"] = updated_meta
+
+        self._stamp_meta_sources_updated(info, report)
+
+        # Meta was just refreshed: re-evaluate the out-of-date banner.
+        self._update_meta_staleness_banner()
+
+        # Redraw the target view (the helper only touches the hover menu when
+        # this view is the active one).
+        self._refresh_scatter_from_data(view)
+
+        explorer = getattr(view, "_meta_explorer_dialog", None)
+        if explorer is not None:
+            try:
+                explorer.set_meta(updated_meta)
+            except RuntimeError:
+                pass
+
+        view.fig_scatter.show_message(report.summary(), color="green", duration=4)
+
+    def _stamp_meta_sources_updated(self, info, report):
+        """Record today's date as last_updated on meta + the updated sources."""
+        if not isinstance(info, dict):
+            return
+        today = datetime.now().strftime("%Y-%m-%d")
+        meta = ensure_meta_dict(info)
+        meta["last_updated"] = today
+        sources = meta.get("sources")
+        if isinstance(sources, dict):
+            updated = {d.dataset for d in report.datasets if not d.error}
+            for key, entry in sources.items():
+                if not isinstance(entry, dict):
+                    continue
+                # A single entry can cover several datasets (comma-separated key).
+                if updated.intersection(source_entry_datasets(key, entry)):
+                    entry["last_updated"] = today
 
     def _sync_connectivity_widget(self, view, widget):
         """Sync a connectivity widget to figure selection (idempotent)."""
@@ -2587,6 +2802,7 @@ class MainWindow(QMainWindow):
         self._dispose_feature_explorer_widget(view)
         self._dispose_annotation_dialog(view)
         self._dispose_meta_explorer_dialog(view)
+        self._dispose_meta_sources_dialog(view)
         self._dispose_distance_widgets(view)
 
     def _dispose_connectivity_widget(self, view):
@@ -2622,6 +2838,20 @@ class MainWindow(QMainWindow):
             return
 
         view._meta_explorer_dialog = None
+        try:
+            dialog.close()
+            dialog.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
+
+    def _dispose_meta_sources_dialog(self, view):
+        """Dispose a view's meta sources dialog."""
+        dialog = view._meta_sources_dialog
+        if dialog is None:
+            return
+
+        view._meta_sources_dialog = None
         try:
             dialog.close()
             dialog.deleteLater()
@@ -3907,6 +4137,53 @@ class MainWindow(QMainWindow):
         logger.info(f"Exported project snapshot to {dest}")
         fig.show_message("Exported project snapshot", color="green", duration=2)
 
+    def _refresh_scatter_from_data(self, view=None):
+        """(Re)draw a view's scatter from its compiled ``_data`` dict.
+
+        Shared by project load and meta-data refresh: clears the figure, sets
+        points/embeddings, and re-syncs the controls. Reads embeddings/entries
+        from ``view._data`` so callers must populate it first.
+        """
+        view = view or self.current_view()
+        if view is None:
+            return
+        data = view._data if isinstance(view._data, dict) else None
+        if not data:
+            return
+
+        meta = data["meta"]
+        fig = view.fig_scatter
+        fig.clear()
+        fig.set_points(
+            points=data["embeddings"],
+            metadata=meta,
+            label_col="label",
+            id_col="id",
+            # _color is populated during data loading based on project info.
+            color_col="_color",
+            marker_col="dataset",
+            hover_col="\n".join(
+                f"{c}: {{{c}}}" for c in meta.columns if not str(c).startswith("_")
+            ),
+            dataset_col="dataset",
+            # None -> ScatterFigure.set_points auto-scales by dataset size.
+            point_size=data.get("point_size"),
+            distances=data.get("distances", None),
+            features=data.get("features", None),
+            knn=data.get("knn", None),
+        )
+        # Register the full set of embeddings (normalizes the non-active ones
+        # into the active embedding's frame). No-op when there are none.
+        entries = data.get("embedding_entries", []) or []
+        active = data.get("active_embedding", 0)
+        fig.set_embeddings(entries, active=active if active is not None else 0)
+        # Update controls based on the new data; set_points may have auto-scaled
+        # the point size, so sync the spinbox too.
+        view.scatter_controls.update_controls()
+        view.scatter_controls.sync_point_scale_spinbox()
+        if view is self.current_view():
+            self._refresh_hover_columns_menu()
+
     def show_open_project_dialog(self):
         """Show the open project dialog and load the selected project."""
         dialog = OpenProjectDialog(self)
@@ -4009,41 +4286,8 @@ class MainWindow(QMainWindow):
             progress.setLabelText("Setting up visualization...")
             QApplication.processEvents()
 
-            # First, let's clear existing data
-            fig = self.current_view().fig_scatter
-            fig.clear()
-
-            # Now set the new data
-            fig.set_points(
-                points=embeddings,
-                metadata=self._data["meta"],
-                label_col="label",
-                id_col="id",
-                color_col="_color",  # this color is populated during data loading based on project info
-                marker_col="dataset",
-                hover_col="\n".join(
-                    [
-                        f"{c}: {{{c}}}"
-                        for c in self._data["meta"].columns
-                        if not str(c).startswith("_")
-                    ]
-                ),
-                dataset_col="dataset",
-                # None -> ScatterFigure.set_points auto-scales by dataset size.
-                point_size=self._data.get("point_size"),
-                distances=self._data.get("distances", None),
-                features=self._data.get("features", None),
-                knn=self._data.get("knn", None),
-            )
-            # Register the full set of embeddings (normalizes the non-active ones
-            # into the active embedding's frame). No-op when there are none.
-            fig.set_embeddings(entries, active=active if active is not None else 0)
-            # We have to update bits and pieces on the controls panels based on the new data
-            self.current_view().scatter_controls.update_controls()
-            # set_points may have auto-scaled the point size by dataset size; make
-            # the point-scale spinbox reflect that.
-            self.current_view().scatter_controls.sync_point_scale_spinbox()
-            self._refresh_hover_columns_menu()
+            # Push the freshly compiled data into the scatter figure.
+            self._refresh_scatter_from_data(self.current_view())
 
             # Set up the 3D viewer
             if "neuroglancer" in project.info:
@@ -4097,6 +4341,8 @@ class MainWindow(QMainWindow):
                 project.name,
                 tooltip=str(getattr(project, "path", "") or project.name),
             )
+            # Surface an out-of-date hint if the meta snapshot looks stale.
+            self._update_meta_staleness_banner()
 
             progress.setValue(100)
         finally:

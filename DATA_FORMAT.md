@@ -25,9 +25,17 @@ The `info` file contains information about the dataset, including which files ar
     # required: metadata about each observation (e.g. neuron)
     "meta": {
         "file": "meta.parquet",  # must at least have `id`, `label` and `dataset` columns
-        "source": "neuprint://https://neuprint.janelia.org@hemibrain:v1.2",  # define source for updating metadata
-        "last_updated": "2024-06-01",  # meta data can be update independently of the other data
-        "color": "color"  # optional: column in meta to use for colors
+        "color": "color",  # optional: column in meta to use for colors
+        "last_updated": "2024-06-01",  # when the meta snapshot was last refreshed
+        # optional: per-dataset sources used to refresh the meta snapshot from
+        # live annotation backends (see "Meta data sources" below)
+        "sources": {
+            "hemibrain": {
+                "backend": "neuPrint",
+                "config": {"dataset": "hemibrain:v1.2.1"},
+                "columns": {"label": "type", "soma_side": "somaSide"}
+            }
+        }
     },
     # required: precomputed low-dimensional embeddings for scatter plot
     # (this can also be a list of embeddings - see "Multiple Embeddings" below)
@@ -83,6 +91,65 @@ The metadata file contains information about each observation (e.g. neuron) in t
 The optional columns have to be explicitly specified in the `info` file (see above) so that BigClust knows how to use them!
 
 Any additional columns are loaded and can be used for coloring, filtering, etc. in the GUI.
+
+### Meta data sources (optional)
+
+The `meta` snapshot is static, but each dataset's annotations can optionally be
+refreshed from its live source. Sources are declared under `meta.sources`, keyed
+by the dataset name (matching the values in the meta `dataset` column):
+
+```json
+"meta": {
+    "file": "meta.parquet",
+    "sources": {
+        "<dataset>": {
+            "backend": "neuPrint",          // an annotation backend name
+            "config": { "dataset": "..." },  // backend-specific config fields
+            "columns": {                      // project meta column -> source column
+                "label": "type",
+                "soma_side": "somaSide"
+            },
+            "last_updated": "2026-06-14"      // optional, set on each refresh
+        }
+    }
+}
+```
+
+- `backend` is one of the registered annotation backends (e.g. `neuPrint`,
+  `Clio`, `FlyTable`, `FlyWire @ FlyTable`, `Hemibrain @ FlyTable`, `CSV`).
+- `config` holds that backend's configuration fields (the dialog fills in any
+  defaults you omit).
+- `columns` maps each **project** meta column onto the **source** column name,
+  so differing naming conventions across datasets (e.g. `soma_side` vs
+  `somaSide` vs `soma`) line up. A mapped column that doesn't yet exist in the
+  meta table is added on refresh. The `id`/`dataset` columns are never mapped.
+
+Several datasets that share the same setup (e.g. the left and right side of a
+brain) can be served by one entry: use a **comma-separated key** (or an explicit
+`"datasets"` list in the value):
+
+```json
+"sources": {
+    "brain_left,brain_right": {
+        "backend": "neuPrint",
+        "config": { "dataset": "..." },
+        "columns": { "label": "type" }
+    }
+}
+```
+
+Each listed dataset is still refreshed independently (matched by its own ids).
+Saving from the dialog automatically groups datasets with an identical setup
+back into a single comma-keyed entry.
+
+Sources are **read only** — refreshing pulls fresh values into the in-memory
+meta table (matched by id, scoped per dataset) and never writes back to the
+backend. Configure and run a refresh from the **Meta Data Explorer → Meta
+Sources…** dialog. Refreshed values live in the current session; use
+**Export → Project** to persist a snapshot.
+
+> Note: an earlier single `meta.source` URL string was documented but never
+> implemented; use the per-dataset `meta.sources` mapping instead.
 
 ## `distances` File (optional)
 

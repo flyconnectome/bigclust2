@@ -173,6 +173,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 
 	selectRequested = QtCore.Signal(object)
 	openInNewWindowRequested = QtCore.Signal(object)
+	manageSourcesRequested = QtCore.Signal()
 
 	def __init__(self, meta, figure=None, parent=None):
 		super().__init__(parent)
@@ -293,6 +294,12 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		self.save_btn.setToolTip("Save selected results to CSV")
 		self.save_btn.clicked.connect(self._on_save)
 
+		update_icon = self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload)
+		self.sources_btn = QtWidgets.QPushButton(update_icon, "Update")
+		self.sources_btn.setToolTip(
+			"Configure where each dataset's meta data comes from and pull fresh values."
+		)
+		self.sources_btn.clicked.connect(self.manageSourcesRequested.emit)
 		self.select_btn = QtWidgets.QPushButton("Select in Main Window")
 		self.select_btn.clicked.connect(self._on_select)
 		self.open_new_btn = QtWidgets.QPushButton("Open in New View")
@@ -302,6 +309,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 
 		buttons_row.addWidget(self.copy_combo)
 		buttons_row.addWidget(self.save_btn)
+		buttons_row.addWidget(self.sources_btn)
 		buttons_row.addWidget(self.select_btn)
 		buttons_row.addWidget(self.open_new_btn)
 		buttons_row.addWidget(self.close_btn)
@@ -327,6 +335,34 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		for row in list(self._filter_rows):
 			self._remove_filter_row(row)
 		self.add_filter_row()
+
+	def set_meta(self, meta):
+		"""Swap in a refreshed meta DataFrame and rebuild the table/model.
+
+		Used after a meta-source update so the open explorer reflects the new
+		values (and any newly added columns). Existing filters are preserved when
+		the column set is unchanged, and rebuilt otherwise.
+		"""
+		if not isinstance(meta, pd.DataFrame):
+			raise TypeError("meta must be a pandas DataFrame")
+
+		old_columns = list(self._meta.columns)
+		self._meta = meta
+		self._string_cache = {}
+		self._numeric_cache = {}
+
+		if list(meta.columns) != old_columns:
+			# Column set changed: rebuild filter rows against the new columns.
+			for row in list(self._filter_rows):
+				self._remove_filter_row(row)
+			if not self._filter_rows:
+				self.add_filter_row()
+
+		# Bind a fresh model to the new data and reconnect selection handling.
+		self.table_model = MetaTableModel(self._meta)
+		self.table.setModel(self.table_model)
+		self.table.selectionModel().selectionChanged.connect(self.update_selection_info)
+		self.apply_filters()
 
 	def _series_as_lower_str(self, col):
 		if col not in self._string_cache:

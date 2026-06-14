@@ -1054,26 +1054,7 @@ class SingleProjectLoader(BaseProjectLoader):
             data["distances"] = entries[0]["distances"]
             data["knn"] = entries[0]["knn"]
 
-        if isinstance(self.info["meta"], dict):
-            color = self.info["meta"].get("color", None)
-        elif "color" in self.meta.columns:
-            color = "color"
-        else:
-            color = None
-
-        if color is not None:
-            if isinstance(color, str) and color in data["meta"].columns:
-                data["meta"]["_color"] = data["meta"][color]
-            elif isinstance(color, dict):
-                data["meta"]["_color"] = data["meta"]["dataset"].map(color)
-            else:
-                try:
-                    color = tuple(cmap.Color(color).rgba)
-                    data["meta"]["_color"] = [color] * len(data["meta"])
-                except BaseException:
-                    raise ValueError(f"Invalid color specification: {color}")
-        else:
-            data["meta"]["_color"] = "white"
+        apply_meta_color(data["meta"], self.info)
 
         logger.debug(
             (
@@ -1089,6 +1070,38 @@ class SingleProjectLoader(BaseProjectLoader):
         data["meta"].reset_index(drop=True, inplace=True)
 
         return data
+
+
+def apply_meta_color(meta, info):
+    """Populate ``meta['_color']`` from the info ``meta.color`` spec (in place).
+
+    The color spec can be a column name, a ``{dataset: color}`` mapping, or a
+    single color value. Falls back to ``"white"`` when nothing is configured.
+    Extracted from ``SingleProjectLoader.compile`` so it can be re-applied when
+    meta data is refreshed from its sources.
+    """
+    meta_info = info.get("meta") if isinstance(info, dict) else None
+    if isinstance(meta_info, dict):
+        color = meta_info.get("color", None)
+    elif "color" in meta.columns:
+        color = "color"
+    else:
+        color = None
+
+    if color is not None:
+        if isinstance(color, str) and color in meta.columns:
+            meta["_color"] = meta[color]
+        elif isinstance(color, dict):
+            meta["_color"] = meta["dataset"].map(color)
+        else:
+            try:
+                color = tuple(cmap.Color(color).rgba)
+                meta["_color"] = [color] * len(meta)
+            except BaseException:
+                raise ValueError(f"Invalid color specification: {color}")
+    else:
+        meta["_color"] = "white"
+    return meta
 
 
 def report_if_callback(progress_callback, text=None, value=None):

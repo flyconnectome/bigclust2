@@ -30,6 +30,7 @@ dependencies = [
     "clio-py",
     "sea-serpent>=0.4.4",
     "plotly>=6.7.0",
+    "neuprint-python>=0.6.2",
 ]
 
 [project.scripts]

@@ -1,3 +1,9 @@
+"""
+Important: the default config options in annotation_backends.BACKEND_REGISTRY represent
+live datasets. Never use them for testing or development, as you may accidentally write
+to the live dataset. Reading is safe, but writing is not.
+"""
+
 from __future__ import annotations
 
 import json

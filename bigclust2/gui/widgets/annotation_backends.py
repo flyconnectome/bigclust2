@@ -1,3 +1,10 @@
+"""
+Important: the default config options represent live datasets. Never use them for
+testing or development, as you may accidentally write to the live dataset.
+Reading is safe, but writing is not.
+"""
+
+
 from __future__ import annotations
 
 import importlib
@@ -149,6 +156,26 @@ class HemibrainFlyTableConfig:
 
 
 @dataclass(frozen=True)
+class NeuprintConfig:
+    """Required configuration for Neuprint backend writes."""
+
+    dataset: str = field(
+        metadata={
+            "label": "Dataset",
+            "placeholder": "e.g. hemibrain:v1.2.1",
+            "tooltip": "Neuprint dataset/collection name to update.",
+        }
+    )
+    server: str = field(
+        default="https://neuprint.janelia.org",
+        metadata={
+            "label": "Server",
+            "placeholder": "Neuprint server URL",
+        },
+    )
+
+
+@dataclass(frozen=True)
 class ClioConfig:
     """Required configuration for Clio backend writes."""
 
@@ -258,6 +285,78 @@ class AnnotationBackend(ABC):
         except Exception as exc:
             return {"ERROR"}, str(exc)
 
+    def read_annotations(self, ids=None):
+        """Read annotations from the backend.
+
+        Args:
+            ids (list[int], optional): List of neuron IDs to read. If None, read all.
+
+        Returns:
+            pd.DataFrame: DataFrame containing the annotations, with (unordered) neuron IDs as the index.
+        """
+        if not hasattr(self, "_read_annotations"):
+            raise NotImplementedError(
+                f"{self.__class__.__name__} does not implement reading annotations."
+            )
+
+        return self._read_annotations(ids)
+
+
+class NeuprintBackend(AnnotationBackend):
+    """Annotation backend for writing to a neuPrint database."""
+
+    BACKEND_NAME = "neuPrint"
+    CONFIG_CLASS = NeuprintConfig
+    FIELD_SUGGESTIONS = tuple()  # neuPrint does not support writing annotations
+
+    def __init__(self, config=None):
+        self.config = config
+        self._client = None
+
+    @property
+    def client(self):
+        if self._client is None:
+            self._client = self._get_neuprint_module().Client(
+                server=self.config.server, dataset=self.config.dataset
+            )
+        return self._client
+
+    def _get_neuprint_module(self):
+        try:
+            return importlib.import_module("neuprint")
+        except ModuleNotFoundError as exc:
+            raise ModuleNotFoundError(
+                "neuprint-python (github.com/connectome-neuprint/neuprint-python) is required for NeuprintBackend. "
+                "Install it and ensure your API token is set as an environment variable (see docs for details)."
+            ) from exc
+
+    def validate(self):
+        # Getting the client will validate credentials and dataset access
+        _ = self.client
+
+    def validate_field(self, field):
+        # neuPrint does not support writing annotations, so no fields are valid
+        return False
+
+    def _read_annotations(self, ids=None, fields=None):
+        neu = self._get_neuprint_module()
+        if ids is not None:
+            nc = neu.NeuronCriteria(bodyId=ids)
+        else:
+            nc = neu.NeuronCriteria()
+
+        if fields is None:
+            columns = "all"
+        else:
+            columns = list(fields)
+
+        return neu.fetch_neurons(
+            nc, client=self.client, omit_rois=True, returned_columns=columns
+        ).set_index("bodyId")
+
+    def _write_annotations(self, ids, value, fields):
+        raise NotImplementedError("neuPrint does not support writing annotations.")
+
 
 class ClioBackend(AnnotationBackend):
     """Annotation backend for writing to Clio."""
@@ -309,6 +408,12 @@ class ClioBackend(AnnotationBackend):
     def validate_field(self, field):
         return field in self.available_fields and field not in self.disallowed_fields
 
+    def _read_annotations(self, ids=None):
+        clio = self._get_clio_module()
+        return clio.fetch_annotations(bodyid=ids, client=self.client).set_index(
+            "bodyid"
+        )
+
     def _write_annotations(self, ids, value, fields):
         ids = np.array(ids).astype(np.int64)
 
@@ -328,9 +433,7 @@ class ClioBackend(AnnotationBackend):
         ):
             to_push["instance"] = None
 
-        clio.set_fields(
-            ids, **to_push, progress=False, client=self.client
-        )
+        clio.set_fields(ids, **to_push, progress=False, client=self.client)
 
         if (
             "type" in fields
@@ -346,10 +449,14 @@ class ClioBackend(AnnotationBackend):
                 if col not in ann.columns:
                     ann[col] = np.nan
 
-            ann['instance'] = value
+            ann["instance"] = value
             ann["side"] = ann.soma_side.fillna(ann.root_side).astype("string")
-            ann.loc[ann.side.notna(), 'instance'] = value + "_" + ann.loc[ann.side.notna(), 'side']
-            clio.set_annotations(ann[['bodyid', 'instance']], progress=False, client=self.client)
+            ann.loc[ann.side.notna(), "instance"] = (
+                value + "_" + ann.loc[ann.side.notna(), "side"]
+            )
+            clio.set_annotations(
+                ann[["bodyid", "instance"]], progress=False, client=self.client
+            )
 
 
 class FlyTableBackend(AnnotationBackend):
@@ -384,6 +491,17 @@ class FlyTableBackend(AnnotationBackend):
             )
         return self._table
 
+    @property
+    def data_columns(self):
+        """Return columns in the that are actually useful."""
+        return [
+            c
+            for c in self.table.columns
+            if ("_user" not in c)
+            and not c.endswith("_source")
+            and not c.startswith("_")
+        ]
+
     def _get_seaserpent_module(self):
         try:
             return importlib.import_module("seaserpent")
@@ -407,6 +525,23 @@ class FlyTableBackend(AnnotationBackend):
             and field != self.config.id_column
             and field not in self.disallowed_fields
         )
+
+    def _read_annotations(self, ids=None, fields=None):
+        """Returns a DataFrame with neuron IDs (unordered) as the index and the requested fields as columns."""
+        if fields is None:
+            fields = self.data_columns
+
+        if ids is not None:
+            ids = np.array(ids).astype(str)
+            data = self.table.loc[
+                self.table[self.config.id_column].isin(ids), fields
+            ].set_index(self.config.id_column)
+        else:
+            data = self.table[fields].set_index(self.config.id_column)
+        data[self.config.id_column] = data.index.astype(
+            int
+        )  # int64 is stored as str in FlyTable
+        return data
 
     def _write_annotations(self, ids, value, fields):
         ids = np.array(ids).astype(np.int64)
@@ -488,7 +623,7 @@ class HemibrainFlyTableBackend(FlyTableBackend):
         "super_class",
         "side",
     )
-    USER_FIELDS = ("type_corrected", )
+    USER_FIELDS = ("type_corrected",)
     VALUE_RESTRICTIONS = {
         "side": {"left", "right", "center", None},
     }
@@ -543,6 +678,17 @@ class CSVBackend(AnnotationBackend):
         else:
             return pd.DataFrame(columns=["id"], dtype=np.int64)
 
+    def _read_annotations(self, ids=None, fields=None):
+        df = self.dataframe
+        if fields is None:
+            fields = df.columns
+
+        if ids is not None:
+            ids = np.array(ids).astype(np.int64)
+            return df.loc[df.id.isin(ids), fields].set_index("id")
+        else:
+            return df[fields].set_index("id")
+
     def _write_annotations(self, ids, value, fields):
         ids = np.array(ids).astype(np.int64)
         df = self.dataframe
@@ -570,6 +716,7 @@ class CSVBackend(AnnotationBackend):
 
 BACKEND_CLASSES = (
     ClioBackend,
+    NeuprintBackend,
     FlyTableBackend,
     FlyWireFlyTableBackend,
     HemibrainFlyTableBackend,
@@ -577,3 +724,103 @@ BACKEND_CLASSES = (
 )
 
 BACKEND_REGISTRY = {backend.BACKEND_NAME: backend for backend in BACKEND_CLASSES}
+
+
+def _coerce_bool(value):
+    """Coerce UI/default/saved values to a boolean."""
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "t", "yes", "y", "on"}:
+            return True
+        if lowered in {"0", "false", "f", "no", "n", "off", ""}:
+            return False
+    return bool(value)
+
+
+def _field_is_bool(backend_cls, key):
+    """Whether a config field is declared as a boolean."""
+    value_type = backend_cls.config_field_meta(key).get("type", "string")
+    return value_type in {bool, "bool", "boolean"}
+
+
+def _field_is_required(backend_cls, key):
+    """Whether a config field must be filled (defaults to True)."""
+    return bool(backend_cls.config_field_meta(key).get("required", True))
+
+
+def _coerce_config(backend_cls, config_dict):
+    """Build a normalized kwargs dict for ``backend_cls.CONFIG_CLASS``.
+
+    Values come from `config_dict` where provided, otherwise from the field's
+    declared default. Booleans are coerced; everything else is stringified and
+    stripped. Required, non-bool fields that resolve to empty raise ``ValueError``
+    so callers get a clear message instead of an opaque dataclass error.
+    """
+    if backend_cls.CONFIG_CLASS is None:
+        return {}
+
+    config_dict = config_dict or {}
+    values = {}
+    for key in backend_cls.config_fields():
+        is_bool = _field_is_bool(backend_cls, key)
+        if key in config_dict:
+            raw = config_dict[key]
+        else:
+            raw = backend_cls.config_field_default(key)
+
+        if raw is None:
+            values[key] = False if is_bool else ""
+        elif is_bool:
+            values[key] = _coerce_bool(raw)
+        else:
+            values[key] = str(raw).strip()
+
+    for key, value in values.items():
+        if (
+            _field_is_required(backend_cls, key)
+            and not _field_is_bool(backend_cls, key)
+            and not str(value).strip()
+        ):
+            raise ValueError(
+                f"Missing required config field '{key}' for backend "
+                f"'{backend_cls.BACKEND_NAME}'."
+            )
+
+    return values
+
+
+def build_backend(name, config_dict, *, debug=False):
+    """Instantiate an annotation backend from its registry name and a config dict.
+
+    Shared by the data layer and the configuration dialogs so backend
+    construction (default-filling, type coercion, required-field validation)
+    lives in one place.
+
+    Parameters
+    ----------
+    name : str
+        A key in ``BACKEND_REGISTRY`` (e.g. "neuPrint", "CSV").
+    config_dict : dict
+        Flat mapping of ``CONFIG_CLASS`` field names to values. Missing optional
+        fields fall back to their declared defaults.
+    debug : bool
+        Passed to backends that accept it (writes become no-ops); ignored by
+        backends whose constructor doesn't take ``debug``.
+
+    Returns
+    -------
+    AnnotationBackend
+    """
+    backend_cls = BACKEND_REGISTRY.get(name)
+    if backend_cls is None:
+        raise ValueError(f"Unknown backend: {name!r}")
+
+    config = backend_cls.CONFIG_CLASS(**_coerce_config(backend_cls, config_dict))
+
+    try:
+        return backend_cls(config=config, debug=debug)
+    except TypeError:
+        # NeuprintBackend / CSVBackend constructors don't accept `debug`.
+        return backend_cls(config=config)

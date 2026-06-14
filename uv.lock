@@ -30,6 +30,12 @@ wheels = [
 ]
 
 [[package]]
+name = "asciitree"
+version = "0.3.3"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/2d/6a/885bc91484e1aa8f618f6f0228d76d0e67000b0fdd6090673b777e311913/asciitree-0.3.3.tar.gz", hash = "sha256:4aa4b9b649f85e3fcb343363d97564aa1fb62e249677f2e18a96765145cc0f6e", size = 3951 }
+
+[[package]]
 name = "atomicwrites"
 version = "1.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -67,6 +73,7 @@ dependencies = [
     { name = "navis" },
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "neuprint-python" },
     { name = "nglscenes" },
     { name = "numba" },
     { name = "octarine-navis-plugin" },
@@ -98,6 +105,7 @@ requires-dist = [
     { name = "llvmlite", specifier = ">=0.46.0" },
     { name = "navis", specifier = ">=1.10.0" },
     { name = "networkx", specifier = ">=3.4.2" },
+    { name = "neuprint-python", specifier = ">=0.6.2" },
     { name = "nglscenes", git = "https://github.com/schlegelp/nglscenes?rev=main" },
     { name = "numba", specifier = ">=0.63.1" },
     { name = "octarine-navis-plugin", specifier = ">=0.1.5" },
@@ -2389,6 +2397,28 @@ resolution-markers = [
 sdist = { url = "https://files.pythonhosted.org/packages/6a/51/63fe664f3908c97be9d2e4f1158eb633317598cfa6e1fc14af5383f17512/networkx-3.6.1.tar.gz", hash = "sha256:26b7c357accc0c8cde558ad486283728b65b6a95d85ee1cd66bafab4c8168509", size = 2517025 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/9e/c9/b2622292ea83fbb4ec318f5b9ab867d0a28ab43c5717bb85b0a5f6b3b0a4/networkx-3.6.1-py3-none-any.whl", hash = "sha256:d47fbf302e7d9cbbb9e2555a0d267983d2aa476bac30e90dfbe5669bd57f3762", size = 2068504 },
+]
+
+[[package]]
+name = "neuprint-python"
+version = "0.6.2"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "asciitree" },
+    { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "packaging" },
+    { name = "pandas" },
+    { name = "pyarrow" },
+    { name = "requests" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.16.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "tqdm" },
+    { name = "ujson" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/a5/79/f6c527dc69d768faf840f90d703e8534a92d61f79400127ed768581c6c28/neuprint_python-0.6.2.tar.gz", hash = "sha256:883dfa6721d939689a306c004e54f3201f2ca27da8f2e4a532bd933e2f7ca035", size = 117717 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0e/33/fcc6b67ca7e0d00e9dc526132d759f024ad82e6b53771e66d220fb05c383/neuprint_python-0.6.2-py2.py3-none-any.whl", hash = "sha256:5367a46ffaf1560f9439d17189f40002e6fe7895d881207aa96fa512e8792d3e", size = 109735 },
 ]
 
 [[package]]

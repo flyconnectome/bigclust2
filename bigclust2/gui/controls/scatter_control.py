@@ -666,6 +666,7 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._min_spin = None
         self._max_spin = None
         self._text_edit = None
+        self._empty_check = None
 
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -737,6 +738,7 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._min_spin = None
         self._max_spin = None
         self._text_edit = None
+        self._empty_check = None
 
     def _on_column_changed(self):
         self._clear_editor()
@@ -806,15 +808,28 @@ class _ScopeFilterRow(QtWidgets.QWidget):
 
     def _build_text_editor(self, layout):
         self._editor_kind = "text"
+
+        row = QtWidgets.QWidget()
+        row_layout = QtWidgets.QHBoxLayout()
+        row_layout.setContentsMargins(0, 0, 0, 0)
+        row_layout.setSpacing(4)
+        row.setLayout(row_layout)
+
         self._text_edit = QtWidgets.QLineEdit()
         self._text_edit.setPlaceholderText("substring filter…")
         self._text_edit.setToolTip(
             "Case-insensitive substring filter; start with '/' for a regex pattern"
         )
         self._text_edit.setClearButtonEnabled(True)
-        layout.addWidget(self._text_edit)
-
         self._text_edit.textChanged.connect(self._on_text_changed)
+        row_layout.addWidget(self._text_edit)
+
+        self._empty_check = QtWidgets.QCheckBox("empty")
+        self._empty_check.setToolTip("Match only empty or missing values")
+        self._empty_check.stateChanged.connect(self._on_empty_toggled)
+        row_layout.addWidget(self._empty_check)
+
+        layout.addWidget(row)
 
     # ── editor callbacks ──────────────────────────────────────────────────────
 
@@ -846,6 +861,11 @@ class _ScopeFilterRow(QtWidgets.QWidget):
             if valid
             else "Invalid regex pattern"
         )
+        self.changed.emit()
+
+    def _on_empty_toggled(self):
+        # Disable the substring field while "empty" filtering is active
+        self._text_edit.setEnabled(not self._empty_check.isChecked())
         self.changed.emit()
 
     def _text_pattern(self):
@@ -882,6 +902,12 @@ class _ScopeFilterRow(QtWidgets.QWidget):
                 & df[col].astype(str).isin(checked).to_numpy()
             )
         elif self._editor_kind == "text":
+            if self._empty_check is not None and self._empty_check.isChecked():
+                s = df[col]
+                return (
+                    s.isna().to_numpy()
+                    | (s.astype(str).str.strip() == "").to_numpy()
+                )
             if not self._text_edit.text():
                 return np.ones(len(df), dtype=bool)
             try:

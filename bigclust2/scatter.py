@@ -713,13 +713,25 @@ class ScatterFigure(BaseFigure):
         finally:
             self._gs_internal_update = False
 
-    def grow_selection(self, step=None):
-        """Grow the current selection by pulling in the nearest unselected points.
+    def grow_selection(self, step=None, confirm=None):
+        """Grow the current selection by pulling in nearby unselected points.
 
-        Adds the `step` (default :attr:`_gs_step`) points closest to the current
-        selection, measured in the configured distance source (embedding by
-        default). Each grow is pushed onto a history stack so it can be reversed
-        by :meth:`shrink_selection`.
+        In the default "count" mode this adds the `step` (default
+        :attr:`_gs_step`) points closest to the current selection. In "threshold"
+        mode (:attr:`_gs_mode`) it instead adds, in a single pass, every point
+        within an auto-derived similarity distance of the selection (see
+        :meth:`_grow_threshold`). Distance is measured in the configured source
+        (embedding by default). Each grow is pushed onto a history stack so it can
+        be reversed by :meth:`shrink_selection`.
+
+        Parameters
+        ----------
+        step : int, optional
+            Points to add in count mode; ignored in threshold mode.
+        confirm : callable, optional
+            Called with the prospective total selection size before applying; if
+            it returns False the grow is aborted. Used by the GUI to confirm very
+            large jumps; ``None`` (default) applies unconditionally.
         """
         from . import grow_shrink as gs
 
@@ -735,29 +747,68 @@ class ScatterFigure(BaseFigure):
                 "No data available for grow/shrink", color="red", duration=2
             )
             return
-        step = int(step) if step else default_step
 
+        mode = getattr(self, "_gs_mode", "count")
         try:
-            added = gs.grow_selection(
-                self._selected,
-                step,
-                source=source,
-                positions=self.positions,
-                dists=self.dists,
-                metric=metric,
-                scope_mask=self._selection_scope_mask,
-            )
+            if mode == "threshold":
+                added = self._grow_threshold(gs, source, metric)
+            else:
+                step = int(step) if step else default_step
+                added = gs.grow_selection(
+                    self._selected,
+                    step,
+                    source=source,
+                    positions=self.positions,
+                    dists=self.dists,
+                    metric=metric,
+                    scope_mask=self._selection_scope_mask,
+                )
         except gs.GrowShrinkUnavailable as e:
             self.show_message(str(e), color="red", duration=2)
             return
 
         if not len(added):
-            self.show_message("All in-scope points already selected", duration=2)
+            msg = (
+                "No further similar points within distance"
+                if mode == "threshold"
+                else "All in-scope points already selected"
+            )
+            self.show_message(msg, duration=2)
+            return
+
+        new_selected = np.union1d(self._selected, added)
+        if confirm is not None and not confirm(len(new_selected)):
             return
 
         self._gs_history.append(np.asarray(self._selected, dtype=int))
-        self._gs_apply(np.union1d(self._selected, added))
+        self._gs_apply(new_selected)
         self.show_message(f"Selection grown by {len(added):,}", duration=1.5)
+
+    def _grow_threshold(self, gs, source, metric):
+        """Indices to add for a one-shot similarity grow.
+
+        The threshold is ``factor * max(within-selection nearest-neighbour
+        distances)``; all unselected, in-scope points within that distance are
+        returned (single pass). May raise ``gs.GrowShrinkThresholdUnavailable``
+        (fewer than 2 points, or a KNN selection with no internal edges).
+        """
+        threshold = gs.selection_distance_threshold(
+            self._selected,
+            source=source,
+            positions=self.positions,
+            dists=self.dists,
+            metric=metric,
+            factor=float(getattr(self, "_gs_threshold_factor", 1.0)),
+        )
+        return gs.grow_within_threshold(
+            self._selected,
+            threshold,
+            source=source,
+            positions=self.positions,
+            dists=self.dists,
+            metric=metric,
+            scope_mask=self._selection_scope_mask,
+        )
 
     def shrink_selection(self):
         """Reverse the last grow step, restoring the prior selection.
@@ -1833,7 +1884,9 @@ class ScatterFigure(BaseFigure):
         # Grow/shrink-selection state (see `grow_selection`/`shrink_selection`)
         self._gs_source = None  # None => default to embedding at call time
         self._gs_metric = "euclidean"  # only used when source == "features"
-        self._gs_step = 10  # points added per grow press
+        self._gs_step = 10  # points added per grow press (count mode)
+        self._gs_mode = "count"  # {"count", "threshold"}
+        self._gs_threshold_factor = 1.0  # multiplier for the similarity threshold
         self._gs_history = []  # stack of pre-grow selection snapshots
         self._gs_internal_update = False  # True while we drive the `selected` setter
 

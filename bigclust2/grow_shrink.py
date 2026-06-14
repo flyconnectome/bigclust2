@@ -39,6 +39,14 @@ class GrowShrinkUnavailable(Exception):
     """Raised when a requested distance source is not available on the figure."""
 
 
+class GrowShrinkThresholdUnavailable(GrowShrinkUnavailable):
+    """Raised when no similarity threshold can be derived from the selection.
+
+    Subclasses :class:`GrowShrinkUnavailable` so callers that already handle the
+    latter surface this one's (more specific) message too.
+    """
+
+
 def available_sources(dists, positions):
     """Return the distance sources usable for grow/shrink right now.
 
@@ -150,6 +158,153 @@ def grow_selection(
     # so this gives a stable, reproducible tie-break).
     order = np.lexsort((cand_idx, score[cand_idx]))
     return np.sort(cand_idx[order[:step]])
+
+
+def within_selection_neighbor_distances(
+    selected, *, source, positions, dists, metric="euclidean"
+):
+    """Each selected point's distance to its nearest *other* selected point.
+
+    Returns
+    -------
+    (m,) float array
+        Aligned with ``selected``. ``np.inf`` where a point has no measurable
+        in-selection neighbour (only the sparse KNN graph can produce this, when
+        a selected point lists no other selected point among its neighbours).
+        Callers detect "no internal structure" via ``np.isfinite(...).any()``.
+    """
+    sel = np.asarray(selected, dtype=int)
+    if len(sel) <= 1:
+        return np.full(len(sel), np.inf)
+
+    if source == SOURCE_EMBEDDING:
+        if positions is None or not len(positions):
+            raise GrowShrinkUnavailable("No embedding positions available.")
+        return _within_from_coords(
+            np.asarray(positions, dtype=np.float64)[sel], "euclidean"
+        )
+
+    if source == SOURCE_FEATURES:
+        if not dists or "features" not in dists:
+            raise GrowShrinkUnavailable("No feature vectors available.")
+        return _within_from_coords(
+            np.asarray(dists["features"], dtype=np.float64)[sel], metric
+        )
+
+    if source == SOURCE_DISTANCES:
+        if not dists or "distances" not in dists:
+            raise GrowShrinkUnavailable("No distance matrix available.")
+        # DataFrame is ID-indexed; convert and index by row position.
+        sub = np.asarray(dists["distances"])[np.ix_(sel, sel)].astype(np.float64)
+        np.fill_diagonal(sub, np.inf)  # ignore the self-distance
+        return sub.min(axis=1)
+
+    if source == SOURCE_KNN:
+        if not dists or "knn" not in dists:
+            raise GrowShrinkUnavailable("No KNN graph available.")
+        return _within_from_knn(dists["knn"], sel)
+
+    raise GrowShrinkUnavailable(f"Unknown distance source: {source!r}")
+
+
+def selection_distance_threshold(
+    selected, *, source, positions, dists, metric="euclidean", factor=1.0
+):
+    """Auto distance threshold ``factor * max(within-selection NN distances)``.
+
+    Raises
+    ------
+    GrowShrinkThresholdUnavailable
+        If fewer than 2 points are selected, or (KNN) no selected point has a
+        selected neighbour — i.e. there is no internal structure to measure.
+    GrowShrinkUnavailable
+        If the requested ``source`` data is missing.
+    """
+    sel = np.asarray(selected, dtype=int)
+    if len(sel) < 2:
+        raise GrowShrinkThresholdUnavailable(
+            "Select at least 2 points to grow by similarity."
+        )
+    w = within_selection_neighbor_distances(
+        sel, source=source, positions=positions, dists=dists, metric=metric
+    )
+    finite = w[np.isfinite(w)]
+    if not finite.size:
+        raise GrowShrinkThresholdUnavailable(
+            "Selection has no internal neighbour links to derive a distance."
+        )
+    return float(factor) * float(finite.max())
+
+
+def grow_within_threshold(
+    selected,
+    threshold,
+    *,
+    source,
+    positions,
+    dists,
+    metric="euclidean",
+    scope_mask=None,
+):
+    """Single-pass similarity grow: indices to ADD within ``threshold``.
+
+    Adds every unselected, in-scope point whose
+    :func:`nearest_distance_to_selection` is finite and ``<= threshold`` (one
+    pass, no flood). For the KNN source this is bounded to the one-hop frontier,
+    matching that function's semantics. Returns ascending indices (empty array
+    when nothing qualifies or the selection is empty).
+    """
+    sel = np.asarray(selected, dtype=int)
+    if len(sel) == 0:
+        return np.empty(0, dtype=int)
+
+    score = nearest_distance_to_selection(
+        sel, source=source, positions=positions, dists=dists, metric=metric
+    )
+    n = len(score)
+
+    candidate = np.isfinite(score) & (score <= float(threshold))
+    candidate[sel] = False  # never re-add already-selected points
+    if scope_mask is not None and len(scope_mask) == n:
+        candidate &= np.asarray(scope_mask, dtype=bool)
+
+    return np.where(candidate)[0]
+
+
+def _within_from_coords(X, metric):
+    """Min distance from each row of ``X`` to any *other* row of ``X``."""
+    m = X.shape[0]
+    if m <= 1:
+        return np.full(m, np.inf)
+    if metric == "euclidean":
+        from scipy.spatial import cKDTree
+
+        # k=2: the first hit is the point itself (distance 0); take the second.
+        dist, _ = cKDTree(X).query(X, k=2)
+        return np.asarray(dist[:, 1], dtype=np.float64)
+
+    from sklearn.metrics import pairwise_distances
+
+    D = pairwise_distances(X, X, metric=metric)
+    np.fill_diagonal(D, np.inf)
+    return D.min(axis=1)
+
+
+def _within_from_knn(graph, selected):
+    """Each selected point's smallest KNN-edge weight to another selected point."""
+    indices = np.asarray(graph.indices)
+    gdist = np.asarray(graph.dists, dtype=np.float64)
+    n = indices.shape[0]
+
+    sel_mask = np.zeros(n, dtype=bool)
+    sel_mask[selected] = True
+
+    neigh = indices[selected]  # (m, k) neighbour row positions, -1 = missing
+    ndist = gdist[selected]  # (m, k) edge weights
+    # Keep only edges to neighbours that are themselves selected.
+    valid = (neigh >= 0) & sel_mask[np.clip(neigh, 0, n - 1)]
+    masked = np.where(valid, ndist, np.inf)
+    return masked.min(axis=1)  # inf for rows with no selected neighbour
 
 
 def _nearest_from_coords(X, selected, metric):

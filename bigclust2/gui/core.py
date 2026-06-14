@@ -3506,33 +3506,76 @@ class MainWindow(QMainWindow):
                 metric_group.addAction(action)
                 metric_menu.addAction(action)
 
-        # --- Step size ---
+        # --- Grow By (amount / mode) ---
+        mode = getattr(fig, "_gs_mode", "count")
         menu.addSeparator()
-        step_menu = menu.addMenu("Step Size")
-        step_group = QActionGroup(self)
-        step_group.setExclusive(True)
+        grow_by_menu = menu.addMenu("Grow By")
+        grow_group = QActionGroup(self)
+        grow_group.setExclusive(True)
+
+        # Count presets (selecting any switches back to count mode).
         presets = [1, 5, 10, 50, 100]
         for preset in presets:
-            action = QAction(str(preset), self)
+            action = QAction(f"{preset} points", self)
             action.setCheckable(True)
-            action.setChecked(preset == step)
+            action.setChecked(mode == "count" and preset == step)
             action.triggered.connect(lambda checked, n=preset: self._on_gs_set_step(n))
-            step_group.addAction(action)
-            step_menu.addAction(action)
-        step_menu.addSeparator()
+            grow_group.addAction(action)
+            grow_by_menu.addAction(action)
         custom = QAction(
-            "Custom…" if step in presets else f"Custom… ({step})", self
+            "Custom points…"
+            if (mode == "count" and step in presets)
+            else f"Custom points… ({step})",
+            self,
         )
         custom.setCheckable(True)
-        custom.setChecked(step not in presets)
-        step_group.addAction(custom)
+        custom.setChecked(mode == "count" and step not in presets)
         custom.triggered.connect(self._on_gs_set_step_custom)
-        step_menu.addAction(custom)
+        grow_group.addAction(custom)
+        grow_by_menu.addAction(custom)
+
+        # Similarity-threshold mode (one-shot grow).
+        grow_by_menu.addSeparator()
+        thr = QAction("Within neighbour distance", self)
+        thr.setCheckable(True)
+        thr.setChecked(mode == "threshold")
+        thr.triggered.connect(self._on_gs_set_threshold_mode)
+        grow_group.addAction(thr)
+        grow_by_menu.addAction(thr)
+
+        # Distance multiplier — only relevant in threshold mode.
+        if mode == "threshold":
+            factor = float(getattr(fig, "_gs_threshold_factor", 1.0))
+            factor_menu = grow_by_menu.addMenu("Distance ×")
+            factor_group = QActionGroup(self)
+            factor_group.setExclusive(True)
+            factor_presets = [0.5, 1.0, 1.5, 2.0]
+            for fp in factor_presets:
+                action = QAction(f"× {fp:g}", self)
+                action.setCheckable(True)
+                action.setChecked(abs(factor - fp) < 1e-9)
+                action.triggered.connect(
+                    lambda checked, v=fp: self._on_gs_set_threshold_factor(v)
+                )
+                factor_group.addAction(action)
+                factor_menu.addAction(action)
+            factor_menu.addSeparator()
+            is_preset = any(abs(factor - fp) < 1e-9 for fp in factor_presets)
+            fcustom = QAction(
+                "Custom…" if is_preset else f"Custom… (× {factor:g})", self
+            )
+            fcustom.setCheckable(True)
+            fcustom.setChecked(not is_preset)
+            fcustom.triggered.connect(self._on_gs_set_threshold_factor_custom)
+            factor_group.addAction(fcustom)
+            factor_menu.addAction(fcustom)
 
     def on_grow_selection(self):
         """Grow the current selection (Selection > Grow Selection)."""
         try:
-            self.current_view().fig_scatter.grow_selection()
+            self.current_view().fig_scatter.grow_selection(
+                confirm=self._confirm_large_selection
+            )
         except Exception as e:
             logger.debug(f"Grow Selection failed: {e}")
 
@@ -3557,7 +3600,9 @@ class MainWindow(QMainWindow):
 
     def _on_gs_set_step(self, step):
         try:
-            self.current_view().fig_scatter._gs_step = int(step)
+            fig = self.current_view().fig_scatter
+            fig._gs_step = int(step)
+            fig._gs_mode = "count"
         except Exception as e:
             logger.debug(f"Set grow/shrink step failed: {e}")
 
@@ -3568,12 +3613,45 @@ class MainWindow(QMainWindow):
             fig = self.current_view().fig_scatter
             current = int(getattr(fig, "_gs_step", 10))
             value, ok = QInputDialog.getInt(
-                self, "Step Size", "Points per grow/shrink:", current, 1, 100000, 1
+                self, "Grow By", "Points per grow:", current, 1, 100000, 1
             )
             if ok:
                 fig._gs_step = int(value)
+                fig._gs_mode = "count"
         except Exception as e:
             logger.debug(f"Set custom grow/shrink step failed: {e}")
+
+    def _on_gs_set_threshold_mode(self):
+        try:
+            self.current_view().fig_scatter._gs_mode = "threshold"
+        except Exception as e:
+            logger.debug(f"Set grow threshold mode failed: {e}")
+
+    def _on_gs_set_threshold_factor(self, factor):
+        try:
+            self.current_view().fig_scatter._gs_threshold_factor = float(factor)
+        except Exception as e:
+            logger.debug(f"Set grow threshold factor failed: {e}")
+
+    def _on_gs_set_threshold_factor_custom(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        try:
+            fig = self.current_view().fig_scatter
+            current = float(getattr(fig, "_gs_threshold_factor", 1.0))
+            value, ok = QInputDialog.getDouble(
+                self,
+                "Distance ×",
+                "Threshold factor (× within-selection max NN distance):",
+                current,
+                0.0,
+                1000.0,
+                2,
+            )
+            if ok:
+                fig._gs_threshold_factor = float(value)
+        except Exception as e:
+            logger.debug(f"Set custom grow threshold factor failed: {e}")
 
     def _confirm_large_selection(self, n):
         """Ask the user to confirm a selection of `n` neurons if it is large."""

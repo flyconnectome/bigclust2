@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 
 from dataclasses import asdict, dataclass
+from functools import partial
 
 from PySide6 import QtCore, QtWidgets
 
@@ -1553,12 +1554,20 @@ class AnnotationDialog(QtWidgets.QDialog):
         self._submit_threadpool().start(runnable)
 
     def _submit_result_callback(self):
-        """Resolve callback used for background submit result reporting."""
+        """Resolve callback used for background submit result reporting.
+
+        Binds this dialog's owner view so the result updates the project of the
+        view that triggered the annotation, regardless of which view is active
+        when the async write returns.
+        """
         parent = self.parent()
         if parent is not None:
             parent_callback = getattr(parent, "on_annotation_submit_result", None)
             if callable(parent_callback):
-                return parent_callback
+                return partial(
+                    parent_callback,
+                    source_view=getattr(self, "_owner_view", None),
+                )
         return print
 
     def _run_backend_writes(self, callback):

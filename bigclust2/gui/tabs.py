@@ -4,10 +4,10 @@ from PySide6.QtWidgets import QApplication, QTabBar, QTabWidget
 
 
 class ViewTabBar(QTabBar):
-    """Tab bar that requests a detach when a tab is dragged out vertically.
+    """Tab bar that requests a detach when a view is dragged out vertically.
 
     Horizontal dragging keeps QTabBar's built-in reordering; only a clear
-    vertical exit from the bar is interpreted as "tear this tab off".
+    vertical exit from the bar is interpreted as "tear this view off".
     """
 
     detach_requested = Signal(int, QPoint)  # tab index, global cursor position

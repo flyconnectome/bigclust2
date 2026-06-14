@@ -39,6 +39,7 @@ from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal,
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
+from .project import Project
 from .tabs import ViewTabWidget
 from ..data import parse_directory, SingleProjectLoader
 from .controls import ScatterControls
@@ -106,7 +107,7 @@ LARGE_SELECTION_THRESHOLD = 5000
 # Keep strong references to top-level windows so spawned windows stay alive.
 _OPEN_WINDOWS = []
 
-# Accent colors assigned to tabs/views so users can match auxiliary widgets to
+# Accent colors assigned to views so users can match auxiliary widgets to
 # their tab: a painted dot in the tab plus a matching circle character in
 # window titles (native macOS title bars can't show icons).
 _TAB_ACCENTS = [
@@ -122,7 +123,7 @@ _NEXT_TAB_ACCENT = itertools.count()
 
 
 def _make_dot_icon(color, size=10):
-    """Create a round single-color icon (used as per-tab accent dot)."""
+    """Create a round single-color icon (used as per-view accent dot)."""
     pixmap = QPixmap(size, size)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -138,7 +139,7 @@ def _dismiss_active_popup():
     """Close any active popup window (e.g. a completer dropdown).
 
     Tearing a widget out from under its open popup (closing or moving its
-    tab) leaves a stale entry in Qt's application-wide popup stack; key
+    view) leaves a stale entry in Qt's application-wide popup stack; key
     events are then redirected to the dead popup, i.e. swallowed, until a
     mouse click dismisses it.
     """
@@ -166,7 +167,7 @@ def resize_figures(func):
 class MainWidget(QWidget):
     """A single view into a project: scatter figure, 3D viewer and per-view state.
 
-    One instance per tab in the main window. Owns the project data and any
+    One instance per view in the main window. Owns the project data and any
     auxiliary widgets (connectivity table, explorers, ...) opened for it.
     """
 
@@ -180,9 +181,14 @@ class MainWidget(QWidget):
         # Per-view project state
         self._data = None
         self._current_project_loader = None
+        # The Project this view belongs to: the shared hub that propagates
+        # per-neuron visual state (e.g. annotation highlights) to all sibling
+        # views. Assigned by MainWindow.add_new_view; adopted/merged views keep
+        # theirs. See set_project / apply_neuron_state.
+        self.project = None
         self.view_title = "untitled"
         # Accent color identifying this view across tab + widget titles;
-        # assigned by MainWindow.add_new_tab and kept for life (incl. detach).
+        # assigned by MainWindow.add_new_view and kept for life (incl. detach).
         self.accent_color = None
         self.accent_dot = ""
 
@@ -205,7 +211,7 @@ class MainWidget(QWidget):
     def aux_widgets(self):
         """All live auxiliary widgets owned by this view.
 
-        Excludes the annotation dialog: it is application-modal (tabs cannot
+        Excludes the annotation dialog: it is application-modal (views cannot
         be switched while it is open) and manages its own window title.
         """
         candidates = [
@@ -224,6 +230,92 @@ class MainWidget(QWidget):
                 continue
             widgets.append(widget)
         return widgets
+
+    # ------------------------------------------------------------------ #
+    # Project state propagation
+    # ------------------------------------------------------------------ #
+    # Maps a project state_type to the method that renders it in this view.
+    # Add an entry here (and a matching `_apply_*` method) to make a new
+    # propagated per-neuron state paint in every view of the project.
+    _NEURON_STATE_HANDLERS = {
+        "annotated": "_apply_annotated_state",
+    }
+
+    def set_project(self, project):
+        """Join ``project``, rewiring state propagation and applying its state.
+
+        Disconnects from any previous project, connects the new project's
+        ``neuron_state_changed`` signal, then applies the current state. The
+        apply is best-effort: a no-op until the figure has points, so it is
+        re-run after the view is populated (see ``reapply_project_state``).
+        """
+        if project is self.project:
+            return
+        old = self.project
+        if old is not None:
+            try:
+                old.neuron_state_changed.disconnect(
+                    self._on_project_neuron_state_changed
+                )
+            except (RuntimeError, TypeError):
+                pass
+        self.project = project
+        if project is not None:
+            project.neuron_state_changed.connect(
+                self._on_project_neuron_state_changed
+            )
+            self.reapply_project_state()
+
+    def reapply_project_state(self):
+        """Repaint every state the project holds (after (re)populating points).
+
+        ``set_points`` resets per-point visual state (e.g. label colors), so any
+        carried-over project state must be re-applied once a view has its points.
+        """
+        project = self.project
+        if project is None:
+            return
+        for state_type in project.state_types():
+            self.apply_neuron_state(state_type, project.neuron_state(state_type))
+
+    def _on_project_neuron_state_changed(self, state_type, changes):
+        """Slot: a sibling view changed project state — render it here too."""
+        self.apply_neuron_state(state_type, changes)
+
+    def apply_neuron_state(self, state_type, mapping):
+        """Render a per-neuron project state in this view.
+
+        ``mapping`` is ``{(neuron_id, dataset): value}``. Dispatches to the
+        handler registered for ``state_type``; unknown types are ignored.
+        """
+        if self._teardown_done or not mapping:
+            return
+        handler_name = self._NEURON_STATE_HANDLERS.get(state_type)
+        if handler_name is None:
+            return
+        try:
+            getattr(self, handler_name)(mapping)
+        except Exception as e:
+            logger.debug(f"Failed to apply '{state_type}' state to view: {e}")
+
+    def _apply_annotated_state(self, mapping):
+        """Highlight annotated neurons by recoloring their labels pink."""
+        fig = getattr(self, "fig_scatter", None)
+        ids = getattr(fig, "ids", None)
+        if ids is None or len(ids) == 0:
+            return
+        datasets = getattr(fig, "datasets", None)
+        matches = []
+        for (neuron_id, dataset), value in mapping.items():
+            if not value:
+                continue
+            if datasets is None:
+                idx = np.where(ids == neuron_id)[0]
+            else:
+                idx = np.where((ids == neuron_id) & (datasets == dataset))[0]
+            matches.extend(idx.tolist())
+        if matches:
+            fig.set_label_color(matches, "#ff69b4")
 
     def focus_canvas(self):
         """Give keyboard focus to the scatter canvas.
@@ -247,6 +339,17 @@ class MainWidget(QWidget):
         if self._teardown_done:
             return
         self._teardown_done = True
+
+        # Stop receiving project broadcasts before Qt defers our deletion: the
+        # view lingers (deleteLater) and could otherwise be asked to repaint a
+        # canvas we are about to close. The _teardown_done guard backs this up.
+        if self.project is not None:
+            try:
+                self.project.neuron_state_changed.disconnect(
+                    self._on_project_neuron_state_changed
+                )
+            except (RuntimeError, TypeError):
+                pass
 
         try:
             fig = getattr(self, "fig_scatter", None)
@@ -1180,7 +1283,9 @@ class MainWindow(QMainWindow):
     RECENT_PROJECTS_KEY = "openRecentProjects/v1"
     MAX_RECENT_PROJECTS = 10
     annotation_submit_result_received = Signal(str)
-    annotation_changed = Signal(object)
+    # (source_view, changed_neurons): marshals the async submit result onto the
+    # GUI thread so the annotated view's project can be updated there.
+    annotation_changed = Signal(object, object)
 
     def __init__(self, adopt_view=None):
         super().__init__()
@@ -1197,7 +1302,7 @@ class MainWindow(QMainWindow):
         self._active_selection_counter = None
         # Window this one was detached from (for "merge back"), if any.
         self._parent_window = None
-        # Whether widgets of background tabs are hidden (global preference).
+        # Whether widgets of background views are hidden (global preference).
         self._hide_inactive_aux_widgets = self.settings.value(
             "auxWidgets/hideInactiveTabWidgets", True, type=bool
         )
@@ -1222,19 +1327,19 @@ class MainWindow(QMainWindow):
 
     def current_view(self):
         """Return the currently active view (MainWidget) or None."""
-        tabs = getattr(self, "_tabs", None)
-        return tabs.currentWidget() if tabs is not None else None
+        view_tabs = getattr(self, "_view_tabs", None)
+        return view_tabs.currentWidget() if view_tabs is not None else None
 
     def views(self):
         """Return all views (MainWidgets) hosted in this window."""
-        tabs = getattr(self, "_tabs", None)
-        if tabs is None:
+        view_tabs = getattr(self, "_view_tabs", None)
+        if view_tabs is None:
             return []
-        return [tabs.widget(i) for i in range(tabs.count())]
+        return [view_tabs.widget(i) for i in range(view_tabs.count())]
 
-    # Project data lives on the per-tab view; these properties keep the many
+    # Project data lives on the per-view MainWidget; these properties keep the many
     # existing `self._data` / `self._current_project_loader` references working
-    # by delegating to the active tab.
+    # by delegating to the active view.
     @property
     def _data(self):
         view = self.current_view()
@@ -1265,7 +1370,7 @@ class MainWindow(QMainWindow):
         if event.type() == QEvent.Close:
             owner = getattr(obj, "_owner_view", None)
             if owner is not None:
-                # User closed an aux widget: don't restore it on tab switch.
+                # User closed an aux widget: don't restore it on view switch.
                 obj._visible_in_tab = False
                 if obj in getattr(owner, "_connectivity_widgets", {}).values():
                     self._unsync_connectivity_widget(owner, obj)
@@ -1300,26 +1405,26 @@ class MainWindow(QMainWindow):
         self.embedding_status_label.hide()
 
         # Tab widget hosting one view (MainWidget) per tab
-        self._tabs = ViewTabWidget()
-        self._tabs.currentChanged.connect(self._on_current_tab_changed)
-        self._tabs.tabCloseRequested.connect(self._on_tab_close_requested)
+        self._view_tabs = ViewTabWidget()
+        self._view_tabs.currentChanged.connect(self._on_current_view_changed)
+        self._view_tabs.tabCloseRequested.connect(self._on_view_close_requested)
         # Queued so the tab bar's mouse handling finishes before we mutate it.
-        self._tabs.detach_requested.connect(
-            self._on_tab_detach_requested, Qt.QueuedConnection
+        self._view_tabs.detach_requested.connect(
+            self._on_view_detach_requested, Qt.QueuedConnection
         )
-        self.setCentralWidget(self._tabs)
+        self.setCentralWidget(self._view_tabs)
 
         if self._adopt_view is not None:
             view = self._adopt_view
             self._adopt_view = None
-            self.add_new_tab(
+            self.add_new_view(
                 title=getattr(view, "view_title", "untitled"), view=view
             )
         else:
-            view = self.add_new_tab(title="untitled")
-            # Reopen the initial tab in the arrangement (and divider position)
+            view = self.add_new_view(title="untitled")
+            # Reopen the initial view in the arrangement (and divider position)
             # last used, saved in closeEvent. Deferred a turn so the splitter
-            # has a real size by the time the sizing runs. New mid-session tabs
+            # has a real size by the time the sizing runs. New mid-session views
             # keep the default stacked 50/50 layout.
             mode = self.settings.value("mainWindow/layoutMode", "stacked")
             ratio = self._read_layout_ratio_setting()
@@ -1341,9 +1446,9 @@ class MainWindow(QMainWindow):
         open_project_action.triggered.connect(self.show_open_project_dialog)
         file_menu.addAction(open_project_action)
 
-        new_tab_action = QAction("New Tab", self)
+        new_tab_action = QAction("New View", self)
         new_tab_action.setShortcut(QKeySequence("Ctrl+T"))
-        new_tab_action.triggered.connect(lambda: self.add_new_tab(title="untitled"))
+        new_tab_action.triggered.connect(lambda: self.add_new_view(title="untitled"))
         file_menu.addAction(new_tab_action)
 
         new_window_action = QAction("New Window", self)
@@ -1351,9 +1456,9 @@ class MainWindow(QMainWindow):
         new_window_action.triggered.connect(self.open_new_window)
         file_menu.addAction(new_window_action)
 
-        close_tab_action = QAction("Close Tab", self)
+        close_tab_action = QAction("Close View", self)
         close_tab_action.setShortcut(QKeySequence.Close)
-        close_tab_action.triggered.connect(self.close_current_tab)
+        close_tab_action.triggered.connect(self.close_current_view)
         file_menu.addAction(close_tab_action)
 
         close_window_action = QAction("Close Window", self)
@@ -1505,7 +1610,7 @@ class MainWindow(QMainWindow):
         shrink_action.triggered.connect(self.on_shrink_selection)
         selection_menu.addAction(shrink_action)
 
-        # Rebuilt on show so it reflects the current tab's figure (see
+        # Rebuilt on show so it reflects the current view's figure (see
         # `_refresh_grow_shrink_menu`).
         self._grow_shrink_menu = selection_menu.addMenu("Grow/Shrink Options")
         self._grow_shrink_menu.aboutToShow.connect(self._refresh_grow_shrink_menu)
@@ -1527,12 +1632,12 @@ class MainWindow(QMainWindow):
         selection_menu.addAction(show_hidden_action)
 
         selection_menu.addSeparator()
-        open_selection_in_new_tab_action = QAction("Open in New Tab", self)
+        open_selection_in_new_tab_action = QAction("Open in New View", self)
         open_selection_in_new_tab_action.setShortcut(
             QKeySequence("Shift+Ctrl+Meta+N")
         )
         open_selection_in_new_tab_action.triggered.connect(
-            self.on_open_selection_in_new_tab
+            self.on_open_selection_in_new_view
         )
         selection_menu.addAction(open_selection_in_new_tab_action)
 
@@ -1596,36 +1701,36 @@ class MainWindow(QMainWindow):
 
         window_menu.addSeparator()
 
-        self.detach_tab_action = QAction("Move Tab to New Window", self)
-        self.detach_tab_action.setToolTip(
-            "Open the current tab as a separate window (same as dragging the "
-            "tab out of the tab bar)."
+        self.detach_view_action = QAction("Move View to New Window", self)
+        self.detach_view_action.setToolTip(
+            "Open the current view as a separate window (same as dragging the "
+            "view out of the view bar)."
         )
-        self.detach_tab_action.triggered.connect(self.detach_current_tab)
-        self.detach_tab_action.setEnabled(False)
-        window_menu.addAction(self.detach_tab_action)
+        self.detach_view_action.triggered.connect(self.detach_current_view)
+        self.detach_view_action.setEnabled(False)
+        window_menu.addAction(self.detach_view_action)
 
         self.merge_window_action = QAction("Merge Window into Parent", self)
         self.merge_window_action.setToolTip(
-            "Move this window's tabs back into the window it was detached from."
+            "Move this window's views back into the window it was detached from."
         )
         self.merge_window_action.triggered.connect(self.merge_into_parent_window)
         self.merge_window_action.setEnabled(False)
         window_menu.addAction(self.merge_window_action)
 
-        # Enablement depends on tab count / detach lineage; refresh on open.
+        # Enablement depends on view count / detach lineage; refresh on open.
         window_menu.aboutToShow.connect(self._refresh_window_menu_actions)
 
         window_menu.addSeparator()
 
         self.hide_inactive_widgets_action = QAction(
-            "Hide Widgets of Inactive Tabs", self
+            "Hide Widgets of Inactive Views", self
         )
         self.hide_inactive_widgets_action.setCheckable(True)
         self.hide_inactive_widgets_action.setChecked(self._hide_inactive_aux_widgets)
         self.hide_inactive_widgets_action.setToolTip(
             "When enabled, widgets (connectivity, explorers, heatmaps) of "
-            "background tabs are hidden and restored with their tab."
+            "background views are hidden and restored with their view."
         )
         self.hide_inactive_widgets_action.toggled.connect(
             self._on_hide_inactive_widgets_toggled
@@ -1724,16 +1829,16 @@ class MainWindow(QMainWindow):
         keyboard_shortcuts_action.triggered.connect(self.show_keyboard_shortcuts)
         help_menu.addAction(keyboard_shortcuts_action)
 
-        # Cmd/Ctrl+1..9 switch between tabs (9 jumps to the last tab).
+        # Cmd/Ctrl+1..9 switch between views (9 jumps to the last view).
         for i in range(1, 10):
             shortcut = QShortcut(QKeySequence(f"Ctrl+{i}"), self)
             shortcut.activated.connect(
                 lambda idx=i: self._activate_tab_by_number(idx)
             )
 
-        # The first tab was added before the menus existed; sync window title,
+        # The first view was added before the menus existed; sync window title,
         # action states and status bar to it now.
-        self._on_current_tab_changed(self._tabs.currentIndex())
+        self._on_current_view_changed(self._view_tabs.currentIndex())
 
     def show_keyboard_shortcuts(self):
         """Show a dialog listing all keyboard shortcuts."""
@@ -1831,10 +1936,10 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⌥", "H"], "Show all hidden neurons")
         _add_row(cl, ["⌘", "C"], "Copy selected IDs to the clipboard")
 
-        _add_section(cl, "Tabs")
-        _add_row(cl, ["⌘", "T"], "Open a new tab")
-        _add_row(cl, ["⌘", "W"], "Close the current tab")
-        _add_row(cl, ["⌘", "1-9"], "Switch to the n-th tab (9 = last tab)")
+        _add_section(cl, "Views")
+        _add_row(cl, ["⌘", "T"], "Open a new view")
+        _add_row(cl, ["⌘", "W"], "Close the current view")
+        _add_row(cl, ["⌘", "1-9"], "Switch to the n-th view (9 = last view)")
 
         _add_section(cl, "3D Viewer")
         _add_row(cl, ["mouse:left-hold"], "Rotate the view")
@@ -1861,8 +1966,8 @@ class MainWindow(QMainWindow):
         window.move(self.pos() + QPoint(40, 40))
         window.show()
 
-    def add_new_tab(self, title="untitled", switch=True, view=None):
-        """Create (or adopt) a view and add it as a new tab."""
+    def add_new_view(self, title="untitled", switch=True, view=None):
+        """Create (or adopt) a view and add it as a new view."""
         if view is None:
             view = MainWidget()
         view.view_title = title
@@ -1873,10 +1978,16 @@ class MainWindow(QMainWindow):
             view.accent_color = color
             view.accent_dot = dot
 
-        index = self._tabs.addTab(view, title)
-        self._tabs.setTabIcon(index, _make_dot_icon(view.accent_color))
+        # Give the view its own project unless it arrived with one (adopted on
+        # detach, or merged back). A selection opened in a new view re-joins its
+        # source view's project right after this call.
+        if view.project is None:
+            view.set_project(Project())
+
+        index = self._view_tabs.addTab(view, title)
+        self._view_tabs.setTabIcon(index, _make_dot_icon(view.accent_color))
         if switch:
-            self._tabs.setCurrentIndex(index)
+            self._view_tabs.setCurrentIndex(index)
         return view
 
     def set_view_title(self, view, title, tooltip=None):
@@ -1884,10 +1995,10 @@ class MainWindow(QMainWindow):
         if view is None:
             return
         view.view_title = title
-        index = self._tabs.indexOf(view)
+        index = self._view_tabs.indexOf(view)
         if index >= 0:
-            self._tabs.setTabText(index, title)
-            self._tabs.setTabToolTip(index, tooltip if tooltip else title)
+            self._view_tabs.setTabText(index, title)
+            self._view_tabs.setTabToolTip(index, tooltip if tooltip else title)
         for widget in view.aux_widgets():
             self._decorate_aux_widget_title(view, widget)
         self._sync_window_title()
@@ -1902,24 +2013,24 @@ class MainWindow(QMainWindow):
         else:
             self.setWindowTitle(f"{prefix}BigClust")
 
-    def _on_current_tab_changed(self, index):
-        """Sync window chrome (title, actions, status bar) to the active tab."""
+    def _on_current_view_changed(self, index):
+        """Sync window chrome (title, actions, status bar) to the active view."""
         _dismiss_active_popup()
-        view = self._tabs.widget(index) if index >= 0 else None
+        view = self._view_tabs.widget(index) if index >= 0 else None
         self._sync_window_title()
         self._update_view_actions()
         self._refresh_window_menu_actions()
         self._sync_actions_to_view(view)
 
         # Hand keyboard focus to the canvas. Qt does not reliably reassign
-        # focus when the tab holding the focused widget goes away (e.g.
+        # focus when the view holding the focused widget goes away (e.g.
         # Cmd+W while typing in a text field), which would leave the global
         # key bindings dead until the user clicks a focusable widget.
         if view is not None:
             view.focus_canvas()
             self._reassert_native_key_focus()
 
-        # Only the active tab's auxiliary widgets are shown.
+        # Only the active view's auxiliary widgets are shown.
         self._update_aux_widget_visibility()
 
         # Swap in the active view's selection counter.
@@ -1949,7 +2060,7 @@ class MainWindow(QMainWindow):
                 view.fig_scatter.force_single_render()
                 view.ngl_viewer.force_single_render()
             except Exception as e:
-                logger.debug(f"Failed to refresh canvases after tab switch: {e}")
+                logger.debug(f"Failed to refresh canvases after view switch: {e}")
 
     def _update_embedding_status(self):
         """Sync the status-bar embedding indicator with the active view.
@@ -1981,7 +2092,7 @@ class MainWindow(QMainWindow):
         widget tree, so a text field can live inside a native subwindow.
         Typing there makes that subwindow's view the macOS first responder,
         and Qt-side focus changes do not move it back. When the subwindow
-        dies with its tab, the first responder dangles and macOS drops all
+        dies with its view, the first responder dangles and macOS drops all
         key events before Qt sees them. Re-activating the (already active)
         window makes its top-level content view the first responder again,
         restoring delivery to Qt's focus widget.
@@ -2022,7 +2133,7 @@ class MainWindow(QMainWindow):
         widget.installEventFilter(self)
 
     def _decorate_aux_widget_title(self, view, widget):
-        """Prefix a widget's title with its view's accent dot and tab title."""
+        """Prefix a widget's title with its view's accent dot and view title."""
         base = getattr(widget, "_base_window_title", widget.windowTitle())
         dot = getattr(view, "accent_dot", "")
         title = getattr(view, "view_title", "")
@@ -2039,13 +2150,13 @@ class MainWindow(QMainWindow):
         widget.activateWindow()
 
     def _update_aux_widget_visibility(self):
-        """Show only the active tab's auxiliary widgets (if so configured).
+        """Show only the active view's auxiliary widgets (if so configured).
 
-        Widgets of background tabs are hidden; switching back restores those
+        Widgets of background views are hidden; switching back restores those
         that were open. `_visible_in_tab` tracks user intent: set on
         creation/re-show, cleared when the user closes the widget (via the
         close-event filter) - hiding here does not touch it. With the
-        "Hide Widgets of Inactive Tabs" preference off, every tab's open
+        "Hide Widgets of Inactive Views" preference off, every view's open
         widgets stay visible.
         """
         current = self.current_view()
@@ -2063,7 +2174,7 @@ class MainWindow(QMainWindow):
                     continue
 
     def _on_hide_inactive_widgets_toggled(self, checked):
-        """Apply and persist the hide-inactive-tab-widgets preference globally."""
+        """Apply and persist the hide-inactive-view-widgets preference globally."""
         try:
             self.settings.setValue("auxWidgets/hideInactiveTabWidgets", checked)
         except Exception:
@@ -2121,41 +2232,41 @@ class MainWindow(QMainWindow):
                 continue
 
     def _refresh_window_menu_actions(self):
-        """Update enablement of the tab/window organization actions."""
-        if getattr(self, "detach_tab_action", None) is not None:
-            self.detach_tab_action.setEnabled(self._tabs.count() > 1)
+        """Update enablement of the view/window organization actions."""
+        if getattr(self, "detach_view_action", None) is not None:
+            self.detach_view_action.setEnabled(self._view_tabs.count() > 1)
         if getattr(self, "merge_window_action", None) is not None:
             self.merge_window_action.setEnabled(self.parent_main_window() is not None)
 
     def _activate_tab_by_number(self, number):
-        """Switch to the n-th tab; 9 jumps to the last tab."""
-        count = self._tabs.count()
+        """Switch to the n-th view; 9 jumps to the last view."""
+        count = self._view_tabs.count()
         index = count - 1 if number == 9 else number - 1
         if 0 <= index < count:
-            self._tabs.setCurrentIndex(index)
+            self._view_tabs.setCurrentIndex(index)
 
-    def _on_tab_close_requested(self, index):
-        view = self._tabs.widget(index)
+    def _on_view_close_requested(self, index):
+        view = self._view_tabs.widget(index)
         if view is not None:
             self.close_view(view)
 
-    def close_current_tab(self):
+    def close_current_view(self):
         view = self.current_view()
         if view is not None:
             self.close_view(view)
 
     def close_view(self, view):
-        """Tear down and remove a view; closing the last tab closes the window."""
+        """Tear down and remove a view; closing the last view closes the window."""
         _dismiss_active_popup()
-        if self._tabs.count() <= 1:
+        if self._view_tabs.count() <= 1:
             # closeEvent takes care of tearing down the remaining view.
             self.close()
             return
 
         self._teardown_view(view)
-        index = self._tabs.indexOf(view)
+        index = self._view_tabs.indexOf(view)
         if index >= 0:
-            self._tabs.removeTab(index)
+            self._view_tabs.removeTab(index)
         view.deleteLater()
 
     def _teardown_view(self, view):
@@ -2166,24 +2277,24 @@ class MainWindow(QMainWindow):
             logger.debug(f"Failed to tear down view rendering: {e}")
         self._dispose_view_aux_widgets(view)
 
-    def _on_tab_detach_requested(self, index, global_pos):
-        """Move a tab into its own window (tab dragged out of the bar)."""
-        self.detach_view(self._tabs.widget(index), global_pos)
+    def _on_view_detach_requested(self, index, global_pos):
+        """Move a view into its own window (view dragged out of the bar)."""
+        self.detach_view(self._view_tabs.widget(index), global_pos)
 
-    def detach_current_tab(self):
-        """Move the current tab into its own window."""
+    def detach_current_view(self):
+        """Move the current view into its own window."""
         return self.detach_view(self.current_view())
 
     def detach_view(self, view, global_pos=None):
         """Move a view out of this window into a new window of its own."""
-        if view is None or self._tabs.count() <= 1:
+        if view is None or self._view_tabs.count() <= 1:
             return None
-        index = self._tabs.indexOf(view)
+        index = self._view_tabs.indexOf(view)
         if index < 0:
             return None
 
         _dismiss_active_popup()
-        self._tabs.removeTab(index)
+        self._view_tabs.removeTab(index)
         window = MainWindow(adopt_view=view)
         window._parent_window = self
         self._transfer_aux_widgets(view, window)
@@ -2202,7 +2313,7 @@ class MainWindow(QMainWindow):
         return parent
 
     def merge_into_parent_window(self):
-        """Move this window's tabs back into the parent window, then close."""
+        """Move this window's views back into the parent window, then close."""
         parent = self.parent_main_window()
         if parent is None:
             return
@@ -2210,15 +2321,15 @@ class MainWindow(QMainWindow):
         _dismiss_active_popup()
         views = self.views()
         for view in views:
-            index = self._tabs.indexOf(view)
+            index = self._view_tabs.indexOf(view)
             if index < 0:
                 continue
-            self._tabs.removeTab(index)
-            parent.add_new_tab(title=view.view_title, switch=False, view=view)
+            self._view_tabs.removeTab(index)
+            parent.add_new_view(title=view.view_title, switch=False, view=view)
             self._transfer_aux_widgets(view, parent)
 
         if views:
-            parent._tabs.setCurrentWidget(views[0])
+            parent._view_tabs.setCurrentWidget(views[0])
         parent.show()
         parent.raise_()
         parent.activateWindow()
@@ -2604,13 +2715,20 @@ class MainWindow(QMainWindow):
             lambda _obj=None, v=view: setattr(v, "_annotation_dialog", None)
         )
 
-    def on_annotation_submit_result(self, message, changed_neurons=None):
-        """Receive async submit result message and forward to UI + console."""
+    def on_annotation_submit_result(
+        self, message, changed_neurons=None, source_view=None
+    ):
+        """Receive async submit result message and forward to UI + console.
+
+        Runs on the annotation worker thread; ``source_view`` is the view whose
+        dialog triggered the write (its project receives the highlight, not the
+        currently-active view). The emit marshals onto the GUI thread.
+        """
         text = str(message)
         print(text)
         self.annotation_submit_result_received.emit(text)
         if changed_neurons:
-            self.annotation_changed.emit(changed_neurons)
+            self.annotation_changed.emit(source_view, changed_neurons)
 
     def _handle_annotation_submit_result(self, message):
         """Show user-facing submit result status on the scatter figure."""
@@ -2625,16 +2743,22 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Failed to show annotation submit status message: {e}")
 
-    def _handle_annotation_changed(self, changed_neurons):
-        """Highlight labels for neurons whose annotations were changed."""
+    def _handle_annotation_changed(self, source_view, changed_neurons):
+        """Record annotated neurons on the project; all its views repaint.
+
+        Targets the view whose dialog made the change (not the active view): the
+        write is async, so the user may have switched views, and sibling views in
+        one window can belong to different projects. Writing to that view's
+        project broadcasts the highlight to every view of the project, including
+        ones detached into other windows.
+        """
         try:
-            fig = self.current_view().fig_scatter
-            ids = getattr(fig, "ids", None)
-            datasets = getattr(fig, "datasets", None)
-            if ids is None or len(ids) == 0:
+            view = source_view or self.current_view()
+            project = getattr(view, "project", None)
+            if project is None:
                 return
 
-            matches = []
+            keys = []
             for entry in changed_neurons:
                 if isinstance(entry, dict):
                     neuron_id = entry.get("id")
@@ -2643,17 +2767,12 @@ class MainWindow(QMainWindow):
                     dataset, neuron_id = entry
                 else:
                     continue
+                keys.append((neuron_id, dataset))
 
-                if datasets is None:
-                    idx = np.where(ids == neuron_id)[0]
-                else:
-                    idx = np.where((ids == neuron_id) & (datasets == dataset))[0]
-                matches.extend(idx.tolist())
-
-            if matches:
-                fig.set_label_color(matches, "#ff69b4")
+            if keys:
+                project.set_neuron_state("annotated", keys, True)
         except Exception as e:
-            logger.debug(f"Failed to highlight changed annotation labels: {e}")
+            logger.debug(f"Failed to record changed annotations on project: {e}")
 
     def _log_annotation_entries(self, entries):
         """Store per-window annotation log entries for successful dataset writes."""
@@ -3097,7 +3216,7 @@ class MainWindow(QMainWindow):
             logger.debug(f"Hover recompute on menu close failed: {e}")
 
     def _refresh_grow_shrink_menu(self):
-        """Rebuild the Grow/Shrink Options submenu for the current tab's figure."""
+        """Rebuild the Grow/Shrink Options submenu for the current view's figure."""
         from .. import grow_shrink as gs
 
         menu = self._grow_shrink_menu
@@ -3305,8 +3424,8 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Open in Neuroglancer failed: {e}")
 
-    def on_open_selection_in_new_tab(self):
-        """Open currently selected scatter points in a new tab."""
+    def on_open_selection_in_new_view(self):
+        """Open currently selected scatter points in a new view."""
         try:
             source_view = self.current_view()
             source_fig = source_view.fig_scatter
@@ -3394,7 +3513,7 @@ class MainWindow(QMainWindow):
                             source_matrices["knn"], selected_indices
                         )
 
-            # Read the point size from the source view before the new tab
+            # Read the point size from the source view before the new view
             # becomes the current one.
             source_data = (
                 source_view._data if isinstance(source_view._data, dict) else {}
@@ -3402,16 +3521,21 @@ class MainWindow(QMainWindow):
             point_size = source_data.get("point_size", 10)
 
             # Snapshot the source view's display configuration (label/color/size
-            # selections and their settings) so the new tab mirrors it. Must be
-            # read before the new tab becomes the current one.
+            # selections and their settings) so the new view mirrors it. Must be
+            # read before the new view becomes the current one.
             display_state = source_view.scatter_controls.capture_display_state()
 
-            # Carry the source view's pane arrangement into the new tab too.
+            # Carry the source view's pane arrangement into the new view too.
             source_layout_mode = getattr(source_view, "_layout_mode", "stacked")
             source_layout_ratio = source_view.layout_ratio()
 
             title = f"selection ({len(selected_meta)})"
-            view = self.add_new_tab(title=title)
+            view = self.add_new_view(title=title)
+            # The selection is another view of the SAME project: join it so
+            # annotation highlights (and future propagated states) carry over and
+            # stay in sync. The throwaway project add_new_view assigned has no
+            # views now and is garbage-collected.
+            view.set_project(source_view.project)
             self._populate_view(
                 view,
                 meta=selected_meta,
@@ -3428,7 +3552,7 @@ class MainWindow(QMainWindow):
             self._update_view_actions()
             self.set_view_title(view, title)
 
-            # Apply the carried-over arrangement once the new tab has a real
+            # Apply the carried-over arrangement once the new view has a real
             # size (deferred a turn, like the startup restore in init_ui).
             if source_layout_mode != "stacked" or source_layout_ratio is not None:
                 QTimer.singleShot(
@@ -3438,11 +3562,12 @@ class MainWindow(QMainWindow):
                     ),
                 )
         except Exception as e:
-            logger.error(f"Open selection in new tab failed: {e}")
+            logger.error(f"Open selection in new view failed: {e}")
 
-    # Backwards-compatible alias: external code (e.g. the figure's canvas walk)
-    # looks this attribute up by name.
-    on_open_selection_in_new_window = on_open_selection_in_new_tab
+    # Backwards-compatible aliases: external code (e.g. the figure's canvas
+    # walk) looks these attributes up by name.
+    on_open_selection_in_new_tab = on_open_selection_in_new_view
+    on_open_selection_in_new_window = on_open_selection_in_new_view
 
     def _populate_view(
         self,
@@ -3505,7 +3630,7 @@ class MainWindow(QMainWindow):
                 view.ngl_viewer.set_data(ngl_data)
 
                 # Share already-loaded meshes from the source viewer's cache (by
-                # reference, no copy) so the new tab can display selected neurons
+                # reference, no copy) so the new view can display selected neurons
                 # without re-downloading. Restricted to the selection's keys.
                 view.ngl_viewer.adopt_cache_from(
                     ngl_source_viewer, keys=list(ngl_data.index)
@@ -3543,6 +3668,11 @@ class MainWindow(QMainWindow):
             "active_embedding": active if entries else None,
             "point_size": point_size,
         }
+
+        # Paint any project state (e.g. annotation highlights) onto the freshly
+        # populated figure. set_points wiped per-point colors, so this re-apply
+        # is what makes carried-over state actually show up in the new view.
+        view.reapply_project_state()
 
     def on_copy_ids_to_clipboard(self):
         fig = self.current_view().fig_scatter
@@ -3728,6 +3858,13 @@ class MainWindow(QMainWindow):
 
         # Auxiliary widgets are project-specific; reset cached instances on reload.
         self._dispose_view_aux_widgets(self.current_view())
+
+        # Loading a dataset starts a fresh project for this view: drop any
+        # propagated state (e.g. annotation highlights) from the previous one.
+        # fig.clear()/set_points below also wipe stale label colors.
+        view = self.current_view()
+        if view is not None:
+            view.set_project(Project())
 
         # Create progress dialog with range
         progress = QProgressDialog("Loading project data...", None, 0, 100, self)

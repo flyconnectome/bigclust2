@@ -295,7 +295,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 
 		self.select_btn = QtWidgets.QPushButton("Select in Main Window")
 		self.select_btn.clicked.connect(self._on_select)
-		self.open_new_btn = QtWidgets.QPushButton("Open in New Tab")
+		self.open_new_btn = QtWidgets.QPushButton("Open in New View")
 		self.open_new_btn.clicked.connect(self._on_open_new)
 		self.close_btn = QtWidgets.QPushButton("Close")
 		self.close_btn.clicked.connect(self.close)

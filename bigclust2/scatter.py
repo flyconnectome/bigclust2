@@ -460,19 +460,19 @@ class ScatterFigure(BaseFigure):
 
         window = self.canvas.window()
         while window is not None and not hasattr(
-            window, "on_open_selection_in_new_tab"
+            window, "on_open_selection_in_new_view"
         ):
             window = window.parent()
 
         if window is None:
             raise RuntimeError(
-                "Unable to find parent window to open selection in a new tab."
+                "Unable to find parent window to open selection in a new view."
             )
 
-        window.on_open_selection_in_new_tab()
+        window.on_open_selection_in_new_view()
 
         self.selected = (
-            curr_sel  # restore the current selection after opening the new tab
+            curr_sel  # restore the current selection after opening the new view
         )
 
     # Backwards-compatible alias

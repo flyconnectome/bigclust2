@@ -1177,10 +1177,33 @@ class ScatterControls(QtWidgets.QWidget):
         self.tab1_layout.addWidget(scope_group)
 
         self.scope_rows = []
+        # Indices of neurons hidden via "Hide Selection"; folded out of the scope
+        # mask in `_update_scope_mask` so they survive scope-filter recomputation.
+        self._hidden_idx = set()
         self.scope_rows_layout = QtWidgets.QVBoxLayout()
         self.scope_rows_layout.setContentsMargins(0, 0, 0, 0)
         self.scope_rows_layout.setSpacing(2)
         scope_layout.addLayout(self.scope_rows_layout)
+
+        # Card surfaced in the Scope group whenever neurons are hidden via "Hide
+        # Selection". It is not a filter row (kept out of self.scope_rows);
+        # deleting it is equivalent to "Show Hidden". See _update_hidden_card.
+        self._hidden_card = QtWidgets.QWidget()
+        hidden_card_layout = QtWidgets.QHBoxLayout(self._hidden_card)
+        hidden_card_layout.setContentsMargins(0, 0, 0, 0)
+        hidden_card_layout.setSpacing(2)
+        self._hidden_card_label = QtWidgets.QLabel("")
+        self._hidden_card_label.setStyleSheet("color: white;")
+        self._hidden_card_label.setToolTip("Neurons hidden via Hide Selection (H)")
+        hidden_card_layout.addWidget(self._hidden_card_label, 1)
+        hidden_remove_btn = QtWidgets.QToolButton()
+        hidden_remove_btn.setText("×")
+        hidden_remove_btn.setAutoRaise(True)
+        hidden_remove_btn.setToolTip("Show all hidden neurons")
+        hidden_remove_btn.clicked.connect(lambda *_: self.show_hidden())
+        hidden_card_layout.addWidget(hidden_remove_btn)
+        self._hidden_card.setVisible(False)
+        scope_layout.addWidget(self._hidden_card)
 
         self.scope_add_btn = QtWidgets.QPushButton("+ Add filter")
         self.scope_add_btn.clicked.connect(self._add_scope_row)
@@ -3632,29 +3655,75 @@ class ScatterControls(QtWidgets.QWidget):
             row.set_columns(cols)
         self._update_scope_mask()
 
+    def hide_selection(self):
+        """Hide the selected neurons by folding them out of the scope."""
+        sel = self.figure.selected
+        if sel is None or len(sel) == 0:
+            return
+        self._hidden_idx.update(int(i) for i in sel)
+        self._update_scope_mask()
+
+    def show_hidden(self):
+        """Reveal all previously hidden neurons."""
+        if not self._hidden_idx:
+            return
+        self._hidden_idx.clear()
+        self._update_scope_mask()
+
+    def _update_hidden_card(self):
+        """Show/refresh the Scope-group card reflecting the hidden-neuron count."""
+        if not hasattr(self, "_hidden_card"):
+            return  # called before the scope group is built
+        n = len(self._hidden_idx)
+        self._hidden_card_label.setText(
+            f"{n} hidden neuron" if n == 1 else f"{n} hidden neurons"
+        )
+        self._hidden_card.setVisible(n > 0)
+
     def _update_scope_mask(self):
         """Recompute the selection scope mask and pass it to the figure."""
         df = self.meta_data
-        if df is None or not self.scope_rows:
+        if df is None:
             self.figure.set_scope(None)
             self.scope_match_label.setVisible(False)
+            self._update_hidden_card()
             return
-        mask = self.scope_rows[0].mask(df)
-        for row in self.scope_rows[1:]:
-            m = row.mask(df)
-            if row.combinator.currentText() == "OR":
-                mask = mask | m
-            else:
-                mask = mask & m
-        self.figure.set_scope(mask)
 
-        n = int(mask.sum())
-        self.scope_match_label.setText(
-            f"1 of {len(df)} rows matches"
-            if n == 1
-            else f"{n} of {len(df)} rows match"
-        )
-        self.scope_match_label.setVisible(True)
+        # Base mask from the filter rows (everything in scope if no rows). The
+        # match label describes the filter rows only.
+        if self.scope_rows:
+            filter_mask = self.scope_rows[0].mask(df)
+            for row in self.scope_rows[1:]:
+                m = row.mask(df)
+                if row.combinator.currentText() == "OR":
+                    filter_mask = filter_mask | m
+                else:
+                    filter_mask = filter_mask & m
+            n = int(filter_mask.sum())
+            self.scope_match_label.setText(
+                f"1 of {len(df)} rows matches"
+                if n == 1
+                else f"{n} of {len(df)} rows match"
+            )
+            self.scope_match_label.setVisible(True)
+        else:
+            filter_mask = np.ones(len(df), dtype=bool)
+            self.scope_match_label.setVisible(False)
+
+        # Fold hidden neurons out of the scope.
+        mask = filter_mask
+        if self._hidden_idx:
+            valid = [i for i in self._hidden_idx if 0 <= i < len(df)]
+            if len(valid) != len(self._hidden_idx):
+                self._hidden_idx = set(valid)  # drop stale indices so the card count is correct
+            if valid:
+                hidden = np.zeros(len(df), dtype=bool)
+                hidden[valid] = True
+                mask = mask & ~hidden
+
+        # `None` when nothing is restricted so the visuals fully reset.
+        self.figure.set_scope(None if mask.all() else mask)
+        self._update_hidden_card()
 
     def update_label_combo_boxes(self):
         """Update the items in the label, color by and size by combo boxes."""

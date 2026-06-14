@@ -1511,6 +1511,22 @@ class MainWindow(QMainWindow):
         self._grow_shrink_menu.aboutToShow.connect(self._refresh_grow_shrink_menu)
 
         selection_menu.addSeparator()
+        hide_selection_action = QAction("Hide Selection", self)
+        hide_selection_action.setShortcut(QKeySequence("H"))
+        # Plain "H" would hijack typing in search/filter fields if it were a
+        # window-wide shortcut; the real key trigger lives on the canvas (see
+        # ScatterFigure.key_events). Keep the menu entry for discoverability and
+        # mouse click, but don't register "H" globally.
+        hide_selection_action.setShortcutContext(Qt.WidgetShortcut)
+        hide_selection_action.triggered.connect(self.on_hide_selection)
+        selection_menu.addAction(hide_selection_action)
+
+        show_hidden_action = QAction("Show Hidden", self)
+        show_hidden_action.setShortcut(QKeySequence("Alt+H"))  # modifier+letter is typing-safe
+        show_hidden_action.triggered.connect(self.on_show_hidden)
+        selection_menu.addAction(show_hidden_action)
+
+        selection_menu.addSeparator()
         open_selection_in_new_tab_action = QAction("Open in New Tab", self)
         open_selection_in_new_tab_action.setShortcut(
             QKeySequence("Shift+Ctrl+Meta+N")
@@ -1811,6 +1827,8 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⌘", "I"], "Invert the selection")
         _add_row(cl, ["⌘", "+"], "Grow the selection (add nearest points)")
         _add_row(cl, ["⌘", "−"], "Shrink the selection (undo last grow)")
+        _add_row(cl, ["H"], "Hide the selected neurons")
+        _add_row(cl, ["⌥", "H"], "Show all hidden neurons")
         _add_row(cl, ["⌘", "C"], "Copy selected IDs to the clipboard")
 
         _add_section(cl, "Tabs")
@@ -3260,6 +3278,24 @@ class MainWindow(QMainWindow):
             fig.selected = inverted
         except Exception as e:
             logger.debug(f"Invert Selection failed: {e}")
+
+    def on_hide_selection(self):
+        """Hide the selected neurons (fold them out of the scope)."""
+        try:
+            controls = self.current_view().fig_scatter.controls
+            if controls is not None:
+                controls.hide_selection()
+        except Exception as e:
+            logger.debug(f"Hide Selection failed: {e}")
+
+    def on_show_hidden(self):
+        """Reveal all previously hidden neurons."""
+        try:
+            controls = self.current_view().fig_scatter.controls
+            if controls is not None:
+                controls.show_hidden()
+        except Exception as e:
+            logger.debug(f"Show Hidden failed: {e}")
 
     def on_open_in_neuroglancer(self):
         """Generate a Neuroglancer scene from current viewer state."""

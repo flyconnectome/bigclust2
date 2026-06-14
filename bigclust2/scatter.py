@@ -160,6 +160,13 @@ class ScatterFigure(BaseFigure):
         )
         self.key_events["Escape"] = lambda: self.deselect_all()
         self.key_events["l"] = lambda: self.toggle_labels()
+
+        def _hide_selection():
+            """Hide the selected neurons via the scope (see ScatterControls)."""
+            if self.controls is not None:
+                self.controls.hide_selection()
+
+        self.key_events["h"] = _hide_selection
         # Space cycles through the available embeddings (the Qt rendercanvas key
         # map has no entry for the space bar, so it arrives as " ").
         self.key_events[" "] = lambda: self._cycle_embedding()

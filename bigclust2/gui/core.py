@@ -1680,6 +1680,12 @@ class MainWindow(QMainWindow):
         )
         export_embedding_menu.addAction(export_embedding_plotly_dashboard_action)
 
+        export_menu.addSeparator()
+
+        export_project_action = QAction("Project", self)
+        export_project_action.triggered.connect(self.on_export_project)
+        export_menu.addAction(export_project_action)
+
         # Window menu with Zoom and Minimize
         window_menu = menu_bar.addMenu("Window")
 
@@ -3826,6 +3832,80 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.error(f"Failed to export embedding dashboard to Plotly HTML: {e}")
             fig.show_message("Export failed", color="red", duration=3)
+
+    @staticmethod
+    def _safe_dirname(name):
+        """Sanitize a project name into a single safe directory component."""
+        name = str(name or "").strip().replace("/", "_").replace("\\", "_")
+        return name or "project"
+
+    def on_export_project(self):
+        """Save a local snapshot of the loaded project to a chosen folder.
+
+        Copies the project's ``info`` file plus the referenced data files
+        (downloading them when the project is remote) into a subfolder named
+        after the project, producing a re-openable BigClust project directory.
+        """
+        loader = self._current_project_loader
+        fig = self.current_view().fig_scatter
+        if loader is None:
+            logger.info("No project loaded to export")
+            fig.show_message("No project loaded", color="red", duration=3)
+            return
+
+        folder = QFileDialog.getExistingDirectory(self, "Export Project Snapshot")
+        if not folder:
+            return
+
+        dest = Path(folder) / self._safe_dirname(getattr(loader, "name", "project"))
+
+        def run(overwrite):
+            progress = QProgressDialog("Exporting project...", None, 0, 100, self)
+            progress.setWindowModality(Qt.ApplicationModal)
+            progress.setAutoClose(True)
+            progress.setCancelButton(None)
+            progress.show()
+            progress.setValue(0)
+            QApplication.processEvents()
+
+            def cb(done, total, name):
+                progress.setValue(int(done / max(total, 1) * 100))
+                if name:
+                    progress.setLabelText(f"Copying {name}...")
+                QApplication.processEvents()
+
+            try:
+                loader.save_snapshot(dest, overwrite=overwrite, progress_callback=cb)
+            finally:
+                progress.close()
+
+        from PySide6.QtWidgets import QMessageBox
+
+        try:
+            run(overwrite=False)
+        except FileExistsError:
+            answer = QMessageBox.question(
+                self,
+                "Overwrite?",
+                f"{dest} already exists and is not empty.\nOverwrite its contents?",
+            )
+            if answer != QMessageBox.Yes:
+                return
+            try:
+                run(overwrite=True)
+            except Exception as e:
+                logger.error(f"Failed to export project snapshot: {e}")
+                fig.show_message("Export failed", color="red", duration=3)
+                QMessageBox.critical(self, "Export failed", str(e))
+                return
+        except Exception as e:
+            logger.error(f"Failed to export project snapshot: {e}")
+            fig.show_message("Export failed", color="red", duration=3)
+            QMessageBox.critical(self, "Export failed", str(e))
+            return
+
+        logger.info(f"Exported project snapshot to {dest}")
+        fig.show_message("Exported project snapshot", color="green", duration=2)
 
     def show_open_project_dialog(self):
         """Show the open project dialog and load the selected project."""

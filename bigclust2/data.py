@@ -2,6 +2,7 @@ import cmap
 import json
 import logging
 import requests
+import shutil
 
 import numpy as np
 import pandas as pd
@@ -432,6 +433,117 @@ class SingleProjectLoader(BaseProjectLoader):
                 )
             return file
         return value
+
+    def referenced_files(self):
+        """Return the data files referenced by `info` (relative path strings).
+
+        The returned list is deduplicated and excludes the ``info`` file itself
+        as well as external ``neuroglancer`` resources (3D segmentation sources
+        and meshes), which are intentionally left as remote references. The
+        order is meta first, then embeddings and their paired feature/distance
+        files.
+        """
+        files = []
+
+        def add(f):
+            if f is not None and f not in files:
+                files.append(f)
+
+        # meta is required (REQ_VALUES = ["meta"]) and is always a file.
+        add(self._get_file_spec("meta"))
+
+        # Embeddings and their paired high-dimensional sources. This also sets
+        # `self._orphan_sources` as a side effect.
+        for spec in self.normalized_embedding_specs:
+            # `emb_file` is None when the embedding lives in `meta` columns.
+            add(spec["emb_file"])
+            if spec["feat_spec"] is not None:
+                add(self._spec_to_file(spec["feat_spec"], key="features"))
+            if spec["dist_spec"] is not None:
+                # A KNN graph is a regular file too, so copy it like any other.
+                add(self._spec_to_file(spec["dist_spec"], key="distances"))
+
+        # Project declares top-level features/distances but no embeddings, so
+        # `normalized_embedding_specs` returned [] and missed them.
+        if getattr(self, "_orphan_sources", False):
+            add(self._spec_to_file(self.info.get("features"), key="features"))
+            add(self._spec_to_file(self.info.get("distances"), key="distances"))
+
+        return files
+
+    def save_snapshot(self, dest, *, overwrite=False, progress_callback=None):
+        """Write a self-contained local copy of this project to `dest`.
+
+        Copies the ``info`` file plus every file from `referenced_files`,
+        streaming downloads from the remote source when `is_remote`. The result
+        is a valid BigClust project directory that can be re-opened later. The
+        ``neuroglancer`` block in ``info`` is preserved verbatim, so external 3D
+        resources stay referenced remotely.
+
+        Parameters
+        ----------
+        dest : str | Path
+            Destination directory for the snapshot.
+        overwrite : bool
+            If False (default), raise ``FileExistsError`` when `dest` already
+            exists and is not empty.
+        progress_callback : callable, optional
+            Called as ``progress_callback(done_count, total_count, filename)``
+            before copying each file (and once more at the end with
+            ``done_count == total_count`` and an empty filename).
+
+        Returns
+        -------
+        Path
+            The destination directory.
+        """
+        dest = Path(dest)
+        files = ["info"] + self.referenced_files()
+        total = len(files)
+
+        # Guard before writing anything so we don't clobber an existing project.
+        if dest.exists() and any(dest.iterdir()) and not overwrite:
+            raise FileExistsError(f"Destination is not empty: {dest}")
+
+        dest.mkdir(parents=True, exist_ok=True)
+
+        for i, rel in enumerate(files):
+            if progress_callback is not None:
+                progress_callback(i, total, rel)
+
+            target = dest / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+
+            if rel == "info":
+                # Write the in-memory info dict verbatim (works for remote
+                # sources too and keeps the neuroglancer block intact).
+                with open(target, "w") as f:
+                    json.dump(self.info, f, indent=2)
+                continue
+
+            if self.is_remote:
+                src_url = str(self.path / rel)
+                try:
+                    with requests.get(src_url, stream=True) as resp:
+                        resp.raise_for_status()
+                        with open(target, "wb") as fh:
+                            for chunk in resp.iter_content(chunk_size=1024 * 1024):
+                                if chunk:
+                                    fh.write(chunk)
+                except BaseException:
+                    # Don't leave a half-written file behind.
+                    if target.exists():
+                        target.unlink()
+                    raise
+            else:
+                src_path = self.path / rel
+                if not src_path.exists():
+                    raise FileNotFoundError(f"Referenced file not found: {src_path}")
+                shutil.copy2(str(src_path), str(target))
+
+        if progress_callback is not None:
+            progress_callback(total, total, "")
+        return dest
 
     @property
     def normalized_embedding_specs(self):

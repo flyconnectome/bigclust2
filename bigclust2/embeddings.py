@@ -111,6 +111,29 @@ def is_precomputed_distance_matrix(arr):
     return True
 
 
+def estimate_embedding_input_bytes(data):
+    """Estimate the in-memory footprint (bytes) of the embedding input.
+
+    Cost scales very differently by source: a precomputed distance matrix is
+    O(N^2), feature vectors O(N*D) and a KNN graph O(N*k). Returns ``(n, bytes)``
+    where ``n`` is the number of points being embedded.
+    """
+    if is_knn_graph(data):
+        n = len(data)
+        # indices (int64) + dists (float64) -> 16 bytes per stored edge.
+        return n, int(n) * int(data.k) * 16
+    # ndarrays and pandas DataFrames both expose shape/size/ndim, so duck-type
+    # rather than importing pandas (this module stays numpy/sklearn-only).
+    if data is None or not hasattr(data, "shape") or getattr(data, "ndim", 0) < 1:
+        return 0, 0
+    n = int(data.shape[0])
+    # data.size already equals N*N for a square distance matrix and N*D for
+    # features, so no per-type branch is needed. DataFrames have no `.dtype`,
+    # so itemsize falls back to 8 (float64) -- a safe, slightly high estimate.
+    itemsize = getattr(getattr(data, "dtype", None), "itemsize", 8) or 8
+    return n, int(data.size) * itemsize
+
+
 def rebalance_feature_matrix(arr, mode="none"):
     """Apply feature rebalancing to reduce dominance of individual dimensions."""
     data = np.asarray(arr, dtype=np.float64)

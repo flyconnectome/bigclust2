@@ -11,6 +11,7 @@ from PySide6 import QtWidgets, QtCore, QtGui
 from concurrent.futures import ThreadPoolExecutor
 
 from ...embeddings import (
+    estimate_embedding_input_bytes,
     is_knn_graph,
     is_precomputed_distance_matrix,
     make_embedding_estimator,
@@ -30,6 +31,10 @@ HB_ANN = None
 
 logger = logging.getLogger(__name__)
 
+
+# Re-embedding inputs larger than this trigger a confirmation dialog, since the
+# computation can exhaust memory / hang the machine on large datasets.
+EMBEDDING_INPUT_WARN_BYTES = 2 * 1024**3  # ~2 GiB
 
 CLUSTER_DATA_EMBEDDING_OPTION = "embedding (2D)"
 CLUSTER_DATA_OPTION = "cluster (bigclust)"
@@ -4958,6 +4963,37 @@ class ScatterControls(QtWidgets.QWidget):
             "Link copied to clipboard", color="lightgreen", duration=2
         )
 
+    def _confirm_large_embedding(self, data):
+        """Confirm before re-embedding when the input data is large enough to
+        risk exhausting memory / hanging the machine. Returns True to proceed."""
+        n, est_bytes = estimate_embedding_input_bytes(data)
+        if est_bytes <= EMBEDDING_INPUT_WARN_BYTES:
+            return True
+
+        gib = est_bytes / 1024**3
+        dialog = QtWidgets.QDialog(self)
+        dialog.setWindowTitle("Confirm re-embedding")
+        dialog.setModal(True)
+        layout = QtWidgets.QVBoxLayout(dialog)
+        layout.setContentsMargins(20, 18, 20, 14)
+        layout.setSpacing(14)
+        msg = QtWidgets.QLabel(
+            f"Re-computing the embedding for <b>{n:,}</b> neurons will process "
+            f"roughly <b>{gib:.1f} GB</b> of data and may use a large amount of "
+            f"memory and time.<br><br>Continue?"
+        )
+        msg.setWordWrap(True)
+        layout.addWidget(msg)
+        buttons = QtWidgets.QDialogButtonBox()
+        no_btn = buttons.addButton(QtWidgets.QDialogButtonBox.No)
+        yes_btn = buttons.addButton(QtWidgets.QDialogButtonBox.Yes)
+        no_btn.clicked.connect(dialog.reject)
+        yes_btn.clicked.connect(dialog.accept)
+        no_btn.setDefault(True)  # safe default = cancel
+        layout.addWidget(buttons)
+        dialog.setMinimumWidth(340)
+        return dialog.exec() == QtWidgets.QDialog.Accepted
+
     def calculate_embeddings(self):
         """Re-calculate embeddings and move points to their new positions."""
         dists = self._selected_embedding_data()
@@ -4967,6 +5003,8 @@ class ScatterControls(QtWidgets.QWidget):
         # KNN graph: feed neighbors straight into UMAP/t-SNE (bypassing the
         # feature-vector preprocessing, which would densify the sparse input).
         if is_knn_graph(dists):
+            if not self._confirm_large_embedding(dists):
+                return
             self._calculate_embeddings_from_knn(dists)
             return
 
@@ -4981,6 +5019,9 @@ class ScatterControls(QtWidgets.QWidget):
                 color="red",
                 duration=3,
             )
+            return
+
+        if not self._confirm_large_embedding(dists):
             return
 
         is_precomputed = is_precomputed_distance_matrix(dists)

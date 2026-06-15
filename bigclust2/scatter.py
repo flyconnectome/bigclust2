@@ -780,9 +780,51 @@ class ScatterFigure(BaseFigure):
         if confirm is not None and not confirm(len(new_selected)):
             return
 
+        # Describe how wide a net was cast (uses the pre-grow selection).
+        reach_note = self._gs_reach_note(gs, added, source, metric)
+
         self._gs_history.append(np.asarray(self._selected, dtype=int))
         self._gs_apply(new_selected)
-        self.show_message(f"Selection grown by {len(added):,}", duration=1.5)
+        self.show_message(
+            f"Selection grown by {len(added):,}{reach_note}", duration=1.5
+        )
+
+    def _gs_reach_note(self, gs, added, source, metric):
+        """A ``" (reach R× spacing)"`` suffix describing how far the grow reached.
+
+        ``reach`` is the farthest newly-added point's distance to the (pre-grow)
+        selection; ``spacing`` is the median nearest-neighbour distance *within*
+        that selection. The ratio is unit-free, so it reads consistently across
+        distance sources. Returns ``""`` when spacing can't be derived (a single
+        selected point, or a KNN selection with no internal edges) so the message
+        degrades to just the count. Never raises — a stats hiccup must not break
+        the (already-applied) grow.
+        """
+        try:
+            score = gs.nearest_distance_to_selection(
+                self._selected,
+                source=source,
+                positions=self.positions,
+                dists=self.dists,
+                metric=metric,
+            )
+            reach = float(np.max(score[added]))
+            within = gs.within_selection_neighbor_distances(
+                self._selected,
+                source=source,
+                positions=self.positions,
+                dists=self.dists,
+                metric=metric,
+            )
+            finite = within[np.isfinite(within)]
+            if not finite.size:
+                return ""
+            spacing = float(np.median(finite))
+            if spacing <= 0:
+                return ""
+            return f" (reach {reach / spacing:.2g}× spacing)"
+        except gs.GrowShrinkUnavailable:
+            return ""
 
     def _grow_threshold(self, gs, source, metric):
         """Indices to add for a one-shot similarity grow.

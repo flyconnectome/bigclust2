@@ -891,7 +891,7 @@ class DVIDMesh:
             print(f" Failed to load mesh for {x} - falling back to alternative service")
             # If the mesh is missing, try the alternative service
             # This is slower but should mesh the neuron from scratch
-            url = f"https://ngsupport-bmcp5imp6q-uk.a.run.app/small-mesh?dvid=https://emdata-mcns.janelia.org&uuid={self.node}&body={x}&segmentation=segmentation"
+            url = f"https://ngsupport-bmcp5imp6q-uk.a.run.app/small-mesh?dvid={self.server}&uuid={self.node}&body={x}&segmentation=segmentation"
             r = requests.get(url)
             r.raise_for_status()
             m = dv.decode.read_ngmesh(r.content)

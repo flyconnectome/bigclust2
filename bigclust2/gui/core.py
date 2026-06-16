@@ -47,7 +47,7 @@ from ..meta_sources import ensure_meta_dict, source_entry_datasets, parse_meta_s
 from .controls import ScatterControls
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
-from .widgets.features import FeatureExplorerWidget
+from .widgets.features import FeatureComparisonWidget
 from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
@@ -199,7 +199,7 @@ class MainWidget(QWidget):
         # Connectivity/feature widgets are keyed by embedding so each embedding
         # gets its own widget (showing that embedding's features).
         self._connectivity_widgets = {}
-        self._feature_explorer_widgets = {}
+        self._feature_comparison_widgets = {}
         self._annotation_dialog = None
         self._meta_explorer_dialog = None
         self._meta_sources_dialog = None
@@ -220,7 +220,7 @@ class MainWidget(QWidget):
         """
         candidates = [
             *self._connectivity_widgets.values(),
-            *self._feature_explorer_widgets.values(),
+            *self._feature_comparison_widgets.values(),
             self._meta_explorer_dialog,
             self._meta_sources_dialog,
             *self._distance_widgets,
@@ -1299,7 +1299,7 @@ class MainWindow(QMainWindow):
         self.open_recent_menu = None
         self.connectivity_table_action = None
         self.distances_table_action = None
-        self.feature_explorer_action = None
+        self.feature_comparison_action = None
         self.meta_explorer_action = None
         self.sync_viewer_action = None
         self._hover_columns_menu = None
@@ -1491,11 +1491,11 @@ class MainWindow(QMainWindow):
         self.distances_table_action.triggered.connect(self.show_distances_table)
         view_menu.addAction(self.distances_table_action)
 
-        self.feature_explorer_action = QAction("Feature Explorer", self)
-        self.feature_explorer_action.setShortcut(QKeySequence("Shift+Meta+F"))
-        self.feature_explorer_action.setEnabled(False)
-        self.feature_explorer_action.triggered.connect(self.show_feature_explorer)
-        view_menu.addAction(self.feature_explorer_action)
+        self.feature_comparison_action = QAction("Feature Comparison", self)
+        self.feature_comparison_action.setShortcut(QKeySequence("Shift+Meta+F"))
+        self.feature_comparison_action.setEnabled(False)
+        self.feature_comparison_action.triggered.connect(self.show_feature_comparison)
+        view_menu.addAction(self.feature_comparison_action)
 
         self.meta_explorer_action = QAction("Meta Data Explorer", self)
         self.meta_explorer_action.setShortcut(QKeySequence("Shift+Meta+M"))
@@ -2475,8 +2475,8 @@ class MainWindow(QMainWindow):
 
         return dists.shape[0] == dists.shape[1]
 
-    def _can_open_feature_explorer(self):
-        """Whether the feature explorer can be opened for the current project."""
+    def _can_open_feature_comparison(self):
+        """Whether the feature comparison can be opened for the current project."""
         if not hasattr(self, "_data") or not isinstance(self._data, dict):
             return False
 
@@ -2505,8 +2505,8 @@ class MainWindow(QMainWindow):
             )
         if self.distances_table_action is not None:
             self.distances_table_action.setEnabled(self._can_open_distances_table())
-        if self.feature_explorer_action is not None:
-            self.feature_explorer_action.setEnabled(self._can_open_feature_explorer())
+        if self.feature_comparison_action is not None:
+            self.feature_comparison_action.setEnabled(self._can_open_feature_comparison())
         if self.meta_explorer_action is not None:
             self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
 
@@ -2585,13 +2585,13 @@ class MainWindow(QMainWindow):
             lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
         )
 
-    def show_feature_explorer(self):
-        """Open the Feature Explorer for the active embedding of the current view.
+    def show_feature_comparison(self):
+        """Open the Feature Comparison for the active embedding of the current view.
 
-        Cached per embedding so each embedding gets its own explorer (showing
+        Cached per embedding so each embedding gets its own widget (showing
         that embedding's features).
         """
-        if not self._can_open_feature_explorer():
+        if not self._can_open_feature_comparison():
             return
 
         view = self.current_view()
@@ -2600,13 +2600,13 @@ class MainWindow(QMainWindow):
 
         key, emb_name = self._active_embedding_key(view)
 
-        existing = view._feature_explorer_widgets.get(key)
+        existing = view._feature_comparison_widgets.get(key)
         if existing is not None:
             try:
                 self._present_aux_widget(existing)
                 return
             except RuntimeError:
-                view._feature_explorer_widgets.pop(key, None)
+                view._feature_comparison_widgets.pop(key, None)
 
         data = view._data if isinstance(view._data, dict) else {}
         features = data.get("features")
@@ -2614,7 +2614,7 @@ class MainWindow(QMainWindow):
         if features is None or meta_data is None:
             return
 
-        widget = FeatureExplorerWidget(
+        widget = FeatureComparisonWidget(
             metadata=meta_data,
             features=features,
             figure=view.fig_scatter,
@@ -2622,17 +2622,17 @@ class MainWindow(QMainWindow):
         )
         widget.setAttribute(Qt.WA_DeleteOnClose, True)
         widget.setWindowFlag(Qt.Window, True)
-        title = "Feature Explorer"
+        title = "Feature Comparison"
         if emb_name:
-            title = f"Feature Explorer — {emb_name}"
+            title = f"Feature Comparison — {emb_name}"
         widget.setWindowTitle(title)
         self._register_aux_widget(view, widget)
         # widget.resize(1100, 700)
         widget.show()
 
-        view._feature_explorer_widgets[key] = widget
+        view._feature_comparison_widgets[key] = widget
         widget.destroyed.connect(
-            lambda _obj=None, v=view, k=key: v._feature_explorer_widgets.pop(k, None)
+            lambda _obj=None, v=view, k=key: v._feature_comparison_widgets.pop(k, None)
         )
 
     def show_meta_explorer(self):
@@ -2799,7 +2799,7 @@ class MainWindow(QMainWindow):
         if view is None:
             return
         self._dispose_connectivity_widget(view)
-        self._dispose_feature_explorer_widget(view)
+        self._dispose_feature_comparison_widget(view)
         self._dispose_annotation_dialog(view)
         self._dispose_meta_explorer_dialog(view)
         self._dispose_meta_sources_dialog(view)
@@ -2819,10 +2819,10 @@ class MainWindow(QMainWindow):
                 # Qt object may already be deleted.
                 pass
 
-    def _dispose_feature_explorer_widget(self, view):
-        """Dispose all of a view's feature explorer widgets."""
-        widgets = list(view._feature_explorer_widgets.values())
-        view._feature_explorer_widgets = {}
+    def _dispose_feature_comparison_widget(self, view):
+        """Dispose all of a view's feature comparison widgets."""
+        widgets = list(view._feature_comparison_widgets.values())
+        view._feature_comparison_widgets = {}
         for widget in widgets:
             try:
                 widget.close()

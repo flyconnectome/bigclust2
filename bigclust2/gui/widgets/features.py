@@ -533,8 +533,8 @@ class _ClusterEvaluationDialog(QtWidgets.QDialog):
         self.warning_label.show()
 
 
-class FeatureExplorerWidget(QtWidgets.QWidget):
-    """Explore feature ranking UI."""
+class FeatureComparisonWidget(QtWidgets.QWidget):
+    """Compare features between two groups of neurons and rank what separates them."""
 
     def __init__(
         self,
@@ -593,12 +593,12 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
         root.setContentsMargins(12, 12, 12, 12)
         root.setSpacing(10)
 
-        title = QtWidgets.QLabel("Connection Feature Ranking")
+        title = QtWidgets.QLabel("Feature Comparison")
         title.setStyleSheet("font-size: 18px; font-weight: 600;")
         root.addWidget(title)
 
         self.subtitle = QtWidgets.QLabel(
-            "Compare two neuron groups and rank connections that best" " separate them."
+            "Compare two neuron groups and rank features that best separate them."
         )
         self.subtitle.setWordWrap(True)
         self.subtitle.setStyleSheet("color: #555;")
@@ -2137,7 +2137,7 @@ class FeatureExplorerWidget(QtWidgets.QWidget):
 
         feature_shape = self.features.shape
         self.subtitle.setText(
-            "Compare two neuron groups and rank connections that best "
+            "Compare two neuron groups and rank features that best "
             f"separate them. Full feature matrix: {feature_shape[0]} x {feature_shape[1]}."
         )
 
@@ -3683,10 +3683,10 @@ def _run_prototype_app():
     app = QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
     window = QtWidgets.QMainWindow()
-    window.setWindowTitle("FeatureExplorerWidget Prototype")
+    window.setWindowTitle("FeatureComparisonWidget Prototype")
     # window.resize(980, 640)
 
-    feature_widget = FeatureExplorerWidget(
+    feature_widget = FeatureComparisonWidget(
         metadata=meta,
         features=filtered_features,
     )

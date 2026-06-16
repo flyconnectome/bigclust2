@@ -7,6 +7,13 @@ from PySide6.QtCore import Qt
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
 
+from bigclust2.embeddings import distance_matrix_from_features
+
+# Feature mode computes distances for the current selection only. Beyond this
+# many neurons both the O(k^2) compute and the QTableView render are too heavy,
+# so we show a hint instead of computing.
+MAX_HEATMAP_SELECTION = 5000
+
 
 class RotatedHeaderView(QtWidgets.QHeaderView):
     """Horizontal header that renders section labels rotated by 90 degrees."""
@@ -232,6 +239,20 @@ class TableModel(QtCore.QAbstractTableModel):
         self.update_indices()
         self.layoutChanged.emit()
 
+    def set_view(self, view_df):
+        """Display a precomputed matrix directly.
+
+        Feature mode hands in a freshly computed selection submatrix; keeping
+        ``_data == view_df`` (in selection order) lets the Labels/Ordering
+        dropdowns re-slice it via ``select_rows`` without recomputing.
+        """
+        self._data = view_df
+        self._selected_ids = view_df.index
+        self._view = view_df
+        self._apply_ordering()
+        self.update_indices()
+        self.layoutChanged.emit()
+
     def set_row_labels(self, col):
         self._row_labels = col
         self.select_rows(self._selected_ids)
@@ -310,20 +331,41 @@ class DistancesTable(QtWidgets.QWidget):
 
     def __init__(
         self,
-        distances,
-        meta_data,
+        distances=None,
+        meta_data=None,
         figure=None,
         width=720,
         height=520,
         title="Distance heatmap",
         parent=None,
+        *,
+        features=None,
+        metric="cosine",
+        normalize=False,
     ):
         super().__init__(parent, Qt.Window)
 
         self._figure = figure
         self._meta_data = meta_data.copy()
-        self._data = self._prepare_distances(distances, self._meta_data)
-        self._meta_data = self._meta_data.set_index("id").loc[self._data.index].copy()
+        self._features = features
+        # Feature mode: no precomputed matrix; distances are computed on-the-fly
+        # for the current selection only (never the full N x N matrix).
+        self._feature_mode = distances is None and features is not None
+        self._selected_positions = np.array([], dtype=int)
+
+        if self._feature_mode:
+            # Row order of ids/features; selection positions index into this so
+            # the computed submatrix stays positionally aligned with scatter.
+            self._row_ids = pd.Index(self._meta_data["id"].values)
+            self._meta_data = self._meta_data.set_index("id").copy()
+            # Empty placeholder; the model's view is filled per selection.
+            self._data = pd.DataFrame()
+        else:
+            self._row_ids = None
+            self._data = self._prepare_distances(distances, self._meta_data)
+            self._meta_data = (
+                self._meta_data.set_index("id").loc[self._data.index].copy()
+            )
 
         self.setWindowTitle(title)
         self.resize(width, height)
@@ -365,8 +407,47 @@ class DistancesTable(QtWidgets.QWidget):
 
         self._layout.addWidget(self._table, 1)
 
+        # Shown in place of the table when a feature-mode selection exceeds the
+        # soft cap (computing/rendering it would be prohibitive).
+        self._oversize_label = None
+        if self._feature_mode:
+            self._oversize_label = QtWidgets.QLabel()
+            self._oversize_label.setAlignment(Qt.AlignCenter)
+            self._oversize_label.setWordWrap(True)
+            self._oversize_label.setStyleSheet("color: #777; font-size: 13px;")
+            self._oversize_label.hide()
+            self._layout.addWidget(self._oversize_label, 1)
+
         self._table.horizontalHeader().sectionDoubleClicked.connect(self.find_header)
         self._table.verticalHeader().sectionDoubleClicked.connect(self.find_index)
+
+        self._compute_group = None
+        if self._feature_mode:
+            self._compute_group = QtWidgets.QGroupBox("Compute")
+            compute_form = QtWidgets.QFormLayout()
+            compute_form.setContentsMargins(6, 6, 6, 6)
+            compute_form.setVerticalSpacing(4)
+            compute_form.setHorizontalSpacing(6)
+            self._compute_group.setLayout(compute_form)
+
+            self._metric_dropdown = QtWidgets.QComboBox()
+            self._metric_dropdown.addItems(
+                ["euclidean", "cosine", "manhattan", "correlation", "chebyshev"]
+            )
+            self._metric_dropdown.setCurrentText(metric)
+            self._metric_dropdown.setToolTip(
+                "Distance metric used to compute the heatmap from feature vectors"
+            )
+            self._metric_dropdown.currentIndexChanged.connect(self.recompute_distances)
+            compute_form.addRow("Metric:", self._metric_dropdown)
+
+            self._normalize_check = QtWidgets.QCheckBox("Normalize per neuron")
+            self._normalize_check.setChecked(normalize)
+            self._normalize_check.setToolTip(
+                "Normalize each neuron's feature vector (row-wise) before computing distances"
+            )
+            self._normalize_check.stateChanged.connect(self.recompute_distances)
+            compute_form.addRow(self._normalize_check)
 
         controls_group = QtWidgets.QGroupBox("Display")
         controls_form = QtWidgets.QFormLayout()
@@ -430,13 +511,17 @@ class DistancesTable(QtWidgets.QWidget):
         self._copy_button = QtWidgets.QPushButton("Copy table to clipboard")
         self._copy_button.clicked.connect(self.copy_to_clipboard)
 
+        if self._compute_group is not None:
+            control_layout.addWidget(self._compute_group)
         control_layout.addWidget(controls_group)
         control_layout.addStretch()
         control_layout.addWidget(self._copy_button)
 
-        if self._figure is not None and self._figure.selected_ids is not None:
-            if len(self._figure.selected_ids) > 0:
-                self.select(self._figure.selected_ids)
+        # ``selected`` holds integer point positions (what the sync path passes
+        # to select); seed from it so positions map correctly here too.
+        if self._figure is not None and self._figure.selected is not None:
+            if len(self._figure.selected) > 0:
+                self.select(self._figure.selected)
 
         self.update_cell_size()
 
@@ -459,6 +544,74 @@ class DistancesTable(QtWidgets.QWidget):
             raise ValueError("meta_data length does not match distances shape")
 
         return pd.DataFrame(distances, index=ids, columns=ids)
+
+    def _compute_selection_submatrix(self, positions):
+        """Distance matrix among only the selected rows, under a busy cursor.
+
+        ``positions`` are integer point positions; slicing features and ids by
+        the same positions keeps the result positionally aligned with scatter.
+        """
+        metric = self._metric_dropdown.currentText()
+        normalize = self._normalize_check.isChecked()
+        feat_sub = self._features.iloc[positions]
+        ids_sub = self._row_ids[positions]
+        QtWidgets.QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            return distance_matrix_from_features(
+                feat_sub, ids_sub, metric=metric, normalize=normalize
+            )
+        finally:
+            QtWidgets.QApplication.restoreOverrideCursor()
+
+    def _show_oversize_hint(self, n):
+        """Show the oversize hint (n > cap) instead of the table, or hide it."""
+        if self._oversize_label is None:
+            return
+        if n is None:
+            self._oversize_label.hide()
+            self._table.show()
+            return
+        self._oversize_label.setText(
+            f"Selection too large ({n:,} neurons).\n"
+            f"Select ≤ {MAX_HEATMAP_SELECTION:,} to view the distance heatmap."
+        )
+        self._table.hide()
+        self._oversize_label.show()
+
+    def _select_features(self, indices):
+        """Feature mode: compute and display distances for the selection only."""
+        positions = np.asarray(list(indices), dtype=int)
+        self._selected_positions = positions
+
+        if positions.size == 0:
+            self._show_oversize_hint(None)
+            self._model.set_view(pd.DataFrame())
+            return
+
+        if positions.size > MAX_HEATMAP_SELECTION:
+            self._model.set_view(pd.DataFrame())
+            self._show_oversize_hint(int(positions.size))
+            return
+
+        self._show_oversize_hint(None)
+        try:
+            sub = self._compute_selection_submatrix(positions)
+        except ValueError:
+            # No numeric feature columns survive for this subset.
+            self._model.set_view(pd.DataFrame())
+            return
+        self._model.set_view(sub)
+
+    def recompute_distances(self, *args, **kwargs):
+        """Recompute the current selection's distances with the live metric/normalize.
+
+        No-op for a precomputed distance matrix (the Compute controls only exist
+        in feature mode).
+        """
+        if not self._feature_mode:
+            return
+        self.select(self._selected_positions)
+        self.update_cell_size()
 
     def update_row_labels(self, *args, **kwargs):
         self._model.set_row_labels(self._row_label_dropdown.currentText())
@@ -526,7 +679,10 @@ class DistancesTable(QtWidgets.QWidget):
         self.show()
 
     def select(self, indices):
-        self._model.select_rows(indices, use_index=False)
+        if self._feature_mode:
+            self._select_features(indices)
+        else:
+            self._model.select_rows(indices, use_index=False)
 
     def find_header(self):
         curr_col = self._table.currentIndex().column()

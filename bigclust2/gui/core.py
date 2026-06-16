@@ -58,6 +58,16 @@ from ..embeddings import KNNGraph
 from ..__version__ import __version__
 
 
+def _is_square_matrix(arr):
+    """True if ``arr`` is a 2D square matrix (DataFrame or ndarray)."""
+    return (
+        arr is not None
+        and hasattr(arr, "shape")
+        and len(arr.shape) == 2
+        and arr.shape[0] == arr.shape[1]
+    )
+
+
 __all__ = ["MainWindow", "MainWidget", "main"]
 
 
@@ -2465,15 +2475,23 @@ class MainWindow(QMainWindow):
         return features.shape[0] > 0 and features.shape[1] > 0
 
     def _can_open_distances_table(self):
-        """Whether the distance heatmap can be opened for the current project."""
+        """Whether the distance heatmap can be opened for the current project.
+
+        Enabled when the active embedding has a square precomputed distance
+        matrix, or a non-empty feature table with at least one numeric column
+        (the heatmap is then computed on-the-fly from the features).
+        """
         if not hasattr(self, "_data") or not isinstance(self._data, dict):
             return False
 
-        dists = self._data.get("distances")
-        if dists is None or not hasattr(dists, "shape") or len(dists.shape) != 2:
-            return False
+        if _is_square_matrix(self._data.get("distances")):
+            return True
 
-        return dists.shape[0] == dists.shape[1]
+        features = self._data.get("features")
+        if isinstance(features, pd.DataFrame) and not features.empty:
+            return features.select_dtypes(include="number").shape[1] > 0
+
+        return False
 
     def _can_open_feature_comparison(self):
         """Whether the feature comparison can be opened for the current project."""
@@ -3072,10 +3090,19 @@ class MainWindow(QMainWindow):
 
         data = view._data if isinstance(view._data, dict) else {}
         distances = data.get("distances")
+        features = data.get("features")
         meta_data = data.get("meta")
         fig = view.fig_scatter
 
-        if distances is None or meta_data is None:
+        if meta_data is None:
+            return
+
+        # A square precomputed matrix always wins (zero regression); otherwise
+        # fall back to computing the heatmap on-the-fly from features. Feature
+        # mode computes distances per-selection, so opening is cheap (no guard).
+        has_matrix = _is_square_matrix(distances)
+        use_features = not has_matrix and features is not None
+        if not has_matrix and not use_features:
             return
 
         _key, emb_name = self._active_embedding_key(view)
@@ -3083,13 +3110,23 @@ class MainWindow(QMainWindow):
         if emb_name:
             title = f"Distance heatmap — {emb_name}"
 
-        widget = DistancesTable(
-            distances,
-            figure=fig,
-            meta_data=meta_data,
-            title=title,
-            parent=self,
-        )
+        if use_features:
+            widget = DistancesTable(
+                distances=None,
+                features=features,
+                figure=fig,
+                meta_data=meta_data,
+                title=title,
+                parent=self,
+            )
+        else:
+            widget = DistancesTable(
+                distances,
+                figure=fig,
+                meta_data=meta_data,
+                title=title,
+                parent=self,
+            )
         self._register_aux_widget(view, widget)
         fig.sync_widget(widget)
         widget.show()

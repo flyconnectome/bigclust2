@@ -134,6 +134,92 @@ def estimate_embedding_input_bytes(data):
     return n, int(data.size) * itemsize
 
 
+def _normalize_feature_rows(features):
+    """Row-wise normalize a numeric feature DataFrame.
+
+    Divides each row by its total; when columns are a MultiIndex the
+    normalization is applied per top-level group. Qt-free reimplementation of
+    ``FeatureComparisonWidget._normalize_features`` (gui/widgets/features.py).
+    """
+    import pandas as pd
+
+    if isinstance(features.columns, pd.MultiIndex):
+        parts = []
+        for level in features.columns.get_level_values(0).unique():
+            part = (
+                features.loc[:, features.columns.get_level_values(0) == level]
+                .copy()
+                .astype(float)
+            )
+            row_totals = part.sum(axis=1).replace(0, float("nan"))
+            parts.append(part.div(row_totals, axis=0).fillna(0))
+        return pd.concat(parts, axis=1)
+
+    features = features.copy().astype(float)
+    row_totals = features.sum(axis=1).replace(0, float("nan"))
+    return features.div(row_totals, axis=0).fillna(0)
+
+
+def distance_matrix_from_features(features, ids, metric="cosine", normalize=False):
+    """Compute an (N, N) pairwise-distance DataFrame from a feature table.
+
+    ``features`` is a pandas DataFrame whose rows are assumed to be in the same
+    order as ``ids`` (positional alignment with the scatter point order); its
+    columns may be a MultiIndex. The result is indexed by ``ids`` on both axes
+    and is symmetric with a zero diagonal, so it is a drop-in replacement for a
+    precomputed distance matrix.
+
+    Rows are never reindexed by the feature table's own index: position ``i`` in
+    the returned matrix corresponds to ``ids[i]`` (and to scatter point ``i``),
+    which is what the heatmap's positional selection sync relies on. This mirrors
+    ``DistancesTable._prepare_distances`` for ndarray inputs.
+
+    Parameters
+    ----------
+    features : pandas.DataFrame
+        Feature table; non-numeric and all-zero columns are dropped.
+    ids : array-like
+        Row labels (neuron IDs) in row order; used as both index and columns.
+    metric : str
+        Any metric accepted by ``sklearn.metrics.pairwise_distances``.
+    normalize : bool
+        If True, normalize each neuron's feature vector row-wise before
+        computing distances (per top-level group when columns are a MultiIndex).
+    """
+    import pandas as pd
+    from sklearn.metrics import pairwise_distances
+
+    num = features.select_dtypes(include="number")
+
+    # Drop columns that are zero for every row (mirrors
+    # FeatureComparisonWidget._drop_all_zero_feature_columns); improves the
+    # robustness of cosine/correlation distances.
+    if num.shape[1] > 0:
+        all_zero = (num.fillna(0) == 0).all(axis=0)
+        if all_zero.any():
+            num = num.loc[:, ~all_zero]
+
+    if normalize and num.shape[1] > 0:
+        num = _normalize_feature_rows(num)
+
+    # Use ``.values`` positionally so the matrix follows ``ids`` row order, not
+    # the feature table's own index. ``.values`` also flattens a MultiIndex.
+    X = np.asarray(num.values, dtype=np.float64)
+    if X.shape[1] == 0:
+        raise ValueError("no numeric feature columns to compute distances from")
+    if len(ids) != X.shape[0]:
+        raise ValueError("ids length does not match the number of feature rows")
+
+    D = pairwise_distances(X, metric=metric)
+    # cosine/correlation can leave tiny non-zero diagonal values from float
+    # error; force an exact zero diagonal so the matrix reads as precomputed
+    # distances (Hide-diagonal UX and the Linkage squareform path).
+    np.fill_diagonal(D, 0.0)
+
+    index = pd.Index(ids)
+    return pd.DataFrame(D, index=index, columns=index)
+
+
 def rebalance_feature_matrix(arr, mode="none"):
     """Apply feature rebalancing to reduce dominance of individual dimensions."""
     data = np.asarray(arr, dtype=np.float64)

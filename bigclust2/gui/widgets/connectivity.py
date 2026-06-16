@@ -504,7 +504,7 @@ class ConnectivityTable(QtWidgets.QWidget):
         self._synapse_threshold = QtWidgets.QSpinBox()
         self._synapse_threshold.setToolTip("Set the synapse threshold")
         self._synapse_threshold.setRange(0, 1000)
-        self._synapse_threshold.setValue(1)
+        self._synapse_threshold.setValue(0)
         self._synapse_threshold.setSingleStep(1)
         self._synapse_threshold.valueChanged.connect(self.update_synapse_threshold)
         cols_form.addRow("Threshold:", self._synapse_threshold)

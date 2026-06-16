@@ -167,6 +167,22 @@ class ScatterFigure(BaseFigure):
                 self.controls.hide_selection()
 
         self.key_events["h"] = _hide_selection
+
+        def _remove_selection():
+            """Irreversibly remove selected neurons from the current (sub)view.
+
+            Walks up to the hosting window (mirrors `open_selection_in_new_tab`),
+            which guards against removal on the main view.
+            """
+            window = self.canvas.window()
+            while window is not None and not hasattr(
+                window, "on_remove_selection_from_view"
+            ):
+                window = window.parent()
+            if window is not None:
+                window.on_remove_selection_from_view()
+
+        self.key_events["Backspace"] = _remove_selection
         # Space cycles through the available embeddings (the Qt rendercanvas key
         # map has no entry for the space bar, so it arrives as " ").
         self.key_events[" "] = lambda: self._cycle_embedding()

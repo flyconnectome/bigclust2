@@ -205,6 +205,11 @@ class MainWidget(QWidget):
         self.accent_color = None
         self.accent_dot = ""
 
+        # Whether neurons may be irreversibly removed from this view (Backspace).
+        # Only views opened from a selection ("Open in New View") are removable;
+        # the main/original view and plain new-tab views stay protected.
+        self._removable = False
+
         # Per-view auxiliary widgets (created on demand by the main window).
         # Connectivity/feature widgets are keyed by embedding so each embedding
         # gets its own widget (showing that embedding's features).
@@ -1649,6 +1654,14 @@ class MainWindow(QMainWindow):
         show_hidden_action.triggered.connect(self.on_show_hidden)
         selection_menu.addAction(show_hidden_action)
 
+        remove_from_view_action = QAction("Remove from View", self)
+        remove_from_view_action.setShortcut(QKeySequence("Backspace"))
+        # Like "H", the real key trigger lives on the canvas so Backspace isn't
+        # hijacked from text fields; this entry is for discoverability + click.
+        remove_from_view_action.setShortcutContext(Qt.WidgetShortcut)
+        remove_from_view_action.triggered.connect(self.on_remove_selection_from_view)
+        selection_menu.addAction(remove_from_view_action)
+
         selection_menu.addSeparator()
         open_selection_in_new_tab_action = QAction("Open in New View", self)
         open_selection_in_new_tab_action.setShortcut(
@@ -1958,6 +1971,7 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⌘", "−"], "Shrink the selection (undo last grow)")
         _add_row(cl, ["H"], "Hide the selected neurons")
         _add_row(cl, ["⌥", "H"], "Show all hidden neurons")
+        _add_row(cl, ["⌫"], "Remove the selected neurons (selection views only)")
         _add_row(cl, ["⌘", "C"], "Copy selected IDs to the clipboard")
 
         _add_section(cl, "Views")
@@ -3690,19 +3704,23 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Set custom grow threshold factor failed: {e}")
 
-    def _confirm_large_selection(self, n):
-        """Ask the user to confirm a selection of `n` neurons if it is large."""
+    def _confirm_large_selection(self, n, *, message=None, title="Confirm Selection"):
+        """Ask the user to confirm an action on `n` neurons if it is large.
+
+        `message`/`title` let callers reuse this for actions other than
+        selecting (e.g. an irreversible removal).
+        """
         if n <= LARGE_SELECTION_THRESHOLD:
             return True
         dialog = QDialog(self)
-        dialog.setWindowTitle("Confirm Selection")
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
 
         layout = QVBoxLayout(dialog)
         layout.setContentsMargins(20, 18, 20, 14)
         layout.setSpacing(14)
 
-        msg = QLabel(f"Confirm selection of <b>{n:,}</b> neurons?")
+        msg = QLabel(message or f"Confirm selection of <b>{n:,}</b> neurons?")
         msg.setWordWrap(True)
         layout.addWidget(msg)
 
@@ -3767,6 +3785,65 @@ class MainWindow(QMainWindow):
         except Exception as e:
             logger.debug(f"Show Hidden failed: {e}")
 
+    def on_remove_selection_from_view(self):
+        """Irreversibly remove the selected neurons from a selection view."""
+        try:
+            view = self.current_view()
+            if view is None:
+                return
+            fig = view.fig_scatter
+            if not getattr(view, "_removable", False):
+                fig.show_message(
+                    "Neurons can only be removed from a selection view",
+                    color="red",
+                    duration=2,
+                )
+                return
+            if fig.metadata is None or fig.positions is None:
+                return
+            sel = fig.selected
+            sel = (
+                np.asarray(sel, dtype=int)
+                if sel is not None
+                else np.array([], dtype=int)
+            )
+            if sel.size == 0:
+                fig.show_message("No points selected", color="red", duration=2)
+                return
+            keep = np.setdiff1d(np.arange(len(fig)), sel)  # sorted, ascending
+            if keep.size == 0:
+                fig.show_message("Cannot remove all neurons", color="red", duration=2)
+                return
+            if not self._confirm_large_selection(
+                sel.size,
+                message=(
+                    f"Remove <b>{sel.size:,}</b> neurons from this view? "
+                    "This cannot be undone."
+                ),
+                title="Confirm Removal",
+            ):
+                return
+
+            # Hidden neurons survive the prune; remap their indices into the new
+            # (smaller) index space so they stay faded.
+            controls = view.scatter_controls
+            if getattr(controls, "_hidden_idx", None):
+                pos = {int(o): n for n, o in enumerate(keep)}
+                controls._hidden_idx = {pos[i] for i in controls._hidden_idx if i in pos}
+
+            data = self._subset_view_data(view, keep)
+            self._populate_view(view, ngl_source_viewer=view.ngl_viewer, **data)
+            if str(view.view_title).startswith("selection ("):
+                self.set_view_title(view, f"selection ({len(data['meta'])})")
+            self._update_view_actions()
+            fig.show_message(
+                f"Removed {sel.size} neuron{'s' if sel.size != 1 else ''}",
+                color="green",
+                duration=2,
+            )
+        except Exception as e:
+            logger.error(f"Remove from view failed: {e}")
+
     def on_open_in_neuroglancer(self):
         """Generate a Neuroglancer scene from current viewer state."""
         try:
@@ -3795,110 +3872,24 @@ class MainWindow(QMainWindow):
                 logger.info("No figure data available for opening a selection window")
                 return
 
-            selected_meta = (
-                source_fig.metadata.iloc[selected_indices].copy().reset_index(drop=True)
-            )
-
-            def _subset_features(feats):
-                """Subset features to the selection and drop now-empty columns."""
-                feats = feats.iloc[selected_indices]
-                return feats.loc[:, (feats.values.max(axis=0) > 0)].copy()
-
-            # Carry over EVERY embedding (each subset to the selection).
-            source_entries = getattr(source_fig, "embedding_entries", None) or []
-            new_entries = []
-            for entry in source_entries:
-                emb = np.asarray(entry["embedding"])[selected_indices].copy()
-                feats = entry.get("features")
-                if feats is not None:
-                    feats = _subset_features(feats)
-                dists = entry.get("distances")
-                if dists is not None:
-                    dists = dists.iloc[selected_indices, selected_indices].copy()
-                knn = entry.get("knn")
-                if knn is not None:
-                    knn = _subset_knn(knn, selected_indices)
-                new_entries.append(
-                    {
-                        "name": entry["name"],
-                        "embedding": emb,
-                        "features": feats,
-                        "distances": dists,
-                        "knn": knn,
-                        "features_info": entry.get("features_info"),
-                        "distances_info": entry.get("distances_info"),
-                    }
-                )
-
-            active = source_fig.active_embedding
-            active = active if active is not None else 0
-
-            if new_entries:
-                active = active % len(new_entries)
-                active_entry = new_entries[active]
-                selected_points = active_entry["embedding"]
-                selected_distances = active_entry["distances"]
-                selected_features = active_entry["features"]
-                selected_knn = active_entry["knn"]
-            else:
-                # No entry list (shouldn't normally happen): fall back to the
-                # currently displayed positions and active sources.
-                selected_points = np.asarray(source_fig.positions)[
-                    selected_indices
-                ].copy()
-                selected_distances = None
-                selected_features = None
-                selected_knn = None
-                source_matrices = getattr(source_fig, "dists", None)
-                if isinstance(source_matrices, dict):
-                    if source_matrices.get("distances") is not None:
-                        selected_distances = source_matrices["distances"].iloc[
-                            selected_indices, selected_indices
-                        ].copy()
-                    if source_matrices.get("features") is not None:
-                        selected_features = _subset_features(
-                            source_matrices["features"]
-                        )
-                    if source_matrices.get("knn") is not None:
-                        selected_knn = _subset_knn(
-                            source_matrices["knn"], selected_indices
-                        )
-
-            # Read the point size from the source view before the new view
-            # becomes the current one.
-            source_data = (
-                source_view._data if isinstance(source_view._data, dict) else {}
-            )
-            point_size = source_data.get("point_size", 10)
-
-            # Snapshot the source view's display configuration (label/color/size
-            # selections and their settings) so the new view mirrors it. Must be
-            # read before the new view becomes the current one.
-            display_state = source_view.scatter_controls.capture_display_state()
+            data = self._subset_view_data(source_view, selected_indices)
 
             # Carry the source view's pane arrangement into the new view too.
             source_layout_mode = getattr(source_view, "_layout_mode", "stacked")
             source_layout_ratio = source_view.layout_ratio()
 
-            title = f"selection ({len(selected_meta)})"
+            title = f"selection ({len(data['meta'])})"
             view = self.add_new_view(title=title)
             # The selection is another view of the SAME project: join it so
             # annotation highlights (and future propagated states) carry over and
             # stay in sync. The throwaway project add_new_view assigned has no
             # views now and is garbage-collected.
             view.set_project(source_view.project)
+            view._removable = True  # selection-derived → prunable via Backspace
             self._populate_view(
                 view,
-                meta=selected_meta,
-                points=selected_points,
-                entries=new_entries,
-                active=active,
-                distances=selected_distances,
-                features=selected_features,
-                knn=selected_knn,
-                point_size=point_size,
                 ngl_source_viewer=getattr(source_view, "ngl_viewer", None),
-                display_state=display_state,
+                **data,
             )
             self._update_view_actions()
             self.set_view_title(view, title)
@@ -3919,6 +3910,101 @@ class MainWindow(QMainWindow):
     # walk) looks these attributes up by name.
     on_open_selection_in_new_tab = on_open_selection_in_new_view
     on_open_selection_in_new_window = on_open_selection_in_new_view
+
+    def _subset_view_data(self, source_view, indices):
+        """Subset a view's figure data to the kept ``indices``.
+
+        Returns the keyword arguments for ``_populate_view`` (everything except
+        ``view`` and ``ngl_source_viewer``): metadata, the active embedding's
+        points, every embedding entry (each subset), the active index, the active
+        distances/features/knn, the point size and the captured display state.
+
+        Shared by ``on_open_selection_in_new_view`` (keep = selection) and
+        ``on_remove_selection_from_view`` (keep = complement of the selection).
+        """
+        source_fig = source_view.fig_scatter
+        idx = np.asarray(indices, dtype=int)
+
+        meta = source_fig.metadata.iloc[idx].copy().reset_index(drop=True)
+
+        def _subset_features(feats):
+            """Subset features to the kept rows and drop now-empty columns."""
+            feats = feats.iloc[idx]
+            return feats.loc[:, (feats.values.max(axis=0) > 0)].copy()
+
+        # Carry over EVERY embedding (each subset to the kept rows).
+        source_entries = getattr(source_fig, "embedding_entries", None) or []
+        new_entries = []
+        for entry in source_entries:
+            emb = np.asarray(entry["embedding"])[idx].copy()
+            feats = entry.get("features")
+            if feats is not None:
+                feats = _subset_features(feats)
+            dists = entry.get("distances")
+            if dists is not None:
+                dists = dists.iloc[idx, idx].copy()
+            knn = entry.get("knn")
+            if knn is not None:
+                knn = _subset_knn(knn, idx)
+            new_entries.append(
+                {
+                    "name": entry["name"],
+                    "embedding": emb,
+                    "features": feats,
+                    "distances": dists,
+                    "knn": knn,
+                    "features_info": entry.get("features_info"),
+                    "distances_info": entry.get("distances_info"),
+                }
+            )
+
+        active = source_fig.active_embedding
+        active = active if active is not None else 0
+
+        if new_entries:
+            active = active % len(new_entries)
+            active_entry = new_entries[active]
+            points = active_entry["embedding"]
+            distances = active_entry["distances"]
+            features = active_entry["features"]
+            knn = active_entry["knn"]
+        else:
+            # No entry list (shouldn't normally happen): fall back to the
+            # currently displayed positions and active sources.
+            points = np.asarray(source_fig.positions)[idx].copy()
+            distances = None
+            features = None
+            knn = None
+            source_matrices = getattr(source_fig, "dists", None)
+            if isinstance(source_matrices, dict):
+                if source_matrices.get("distances") is not None:
+                    distances = source_matrices["distances"].iloc[idx, idx].copy()
+                if source_matrices.get("features") is not None:
+                    features = _subset_features(source_matrices["features"])
+                if source_matrices.get("knn") is not None:
+                    knn = _subset_knn(source_matrices["knn"], idx)
+
+        # Read the point size from the source view before the new view becomes
+        # the current one.
+        source_data = source_view._data if isinstance(source_view._data, dict) else {}
+        point_size = source_data.get("point_size", 10)
+
+        # Snapshot the source view's display configuration (label/color/size
+        # selections and their settings) so the populated view mirrors it. Must
+        # be read before the view becomes the current one / is repopulated.
+        display_state = source_view.scatter_controls.capture_display_state()
+
+        return dict(
+            meta=meta,
+            points=points,
+            entries=new_entries,
+            active=active,
+            distances=distances,
+            features=features,
+            knn=knn,
+            point_size=point_size,
+            display_state=display_state,
+        )
 
     def _populate_view(
         self,

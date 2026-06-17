@@ -1442,22 +1442,12 @@ class ScatterControls(QtWidgets.QWidget):
         # Selector to switch between multiple embeddings (hidden when there is
         # only one). It lives outside the recompute container so it stays usable
         # even when the active embedding has no high-dim source to recompute from.
-        self.embedding_selector_group = QtWidgets.QGroupBox("Active embedding")
-        selector_row = QtWidgets.QHBoxLayout()
-        selector_row.setContentsMargins(6, 4, 6, 4)
-        self.embedding_selector_group.setLayout(selector_row)
-        self.embedding_selector_combo = QtWidgets.QComboBox()
-        self.embedding_selector_combo.setToolTip(
-            "Switch the active embedding (or press the space bar to cycle)."
+        # Read-only reporter; switching now happens from the status bar.
+        self.embedding_active_label = self._make_active_embedding_label(
+            "The active embedding. Switch it from the status bar "
+            "(or press the space bar to cycle)."
         )
-        # `activated` only fires on user interaction, so programmatic
-        # setCurrentIndex calls don't feed back into a switch.
-        self.embedding_selector_combo.activated.connect(
-            lambda idx: self.figure.switch_embedding(idx, animate=True)
-        )
-        selector_row.addWidget(self.embedding_selector_combo)
-        self.tab5_layout.addWidget(self.embedding_selector_group)
-        self.embedding_selector_group.setVisible(False)
+        self.tab5_layout.addWidget(self.embedding_active_label)
 
         # Everything below recomputes the active embedding; it is disabled when
         # the active embedding has no paired features/distances.
@@ -1791,20 +1781,13 @@ class ScatterControls(QtWidgets.QWidget):
     def build_fidelity_gui(self):
         """Build the GUI for the Fidelity tab."""
 
-        # Active-embedding indicator. Unlike the Embeddings tab (which offers a
-        # selector), fidelity always applies to whichever embedding is active,
-        # so this is a read-only label mirroring that selector's position.
-        self.fidelity_active_embedding_group = QtWidgets.QGroupBox("Active embedding")
-        active_row = QtWidgets.QHBoxLayout()
-        active_row.setContentsMargins(6, 4, 6, 4)
-        self.fidelity_active_embedding_group.setLayout(active_row)
-        self.fidelity_active_embedding_label = QtWidgets.QLabel("—")
-        self.fidelity_active_embedding_label.setToolTip(
-            "The embedding that fidelity is evaluated against. Switch it on the "
-            "Embeddings tab (or press the space bar to cycle)."
+        # Active-embedding indicator: fidelity always applies to whichever
+        # embedding is active, so report it at the top of the tab.
+        self.fidelity_active_embedding_label = self._make_active_embedding_label(
+            "The embedding that fidelity is evaluated against. Switch it from "
+            "the status bar (or press the space bar to cycle)."
         )
-        active_row.addWidget(self.fidelity_active_embedding_label)
-        self.tab6_layout.addWidget(self.fidelity_active_embedding_group)
+        self.tab6_layout.addWidget(self.fidelity_active_embedding_label)
 
         # Shared input: which high-dimensional source defines the "true"
         # neighborhood that fidelity scores and KNN edges compare the 2D layout
@@ -2088,6 +2071,14 @@ class ScatterControls(QtWidgets.QWidget):
 
     def build_clusters_gui(self):
         """Build the GUI for the Clusters tab."""
+        # Active-embedding indicator: clustering applies to the active
+        # embedding's data, so report it at the top like the other tabs.
+        self.cluster_active_embedding_label = self._make_active_embedding_label(
+            "Clustering applies to this embedding. Switch it from the status "
+            "bar (or press the space bar to cycle)."
+        )
+        self.tab7_layout.addWidget(self.cluster_active_embedding_label)
+
         # Top action row
         actions_row = QtWidgets.QHBoxLayout()
         actions_row.setContentsMargins(0, 0, 0, 0)
@@ -2631,6 +2622,12 @@ class ScatterControls(QtWidgets.QWidget):
     def update_cluster_options(self):
         """Enable/disable the Clusters tab and populate the data combo box."""
         clusters_tab_index = self.tabs.indexOf(self.tab7)
+
+        # The active-embedding indicator reflects the current embedding.
+        self._refresh_active_embedding_label(
+            getattr(self, "cluster_active_embedding_label", None)
+        )
+
         dists = getattr(self.figure, "dists", None)
         positions = getattr(self.figure, "positions", None)
         has_embedding = positions is not None and len(np.asarray(positions)) > 0
@@ -3630,20 +3627,50 @@ class ScatterControls(QtWidgets.QWidget):
         self.set_colors()
         self.set_sizes()
 
-    def update_embedding_selector(self):
-        """Refresh the active-embedding selector from the figure's entries."""
+    def _active_embedding_name(self):
+        """Name of the figure's active embedding, or None if unavailable."""
         entries = getattr(self.figure, "embedding_entries", None) or []
-        combo = self.embedding_selector_combo
-        combo.blockSignals(True)
-        combo.clear()
-        for entry in entries:
-            combo.addItem(str(entry.get("name", "embedding")))
         active = getattr(self.figure, "active_embedding", None)
         if active is not None and 0 <= active < len(entries):
-            combo.setCurrentIndex(active)
-        combo.blockSignals(False)
-        # Only worth showing when there is something to switch between.
-        self.embedding_selector_group.setVisible(len(entries) > 1)
+            return str(entries[active].get("name", "embedding"))
+        return None
+
+    def _make_active_embedding_label(self, tooltip):
+        """Build a compact "Active embedding: …" reporter for a tab header.
+
+        Replaces the old bordered group box with a single label sized to match
+        a QGroupBox title (a touch smaller than the default control font), so it
+        reads as a quiet section header without the group's footprint.
+        """
+        label = QtWidgets.QLabel("Active embedding: —")
+        label.setToolTip(tooltip)
+        font = label.font()
+        size = font.pointSizeF()
+        if size > 0:
+            font.setPointSizeF(size - 2)
+        label.setFont(font)
+        return label
+
+    def _active_embedding_text(self):
+        """Display text for the active-embedding reporters."""
+        name = self._active_embedding_name()
+        return f"Active embedding: {name if name is not None else '—'}"
+
+    def _refresh_active_embedding_label(self, label):
+        """Update a reporter's text and hide it unless there's a choice to make.
+
+        Mirrors the status-bar control: the active embedding is only worth
+        reporting when the view has more than one to switch between.
+        """
+        if label is None:
+            return
+        entries = getattr(self.figure, "embedding_entries", None) or []
+        label.setText(self._active_embedding_text())
+        label.setVisible(len(entries) > 1)
+
+    def update_embedding_selector(self):
+        """Refresh the active-embedding reporter from the figure's entries."""
+        self._refresh_active_embedding_label(self.embedding_active_label)
         self._sync_window_embedding_status()
 
     def _scope_columns(self):
@@ -3916,11 +3943,9 @@ class ScatterControls(QtWidgets.QWidget):
         active = getattr(self.figure, "active_embedding", None)
         entries = getattr(self.figure, "embedding_entries", None) or []
 
-        # Sync the selector without re-triggering a switch.
-        self.embedding_selector_combo.blockSignals(True)
-        if active is not None and 0 <= active < len(entries):
-            self.embedding_selector_combo.setCurrentIndex(active)
-        self.embedding_selector_combo.blockSignals(False)
+        # Sync the read-only reporter. The Fidelity and Cluster reporters are
+        # refreshed by update_fidelity_options/update_cluster_options below.
+        self._refresh_active_embedding_label(self.embedding_active_label)
 
         self.update_umap_options()
         self.update_fidelity_options()
@@ -4054,15 +4079,9 @@ class ScatterControls(QtWidgets.QWidget):
 
     def _update_fidelity_active_embedding_label(self):
         """Mirror the active embedding's name into the Fidelity tab indicator."""
-        label = getattr(self, "fidelity_active_embedding_label", None)
-        if label is None:
-            return
-        entries = getattr(self.figure, "embedding_entries", None) or []
-        active = getattr(self.figure, "active_embedding", None)
-        if active is not None and 0 <= active < len(entries):
-            label.setText(str(entries[active].get("name", "embedding")))
-        else:
-            label.setText("—")
+        self._refresh_active_embedding_label(
+            getattr(self, "fidelity_active_embedding_label", None)
+        )
 
     def _fidelity_source(self):
         """Return the selected fidelity Data source ('knn'/'precomputed'/'features')."""

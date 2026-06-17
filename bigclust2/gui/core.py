@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QHBoxLayout,
     QSplitter,
     QPushButton,
+    QToolButton,
     QFrame,
     QLabel,
     QDialog,
@@ -1420,12 +1421,41 @@ class MainWindow(QMainWindow):
         self.status_bar = self.statusBar()
         self.status_bar.showMessage("Ready", timeout=5000)
 
-        # Permanent indicator mirroring the active view's "Active embedding"
-        # selector. Added before any per-view selection counter so it sits to
-        # the left of it. Hidden until a view has more than one embedding.
-        self.embedding_status_label = QLabel("")
-        self.status_bar.addPermanentWidget(self.embedding_status_label)
-        self.embedding_status_label.hide()
+        # Permanent control for the active view's embedding. This is the
+        # primary place to switch embeddings: a flat, label-like button whose
+        # popup menu lists the view's embeddings. Added before any per-view
+        # selection counter so it sits to the left of it. Hidden until a view
+        # has more than one embedding to switch between.
+        self.embedding_status_button = QToolButton()
+        self.embedding_status_button.setAutoRaise(True)  # flat, reads like a label
+        self.embedding_status_button.setToolButtonStyle(Qt.ToolButtonTextOnly)
+        self.embedding_status_button.setPopupMode(QToolButton.InstantPopup)
+        # Trim the button's padding so it doesn't grow the status bar. A style
+        # sheet makes Qt render the text with the sheet's font, so the size must
+        # be set here (not via setFont) to match the status bar's label font.
+        _sb_font = self.status_bar.font()
+        _font_css = (
+            f"font-size: {_sb_font.pointSize()}pt;"
+            if _sb_font.pointSize() > 0
+            else f"font-size: {_sb_font.pixelSize()}px;"
+        )
+        self.embedding_status_button.setStyleSheet(
+            "QToolButton { border: none; padding: 0px 2px; margin: 0px; "
+            + _font_css
+            + " }"
+            # The menu pops upward from the status bar, so hide the default
+            # down-pointing indicator; the text carries an up-triangle instead.
+            " QToolButton::menu-indicator { image: none; }"
+        )
+        self.embedding_status_button.setToolTip(
+            "Switch the active embedding (or press the space bar to cycle)."
+        )
+        self._embedding_status_menu = QMenu(self.embedding_status_button)
+        self.embedding_status_button.setMenu(self._embedding_status_menu)
+        # Build lazily so the menu always reflects the current view's entries.
+        self._embedding_status_menu.aboutToShow.connect(self._populate_embedding_menu)
+        self.status_bar.addPermanentWidget(self.embedding_status_button)
+        self.embedding_status_button.hide()
 
         # Tab widget hosting one view (MainWidget) per tab
         self._view_tabs = ViewTabWidget()
@@ -2201,15 +2231,14 @@ class MainWindow(QMainWindow):
             self._meta_staleness_banner.hide()
 
     def _update_embedding_status(self):
-        """Sync the status-bar embedding indicator with the active view.
+        """Sync the status-bar embedding control with the active view.
 
-        Mirrors the controls' "Active embedding" selector: shows the active
-        embedding's name and is hidden unless the view has more than one
-        embedding to switch between. Safe to call from any view's controls;
-        it always reads the currently visible view.
+        Shows the active embedding's name and is hidden unless the view has
+        more than one embedding to switch between. Safe to call from any view's
+        controls; it always reads the currently visible view.
         """
-        label = getattr(self, "embedding_status_label", None)
-        if label is None:
+        button = getattr(self, "embedding_status_button", None)
+        if button is None:
             return
         view = self.current_view()
         fig = getattr(view, "fig_scatter", None) if view is not None else None
@@ -2217,11 +2246,36 @@ class MainWindow(QMainWindow):
         active = getattr(fig, "active_embedding", None)
         if len(entries) > 1 and active is not None and 0 <= active < len(entries):
             name = entries[active].get("name", f"#{active + 1}")
-            label.setText(f"Embedding: {name}  ")
-            label.show()
+            button.setText(f"Embedding: {name} ▴")
+            button.show()
         else:
-            label.clear()
-            label.hide()
+            button.setText("")
+            button.hide()
+
+    def _populate_embedding_menu(self):
+        """Fill the status-bar embedding menu from the active view's entries.
+
+        Built lazily on each open so it always reflects the current view.
+        Picking an entry routes through ``switch_embedding``, which drives the
+        existing sync chain back to this control and the tab reporters.
+        """
+        menu = self._embedding_status_menu
+        menu.clear()
+        view = self.current_view()
+        fig = getattr(view, "fig_scatter", None) if view is not None else None
+        entries = getattr(fig, "embedding_entries", None) or []
+        active = getattr(fig, "active_embedding", None)
+        group = QActionGroup(menu)
+        group.setExclusive(True)
+        for idx, entry in enumerate(entries):
+            name = entry.get("name", f"#{idx + 1}")
+            act = menu.addAction(str(name))
+            act.setCheckable(True)
+            act.setChecked(idx == active)
+            group.addAction(act)
+            act.triggered.connect(
+                lambda checked, i=idx, f=fig: f.switch_embedding(i, animate=True)
+            )
 
     def _reassert_native_key_focus(self):
         """Point the OS-level key routing back at this window.

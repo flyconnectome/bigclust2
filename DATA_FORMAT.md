@@ -55,7 +55,26 @@ The `info` file contains information about the dataset, including which files ar
         "color": {
             "HbR": [255, 0, 0],
             "HbL": [0, 0, 255]
-        }
+        },
+        # optional: per-dataset on-the-fly transforms applied to meshes when they
+        # are loaded (e.g. to bring different sources into a common space)
+        "transforms": [
+            {
+                # dataset name(s) the transform applies to; matches the keys in
+                # `source` / values in the meta `dataset` column. Can be a single
+                # name, a list, or a comma-separated string (e.g. "HbL,HbR")
+                "apply_to": "HbL",
+                # only "landmarks" (thin-plate-spline) is supported for now
+                "type": "landmarks",
+                # CSV with the landmark coordinates; either a path relative to the
+                # project dir or a URL
+                "file": "landmarks.csv",
+                # the x/y/z columns for the source (native) and target (common) space;
+                # meshes are mapped source -> target
+                "source_cols": ["x1", "y1", "z1"],
+                "target_cols": ["x2", "y2", "z2"]
+            }
+        ]
     },
     # optional: pairwise (square) distance matrix
     "distances": {

@@ -56,6 +56,7 @@ from .widgets.annotations import AnnotationDialog, SelectionRecord
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
 from ..embeddings import KNNGraph
+from ..utils import is_url
 from ..__version__ import __version__
 
 
@@ -4120,6 +4121,10 @@ class MainWindow(QMainWindow):
 
                 view.ngl_viewer.set_data(ngl_data)
 
+                # Carry over per-dataset transforms (set_data reset them) so meshes
+                # the child view loads fresh are transformed like the source's.
+                view.ngl_viewer.adopt_transforms_from(ngl_source_viewer)
+
                 # Share already-loaded meshes from the source viewer's cache (by
                 # reference, no copy) so the new view can display selected neurons
                 # without re-downloading. Restricted to the selection's keys.
@@ -4585,8 +4590,46 @@ class MainWindow(QMainWindow):
 
                 ngl_viewer.set_data(ngl_data)
 
+                transforms = project.info["neuroglancer"].get("transforms", None)
+                if transforms:
+                    transform_mapping = {}
+                    for spec in transforms:
+                        ttype = spec.get("type")
+                        if ttype != "landmarks":
+                            raise ValueError(
+                                f"Unsupported neuroglancer transform type: {ttype!r} "
+                                "(only 'landmarks' is supported)."
+                            )
+                        landmarks_file = spec["file"]
+                        try:
+                            # `file` may be a URL or a path relative to the project dir
+                            if is_url(landmarks_file):
+                                landmarks = pd.read_csv(landmarks_file)
+                            else:
+                                landmarks = project.load_file(landmarks_file)
+                        except BaseException as e:
+                            raise ValueError(
+                                f"Failed to load landmarks file '{landmarks_file}' "
+                                f"for transform applied to {spec.get('apply_to')!r}: {e}"
+                            ) from e
+                        src = landmarks[spec["source_cols"]].to_numpy()
+                        trg = landmarks[spec["target_cols"]].to_numpy()
+                        apply_to = spec["apply_to"]
+                        if isinstance(apply_to, str):
+                            # accept a single name or a comma-separated list of names
+                            apply_to = [d.strip() for d in apply_to.split(",")]
+                        for dataset in apply_to:
+                            transform_mapping[dataset] = (src, trg)
+                    ngl_viewer.set_transforms(transform_mapping)
+
                 neuropil_mesh = project.info["neuroglancer"].get("neuropil_mesh", None)
                 if neuropil_mesh:
+                    # `neuropil_mesh` may be a URL, a neuroglancer source
+                    # ("id@source"), or a local path (absolute or relative to
+                    # the project dir). Resolve plain local paths against the
+                    # project; URLs and sources are passed through untouched.
+                    if isinstance(neuropil_mesh, str) and "@" not in neuropil_mesh:
+                        neuropil_mesh = project.resolve_path(neuropil_mesh)
                     ngl_viewer.set_neuropil_mesh(neuropil_mesh)
 
             self._current_project_loader = project

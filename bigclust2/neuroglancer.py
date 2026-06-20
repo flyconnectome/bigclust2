@@ -122,6 +122,9 @@ class NglViewer:
         # Tracks which neurons we've already loaded
         self._segments = {}
 
+        # Optional per-dataset on-the-fly transforms (dataset -> navis transform)
+        self._transforms = {}
+
         # Optional cache (least-recently-used neurons are evicted first)
         self.cache = LRUCache(maxsize=100)
 
@@ -255,7 +258,29 @@ class NglViewer:
         for url in self.data.source.unique():
             self.volumes[url] = self.make_volume(url)
 
+        # Clear any stale transforms from a previous dataset (set anew via set_transforms)
+        self._transforms = {}
+
         self.set_default_colors()
+
+    def set_transforms(self, mapping):
+        """Set per-dataset on-the-fly transforms.
+
+        Parameters
+        ----------
+        mapping : dict
+            Maps a dataset name to a ``(source_landmarks, target_landmarks)`` tuple
+            of ``(M, 3)`` array-likes. A thin-plate-spline transform is built for
+            each dataset and applied to its meshes in :meth:`_load_mesh`, mapping
+            native source coordinates into the common target space.
+
+        """
+        self._transforms = {}
+        for dataset, (src, trg) in mapping.items():
+            self._transforms[dataset] = navis.transforms.TPStransform(
+                np.asarray(src), np.asarray(trg)
+            )
+        self.report(f"Set transforms for {len(self._transforms)} datasets: {list(self._transforms.keys())}", flush=True)
 
     def set_default_colors(self):
         # Check for color column
@@ -509,6 +534,21 @@ class NglViewer:
                 continue
             self.cache[key] = visual
 
+    def adopt_transforms_from(self, other):
+        """Adopt per-dataset transforms from another viewer.
+
+        Transforms are stateless after construction, so they are shared by
+        reference. Used to carry transforms over to selection/child views, which
+        re-load meshes that aren't already in the shared cache.
+
+        Parameters
+        ----------
+        other : NglViewer
+            Viewer whose transforms to adopt.
+
+        """
+        self._transforms = dict(getattr(other, "_transforms", {}) or {})
+
     def neuroglancer_scene(self, group_by="source", use_colors="viewer"):
         """Generate neuroglancer scene for the current state.
 
@@ -738,9 +778,12 @@ class NglViewer:
 
         try:
             if "lod" in inspect.signature(vol.mesh.get).parameters:
-                m = vol.mesh.get(x, lod=lod)[x]
+                m = vol.mesh.get(x, lod=lod)
             else:
-                m = vol.mesh.get(x)[x]
+                m = vol.mesh.get(x)
+
+            if isinstance(m, dict):
+                m = m[x]
         except BaseException as e:
             import traceback
 
@@ -751,6 +794,17 @@ class NglViewer:
         if isinstance(m, navis.NeuronList):
             assert len(m) == 1, f"Expected exactly one neuron for {x}, got {len(m)}"
             m = m[0]
+
+        # Apply an optional on-the-fly transform for this dataset (e.g. to bring
+        # a source into a common coordinate space). Done before visual creation so
+        # the cached visual holds the already-transformed geometry.
+        tf = self._transforms.get(dataset)
+        if tf is not None:
+            self.report(f"  Applying transform for {dataset}", flush=True)
+            if isinstance(m, navis.BaseNeuron):
+                m = navis.xform(m, tf)
+            else:  # trimesh.Trimesh and similar mesh-likes
+                m.vertices = tf.xform(m.vertices.copy())
 
         if isinstance(m, navis.TreeNeuron):
             return octarine_navis_plugin.neuron2gfx(m, color=kwargs["color"])

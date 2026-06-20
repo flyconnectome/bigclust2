@@ -89,6 +89,22 @@ class BaseProjectLoader(ABC):
             return True
         return is_url(self._path)
 
+    def resolve_path(self, file):
+        """Resolve a possibly-relative local file path against the dataset dir.
+
+        URLs are returned unchanged. For local datasets, ``~`` is expanded and
+        relative paths are joined onto ``self.path``. For remote datasets a
+        relative path is joined onto the remote base URL.
+        """
+        if is_url(file):
+            return file
+        if self.is_remote:
+            return str(self.path / file)
+        path = Path(file).expanduser()
+        if not path.is_absolute():
+            path = self.path / path
+        return str(path)
+
     def load_file(self, file, relative=True):
         """Load a file from the dataset.
 

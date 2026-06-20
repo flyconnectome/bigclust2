@@ -34,6 +34,25 @@ SOURCE_KNN = "knn"
 # the default source (the layout the user actually sees on screen).
 _SOURCE_ORDER = (SOURCE_EMBEDDING, SOURCE_KNN, SOURCE_DISTANCES, SOURCE_FEATURES)
 
+# KD-trees only prune effectively in low dimensions; beyond this the curse of
+# dimensionality makes them degenerate to a slow, non-BLAS brute force, so we
+# fall back to (BLAS-backed) chunked ``pairwise_distances`` instead. The 2D
+# embedding stays well under this; high-dimensional feature spaces are well over.
+_KDTREE_MAX_DIM = 16
+
+# Chunking for the brute-force pairwise path. The block size caps the
+# materialised (chunk, m) distance matrix, but for a tiny selection that alone
+# would allow one enormous call — which makes sklearn's float32 euclidean upcast
+# path scale pathologically (a selection of 1 ends up *slower* than 100). The row
+# cap keeps each call cache/RAM-friendly regardless of selection size.
+_PAIRWISE_MAX_BLOCK = 2_000_000  # max materialised (chunk x m) elements
+_PAIRWISE_MAX_CHUNK_ROWS = 20_000  # max rows per chunk, regardless of m
+
+
+def _pairwise_chunk_rows(m):
+    """Rows per chunk for the brute-force pairwise loop (see constants above)."""
+    return max(1, min(_PAIRWISE_MAX_CHUNK_ROWS, _PAIRWISE_MAX_BLOCK // max(1, m)))
+
 
 class GrowShrinkUnavailable(Exception):
     """Raised when a requested distance source is not available on the figure."""
@@ -99,16 +118,15 @@ def nearest_distance_to_selection(
     if source == SOURCE_EMBEDDING:
         if positions is None or not len(positions):
             raise GrowShrinkUnavailable("No embedding positions available.")
-        return _nearest_from_coords(
-            np.asarray(positions, dtype=np.float64), selected, "euclidean"
-        )
+        # Keep the native dtype (typically float32): cKDTree upcasts internally
+        # and pairwise_distances handles float32 — forcing float64 here would copy
+        # the whole feature matrix (≈2× memory) for no benefit.
+        return _nearest_from_coords(np.asarray(positions), selected, "euclidean")
 
     if source == SOURCE_FEATURES:
         if not dists or "features" not in dists:
             raise GrowShrinkUnavailable("No feature vectors available.")
-        return _nearest_from_coords(
-            np.asarray(dists["features"], dtype=np.float64), selected, metric
-        )
+        return _nearest_from_coords(np.asarray(dists["features"]), selected, metric)
 
     if source == SOURCE_DISTANCES:
         if not dists or "distances" not in dists:
@@ -180,16 +198,14 @@ def within_selection_neighbor_distances(
     if source == SOURCE_EMBEDDING:
         if positions is None or not len(positions):
             raise GrowShrinkUnavailable("No embedding positions available.")
-        return _within_from_coords(
-            np.asarray(positions, dtype=np.float64)[sel], "euclidean"
-        )
+        # Index first so only the (small) selection is materialised; keep the
+        # native dtype to avoid a full-matrix float64 copy.
+        return _within_from_coords(np.asarray(positions)[sel], "euclidean")
 
     if source == SOURCE_FEATURES:
         if not dists or "features" not in dists:
             raise GrowShrinkUnavailable("No feature vectors available.")
-        return _within_from_coords(
-            np.asarray(dists["features"], dtype=np.float64)[sel], metric
-        )
+        return _within_from_coords(np.asarray(dists["features"])[sel], metric)
 
     if source == SOURCE_DISTANCES:
         if not dists or "distances" not in dists:
@@ -276,18 +292,46 @@ def _within_from_coords(X, metric):
     m = X.shape[0]
     if m <= 1:
         return np.full(m, np.inf)
-    if metric == "euclidean":
+    # Low-dimensional euclidean: a KD-tree prunes effectively and is fastest.
+    if metric == "euclidean" and X.shape[1] <= _KDTREE_MAX_DIM:
         from scipy.spatial import cKDTree
 
         # k=2: the first hit is the point itself (distance 0); take the second.
         dist, _ = cKDTree(X).query(X, k=2)
         return np.asarray(dist[:, 1], dtype=np.float64)
 
+    # High-dimensional euclidean: chunked squared-norm GEMM (see
+    # `_nearest_euclidean_gemm`), excluding each row's own zero self-distance.
+    if metric == "euclidean":
+        return _within_euclidean_gemm(X)
+
+    # Any other metric: brute force.
     from sklearn.metrics import pairwise_distances
 
     D = pairwise_distances(X, X, metric=metric)
     np.fill_diagonal(D, np.inf)
     return D.min(axis=1)
+
+
+def _within_euclidean_gemm(X):
+    """Each row's min euclidean distance to any *other* row of ``X``.
+
+    Squared-norm GEMM like :func:`_nearest_euclidean_gemm`, chunked over rows and
+    excluding each row's own (zero) self-distance before taking the per-row min.
+    """
+    SS = np.einsum("ij,ij->i", X, X, dtype=np.float64)  # ‖x‖² per row
+    m = X.shape[0]
+    out = np.empty(m, dtype=np.float64)
+    chunk = _pairwise_chunk_rows(m)
+    for start in range(0, m, chunk):
+        stop = min(start + chunk, m)
+        d2 = SS[start:stop, None] + SS[None, :] - 2.0 * (X[start:stop] @ X.T)
+        np.maximum(d2, 0.0, out=d2)
+        # Drop each row's self-distance so it doesn't win the min.
+        local = np.arange(stop - start)
+        d2[local, np.arange(start, stop)] = np.inf
+        out[start:stop] = np.sqrt(d2.min(axis=1))
+    return out
 
 
 def _within_from_knn(graph, selected):
@@ -310,23 +354,53 @@ def _within_from_knn(graph, selected):
 def _nearest_from_coords(X, selected, metric):
     """Min distance from every row of ``X`` to the rows ``X[selected]``."""
     n = X.shape[0]
-    if metric == "euclidean":
+    # Low-dimensional euclidean: a KD-tree prunes effectively and is fastest.
+    if metric == "euclidean" and X.shape[1] <= _KDTREE_MAX_DIM:
         from scipy.spatial import cKDTree
 
         dist, _ = cKDTree(X[selected]).query(X, k=1)
         return np.asarray(dist, dtype=np.float64)
 
-    # Non-euclidean: compute the (chunk, m) distance block row-wise and take the
-    # per-row minimum, capping the materialised block to ~2M entries.
+    # High-dimensional euclidean: chunked squared-norm GEMM — far faster than
+    # sklearn's pairwise_distances, which upcasts float32 -> float64 per block
+    # (slow, and pathologically so for tiny selections).
+    if metric == "euclidean":
+        return _nearest_euclidean_gemm(X, selected)
+
+    # Any other metric: BLAS-backed brute force via chunked pairwise_distances.
     from sklearn.metrics import pairwise_distances
 
     sel_X = X[selected]
     out = np.empty(n, dtype=np.float64)
-    chunk = max(1, int(2_000_000 // max(1, len(selected))))
+    chunk = _pairwise_chunk_rows(len(selected))
     for start in range(0, n, chunk):
         stop = min(start + chunk, n)
         block = pairwise_distances(X[start:stop], sel_X, metric=metric)
         out[start:stop] = block.min(axis=1)
+    return out
+
+
+def _nearest_euclidean_gemm(X, selected):
+    """Min euclidean distance from every row of ``X`` to the rows ``X[selected]``.
+
+    Uses the squared-norm identity ``d² = ‖x‖² + ‖s‖² − 2·x·s``: the cross term is
+    a float32 BLAS matmul (fast) and the norms are accumulated in float64 (so the
+    subtraction is stable). Negative ``d²`` from float32 cancellation is clamped to
+    0. This is accurate enough for nearest/threshold ranking; sklearn instead
+    upcasts the whole matmul to float64 for full precision, which is much slower.
+    """
+    sel = np.ascontiguousarray(X[selected])
+    SS = np.einsum("ij,ij->i", sel, sel, dtype=np.float64)  # ‖s‖² per selected
+    n = X.shape[0]
+    out = np.empty(n, dtype=np.float64)
+    chunk = _pairwise_chunk_rows(len(selected))
+    for start in range(0, n, chunk):
+        stop = min(start + chunk, n)
+        Xc = X[start:stop]
+        XX = np.einsum("ij,ij->i", Xc, Xc, dtype=np.float64)  # ‖x‖² per row
+        d2 = XX[:, None] + SS[None, :] - 2.0 * (Xc @ sel.T)
+        np.maximum(d2, 0.0, out=d2)
+        out[start:stop] = np.sqrt(d2.min(axis=1))
     return out
 
 

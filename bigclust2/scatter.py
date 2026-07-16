@@ -16,6 +16,7 @@ from scipy.spatial import ConvexHull, Delaunay
 from .figure import BaseFigure, update_figure
 from .embeddings import neighborhood_fidelity
 from .selection import LassoGizmo, SelectionGizmo
+from .utils import check_finite_features
 from .visuals import points2gfx, text2gfx, lines2gfx
 
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
@@ -26,7 +27,7 @@ AVAILABLE_MARKERS.remove("ring")
 SCOPE_FADE_ALPHA = 0.15
 
 
-def auto_point_size(n, base=10.0, ref=1000, min_size=2.0):
+def auto_point_size(n, base=10.0, ref=1000, min_size=0.1):
     """Default point size scaled by dataset size (inverse-sqrt, density-preserving).
 
     Up to `ref` points the `base` size reads well; beyond that the plot gets
@@ -105,7 +106,7 @@ class ScatterFigure(BaseFigure):
             False  # whether to deselect everything on double click
         )
         self._font_size = 0.01
-        self._points_scale = 1  # used for scaling points uniformly
+        self._point_scale = 0.001  # used for scaling points uniformly
         self.label_vis_limit = 400  # number of labels shown at once before hiding all
         self.label_refresh_rate = 30  # update labels every n frames
         self._viewer_sync_enabled = True
@@ -153,7 +154,7 @@ class ScatterFigure(BaseFigure):
             self, "font_size", self.font_size + 1 if self.font_size >= 1 else self.font_size + .1
         )
         self.key_events["ArrowDown"] = lambda: setattr(
-            self, "point_scale", max(self.point_scale * 0.9, 0.01)
+            self, "point_scale", max(self.point_scale * 0.9, 0.0001)
         )
         self.key_events["ArrowUp"] = lambda: setattr(
             self, "point_scale", self.point_scale * 1.1
@@ -188,13 +189,6 @@ class ScatterFigure(BaseFigure):
         self.key_events[" "] = lambda: self._cycle_embedding()
 
         self.debug = debug
-
-        def _toggle_last_label():
-            """Toggle between the last label and the original labels."""
-            if self.controls is not None:
-                self.controls.switch_labels()
-
-        self.key_events["m"] = _toggle_last_label
 
         def _control_label_vis():
             """Show only labels currently visible."""
@@ -644,9 +638,19 @@ class ScatterFigure(BaseFigure):
                 return
             color = x.get("color", (1, 1, 1, 0.1))
             linewidth = x.get("linewidth", 1)
-            self.make_neighbour_edges(
-                k=k, metric=metric, mask=mask, color=color, linewidth=linewidth
-            )
+            try:
+                self.make_neighbour_edges(
+                    k=k, metric=metric, mask=mask, color=color, linewidth=linewidth
+                )
+            except ValueError as e:
+                # E.g. non-finite values in the feature matrix. Like the
+                # missing-source case above, degrade instead of raising — this
+                # setter also fires from render/animation/selection callbacks.
+                self.show_message(str(e), color="red", duration=4)
+                if getattr(self, "neighbors_edge_group", None):
+                    self.neighbors_edge_group.visible = False
+                self._show_knn_edges = False
+                return
 
         self._show_knn_edges = x
 
@@ -707,6 +711,17 @@ class ScatterFigure(BaseFigure):
     def deselect_all(self):
         self.selected = None
 
+    def _get_features_checked(self, context):
+        """The stored feature matrix, refusing to hand out non-finite data.
+
+        Finiteness is checked once in :meth:`set_points` (cached flag); on
+        failure the full check is re-run to raise with row/column counts.
+        """
+        features = self.dists["features"]
+        if not getattr(self, "_features_finite", True):
+            check_finite_features(features, context)
+        return features
+
     def _gs_resolve_settings(self):
         """Resolve the effective (source, metric, step) for grow/shrink.
 
@@ -761,6 +776,17 @@ class ScatterFigure(BaseFigure):
         if source is None:
             self.show_message(
                 "No data available for grow/shrink", color="red", duration=2
+            )
+            return
+
+        if source == gs.SOURCE_FEATURES and not getattr(
+            self, "_features_finite", True
+        ):
+            self.show_message(
+                "Feature vectors contain missing values (NaN) — cannot grow "
+                "by feature distance",
+                color="red",
+                duration=4,
             )
             return
 
@@ -929,9 +955,11 @@ class ScatterFigure(BaseFigure):
             )
             for vis in self.highlight_visuals:
                 vis.material.edge_color = color
-                vis.material.edge_width = 2
+                vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
                 vis.material.color = (1, 1, 1, 0)
+                vis.material.edge_mode = "outer"
                 self.scatter_group.add(vis)
+                print(vis.material.alpha_mode, vis.material.alpha_method)
 
     @update_figure
     def toggle_labels(self):
@@ -1002,7 +1030,6 @@ class ScatterFigure(BaseFigure):
                     this_size = self.point_size[mask & (self._marker_symbols == m)]
             if this_meta.empty:
                 continue
-
             vis = points2gfx(
                 np.append(
                     this_pos,
@@ -1012,6 +1039,7 @@ class ScatterFigure(BaseFigure):
                 color=color,
                 size=this_size * self.point_scale,
                 marker=m,
+                size_space="world",
                 pick_write=self.hover_info_org is not None,
             )
             vis._point_ix = ix
@@ -1433,8 +1461,13 @@ class ScatterFigure(BaseFigure):
         if metric == "knn" and "knn" not in self.dists:
             raise ValueError("No KNN graph available.")
 
-        if metric not in ("precomputed", "knn") and "features" not in self.dists:
-            raise ValueError("No feature vectors available for distance calculation.")
+        if metric not in ("precomputed", "knn"):
+            if "features" not in self.dists:
+                raise ValueError(
+                    "No feature vectors available for distance calculation."
+                )
+            # Fails loudly (with counts) if the features contain NaN/inf.
+            self._get_features_checked("nearest-neighbour edges")
 
         # Create a group and add to scene
         if not getattr(self, "neighbors_edge_group", None):
@@ -1893,6 +1926,11 @@ class ScatterFigure(BaseFigure):
 
             self.dists["distances"] = distances
 
+        # Assume finite until a feature matrix proves otherwise; checked once
+        # here so the latency-sensitive consumers (e.g. grow/shrink) don't have
+        # to rescan a potentially large matrix on every call.
+        self._features_finite = True
+
         if features is not None:
             if features.shape[0] != len(metadata):
                 raise ValueError(
@@ -1901,6 +1939,9 @@ class ScatterFigure(BaseFigure):
             if not np.all(features.index == self.ids):
                 raise ValueError("Index of features must match IDs in metadata.")
 
+            self._features_finite = check_finite_features(
+                features, "distance computations", action="warn"
+            )
             self.dists["features"] = features
 
         if knn is not None:
@@ -1936,7 +1977,8 @@ class ScatterFigure(BaseFigure):
         self._selected = None
         self._point_size = 1
         if point_size is None:
-            point_size = auto_point_size(len(metadata))
+            # point_size = auto_point_size(len(metadata))
+            point_size = 0.003
         self._point_scale = point_size
 
         # Grow/shrink-selection state (see `grow_selection`/`shrink_selection`)
@@ -2638,7 +2680,8 @@ class ScatterFigure(BaseFigure):
             features = None
         else:
             dists = None
-            features = self.dists["features"]
+            # Fails loudly (with counts) if the features contain NaN/inf.
+            features = self._get_features_checked("neighborhood fidelity")
 
         return neighborhood_fidelity(
             embedding=positions if positions is not None else self.positions,

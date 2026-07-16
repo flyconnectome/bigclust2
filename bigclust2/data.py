@@ -12,7 +12,7 @@ from abc import ABC
 from pathlib import Path
 
 from .embeddings import KNNGraph
-from .utils import is_url, string_to_polars_filter, Url
+from .utils import is_url, string_to_polars_filter, Url, check_finite_features
 
 
 logger = logging.getLogger(__name__)
@@ -794,6 +794,10 @@ class SingleProjectLoader(BaseProjectLoader):
                 .to_pandas()
                 .set_index(id_col)
             )
+
+        # Warn (once per file, thanks to the cache) about missing values —
+        # feature-based operations downstream will refuse to run on them.
+        check_finite_features(features, "distance computations", action="warn")
 
         if cache is not None:
             cache[key] = features

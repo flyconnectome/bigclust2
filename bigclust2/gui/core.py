@@ -1988,6 +1988,7 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["Esc"], "Deselect all points")
         _add_row(cl, ["C"], "Toggle the control panel")
         _add_row(cl, ["L"], "Toggle labels")
+        _add_row(cl, ["Tab"], "Flip between two configured property states (Color / Labels)")
         _add_row(cl, ["←", "/", "→"], "Increase / decrease label font size")
         _add_row(cl, ["↑", "/", "↓"], "Increase / decrease marker size")
         _add_row(cl, ["Space"], "Cycle through embeddings")

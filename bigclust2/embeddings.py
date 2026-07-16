@@ -6,6 +6,8 @@ import numpy as np
 
 from sklearn.neighbors import NearestNeighbors
 
+from .utils import check_finite_features
+
 
 @dataclass
 class KNNGraph:
@@ -210,6 +212,7 @@ def distance_matrix_from_features(features, ids, metric="cosine", normalize=Fals
     if len(ids) != X.shape[0]:
         raise ValueError("ids length does not match the number of feature rows")
 
+    check_finite_features(X, "distance matrix computation")
     D = pairwise_distances(X, metric=metric)
     # cosine/correlation can leave tiny non-zero diagonal values from float
     # error; force an exact zero diagonal so the matrix reads as precomputed
@@ -504,6 +507,9 @@ def prepare_embedding_input(
 
     if not is_precomputed:
         arr = rebalance_feature_matrix(arr, mode=rebalance_mode)
+        # Checked post-rebalance: rebalancing is NaN-aware but never fills, so
+        # missing values in the input survive it.
+        check_finite_features(arr, "embedding computation")
 
     if (not is_precomputed) and (pca_n_components is not None):
         from sklearn.decomposition import PCA
@@ -523,6 +529,7 @@ def prepare_embedding_input(
 
 def _knn_from_features(data, k, metric, algorithm="auto"):
     """Return k-nearest neighbor indices per row for feature vectors."""
+    check_finite_features(data, "nearest-neighbor computation")
     # Ask for one extra neighbor to account for the point itself.
     nbrs = NearestNeighbors(
         n_neighbors=min(k + 1, data.shape[0]),
@@ -834,6 +841,7 @@ def selection_silhouette_scores(
         n_samples = feats.shape[0]
         from sklearn.metrics import pairwise_distances
 
+        check_finite_features(feats, "silhouette computation")
         dmat = pairwise_distances(feats, metric=metric)
 
     if n_samples < 2:

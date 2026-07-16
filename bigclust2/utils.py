@@ -1,5 +1,6 @@
 import re
 import colorsys
+import warnings
 
 import numpy as np
 import pandas as pd
@@ -516,6 +517,50 @@ def labels_to_colors(
             colors[i] = cluster_to_color.get(lbl, ignore)
 
     return colors
+
+
+def check_finite_features(X, context, action="raise"):
+    """Check a feature matrix for non-finite values (NaN/inf).
+
+    Args:
+        X: The feature matrix — a numpy array or pandas DataFrame. For
+            DataFrames only numeric columns are scanned.
+        context: Short description of the operation the features are used for,
+            e.g. "grow/shrink selection". Used in the error/warning message.
+        action: "raise" to raise a ValueError when non-finite values are found,
+            "warn" to emit a warning instead.
+
+    Returns:
+        bool: True if the matrix is fully finite, False otherwise (only
+        reachable with ``action="warn"``).
+    """
+    if isinstance(X, pd.DataFrame):
+        values = X.select_dtypes(include="number").values
+    else:
+        values = np.asarray(X)
+
+    if values.dtype.kind not in "fc":  # integer/bool arrays are always finite
+        return True
+
+    finite = np.isfinite(values)
+    if finite.all():
+        return True
+
+    n_bad = int(finite.size - finite.sum())
+    bad_rows = int((~finite).any(axis=1).sum()) if finite.ndim == 2 else n_bad
+    bad_cols = int((~finite).any(axis=0).sum()) if finite.ndim == 2 else 1
+    n_rows, n_cols = (values.shape if finite.ndim == 2 else (values.size, 1))
+    msg = (
+        f"Feature matrix used for {context} contains {n_bad:,} non-finite "
+        f"values (NaN/inf) in {bad_rows:,} of {n_rows:,} rows "
+        f"({bad_cols:,} of {n_cols:,} columns). Impute or drop missing values "
+        f"before using feature-based {context}."
+    )
+    if action == "raise":
+        raise ValueError(msg)
+
+    warnings.warn(msg)
+    return False
 
 
 def is_color_column(series: pd.Series) -> bool:

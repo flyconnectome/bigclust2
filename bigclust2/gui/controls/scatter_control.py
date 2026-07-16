@@ -21,6 +21,7 @@ from ...embeddings import (
 )
 from ...clusters import evaluate_clustering_sample
 from ...utils import labels_to_colors, is_color_column
+from .toggle_dialog import TabToggleDialog
 
 
 CLIO_CLIENT = None
@@ -934,6 +935,19 @@ class ScatterControls(QtWidgets.QWidget):
         self.setWindowTitle("Controls")
         self.label_overrides = {}
 
+        # TAB flips the view between two configured A/B property states. The
+        # rendercanvas Qt backend lets Qt's focus traversal swallow Tab before it
+        # reaches the key_down handler, so we intercept it with an event filter on
+        # the inner canvas widget (same _subwidget hook used for focus in core.py).
+        self._toggle_config = None  # {"color": (a, b) | None, "label": (a, b) | None}
+        self._toggle_side = 0  # 0 == A, 1 == B
+        self._tab_target = None
+        canvas = getattr(self.figure, "canvas", None)
+        target = getattr(canvas, "_subwidget", None) or canvas
+        if target is not None:
+            target.installEventFilter(self)
+            self._tab_target = target
+
         # Build gui
         self.tab_layout = QtWidgets.QVBoxLayout()
         self.tab_layout.setContentsMargins(0, 0, 0, 0)
@@ -1074,7 +1088,6 @@ class ScatterControls(QtWidgets.QWidget):
         self.label_combo_box = _FilterableComboBox()
         label_form.addRow(QtWidgets.QLabel("Labels:"), self.label_combo_box)
         self.label_combo_box.currentIndexChanged.connect(self.set_labels)
-        self._current_leaf_labels = self.label_combo_box.currentText()
 
         # Checkbox for whether to show label counts
         self.label_count_check = QtWidgets.QCheckBox("Show label counts")
@@ -1278,6 +1291,16 @@ class ScatterControls(QtWidgets.QWidget):
         # we resize the window vertically
         self.tab1_layout.addStretch(1)
 
+        # Tab toggle: flip the view between two A/B states for Color by / Labels.
+        # Pinned to the bottom of the tab (below the stretch).
+        self.toggle_config_button = QtWidgets.QPushButton("Configure Tab toggle")
+        self.toggle_config_button.setToolTip(
+            "Define two states (A/B) for Color by and/or Labels, then press Tab "
+            "over the plot to flip between them."
+        )
+        self.toggle_config_button.clicked.connect(self.configure_toggle)
+        self.tab1_layout.addWidget(self.toggle_config_button)
+
         return
 
     def build_settings_gui(self):
@@ -1361,7 +1384,9 @@ class ScatterControls(QtWidgets.QWidget):
         label.setToolTip("Set the scaling factor for the point sizes in the figure.")
         hlayout.addWidget(label)
         self.point_scale_spinbox = QtWidgets.QDoubleSpinBox()
-        self.point_scale_spinbox.setRange(.01, 200)
+        self.point_scale_spinbox.setRange(.0001, 200)
+        self.point_scale_spinbox.setSingleStep(.001)
+        self.point_scale_spinbox.setDecimals(4)
         self.point_scale_spinbox.setValue(float(self.figure.point_scale))
         self.point_scale_spinbox.valueChanged.connect(
             lambda x: setattr(self.figure, "point_scale", x)
@@ -3468,7 +3493,19 @@ class ScatterControls(QtWidgets.QWidget):
             button.raise_()
 
     def eventFilter(self, obj, event):
-        """Keep custom tooltip buttons aligned when host widgets change."""
+        """Intercept Tab on the canvas and keep tooltip buttons aligned."""
+        # Tab over the scatter canvas flips the configured A/B property toggle.
+        # We must catch it here because Qt's focus traversal consumes Tab before
+        # it ever reaches the rendercanvas key_down handler. Returning True stops
+        # the event so focus doesn't move; Shift+Tab / modified Tab fall through.
+        if (
+            obj is getattr(self, "_tab_target", None)
+            and event.type() == QtCore.QEvent.KeyPress
+            and event.key() == QtCore.Qt.Key_Tab
+            and event.modifiers() == QtCore.Qt.NoModifier
+        ):
+            self.toggle_properties()
+            return True
         if obj in getattr(self, "_tooltip_anchors", {}) and event.type() in (
             QtCore.QEvent.Resize,
             QtCore.QEvent.Show,
@@ -4901,13 +4938,6 @@ class ScatterControls(QtWidgets.QWidget):
         if label == "Default":
             label = self.figure.default_label_col
 
-        # Nothing to do here
-        if self._current_leaf_labels != label:
-            self._last_leaf_labels, self._current_leaf_labels = (
-                self._current_leaf_labels,
-                label,
-            )
-
         if label == CLUSTER_DATA_OPTION:
             labels = (
                 "cluster_"
@@ -4948,14 +4978,66 @@ class ScatterControls(QtWidgets.QWidget):
         if self.figure.show_label_lines:
             self.figure.make_label_lines()
 
-    def switch_labels(self):
-        """Switch between current and last labels."""
-        if hasattr(self, "_last_leaf_labels"):
-            self.label_combo_box.setCurrentText(self._last_leaf_labels)
-            self.set_labels()
+    # Properties the Tab toggle can drive, mapped to the combo that applies them.
+    _TOGGLE_PROPERTIES = (("color", "Color by"), ("label", "Labels"))
+
+    def _toggle_combo(self, key):
+        """Return the combo box that drives a toggle-able property."""
+        return {
+            "color": self.color_combo_box,
+            "label": self.label_combo_box,
+        }.get(key)
+
+    def configure_toggle(self):
+        """Open the dialog to (re)define the Tab toggle's A/B states."""
+        prop_specs = []
+        for key, title in self._TOGGLE_PROPERTIES:
+            combo = self._toggle_combo(key)
+            options = [combo.itemText(i) for i in range(combo.count())]
+            prop_specs.append((key, title, options, combo.currentText()))
+
+        dialog = TabToggleDialog(prop_specs, current=self._toggle_config, parent=self)
+        if dialog.exec() != QtWidgets.QDialog.Accepted:
+            return
+
+        self._toggle_config = dialog.selected_config()
+        self._toggle_side = 0
+        self.apply_toggle_side(0)
+
+    def apply_toggle_side(self, side):
+        """Apply state ``side`` (0 == A, 1 == B) to every enabled property."""
+        if not self._toggle_config:
+            return
+        applied = []
+        for key, title in self._TOGGLE_PROPERTIES:
+            cfg = self._toggle_config.get(key)
+            if not cfg:
+                continue
+            combo = self._toggle_combo(key)
+            col = cfg[side]
+            # Setting the combo text fires its currentIndexChanged signal, which
+            # runs the normal set_colors / set_labels apply path. Skip silently
+            # if the column vanished after a data reload.
+            if not col or combo is None or combo.findText(col) < 0:
+                continue
+            combo.setCurrentText(col)
+            applied.append(f"{title.lower()}: {col}")
+
+        if applied:
+            letter = "A" if side == 0 else "B"
             self.figure.show_message(
-                f"Labels: {self._current_leaf_labels}", color="lightgreen", duration=2
+                f"Toggle → {letter}  ({', '.join(applied)})",
+                color="lightgreen",
+                duration=2,
             )
+
+    def toggle_properties(self):
+        """Tab entry point: flip the A/B toggle, or configure it if unset."""
+        if not self._toggle_config:
+            self.configure_toggle()
+            return
+        self._toggle_side ^= 1
+        self.apply_toggle_side(self._toggle_side)
 
     def close(self):
         """Close the controls."""
@@ -5083,18 +5165,24 @@ class ScatterControls(QtWidgets.QWidget):
                 flush=True,
             )
 
-        dists = prepare_embedding_input(
-            dists.values if isinstance(dists, pd.DataFrame) else dists,
-            is_precomputed=is_precomputed,
-            method=method,
-            metric=metric,
-            rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
-            pca_n_components=pca_components,
-            random_state=random_state,
-        )
+        try:
+            dists = prepare_embedding_input(
+                dists.values if isinstance(dists, pd.DataFrame) else dists,
+                is_precomputed=is_precomputed,
+                method=method,
+                metric=metric,
+                rebalance_mode=self.umap_feature_rebalance_combo_box.currentText(),
+                pca_n_components=pca_components,
+                random_state=random_state,
+            )
 
-        with warnings.catch_warnings(action="ignore"):
-            xy = fit.fit_transform(dists)
+            with warnings.catch_warnings(action="ignore"):
+                xy = fit.fit_transform(dists)
+        except ValueError as e:
+            # E.g. non-finite values in the feature matrix.
+            logger.error(f"Embedding failed: {e}")
+            self.figure.show_message(f"Embedding error: {e}", color="red", duration=4)
+            return
 
         self._apply_recomputed_positions(xy)
 

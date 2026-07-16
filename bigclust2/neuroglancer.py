@@ -311,6 +311,8 @@ class NglViewer:
                 vis.material.color = gfx.Color(self._colors[key])
         if getattr(self.viewer, "controls", None):
             self.viewer.controls.update_legend()
+        self.viewer._render_stale = True
+        self.viewer.canvas.request_draw()
 
     def make_volume(self, url, mip=0):
         """Make a volume from a URL."""

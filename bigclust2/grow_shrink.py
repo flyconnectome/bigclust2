@@ -25,6 +25,8 @@ from __future__ import annotations
 
 import numpy as np
 
+from .utils import check_finite_features
+
 SOURCE_EMBEDDING = "embedding"
 SOURCE_DISTANCES = "distances"
 SOURCE_FEATURES = "features"
@@ -126,7 +128,20 @@ def nearest_distance_to_selection(
     if source == SOURCE_FEATURES:
         if not dists or "features" not in dists:
             raise GrowShrinkUnavailable("No feature vectors available.")
-        return _nearest_from_coords(np.asarray(dists["features"]), selected, metric)
+        X = np.asarray(dists["features"])
+        try:
+            score = _nearest_from_coords(X, selected, metric)
+        except ValueError:
+            # cKDTree/sklearn refuse non-finite input with a generic message;
+            # replace it with one that carries row/column counts if that is
+            # indeed the cause (a full-matrix scan is fine on the error path).
+            check_finite_features(X, "grow/shrink selection")
+            raise
+        if np.isnan(score).any():
+            # The euclidean GEMM path computes straight through NaNs, which
+            # would otherwise silently exclude those points from the grow.
+            check_finite_features(X, "grow/shrink selection")
+        return score
 
     if source == SOURCE_DISTANCES:
         if not dists or "distances" not in dists:
@@ -205,7 +220,17 @@ def within_selection_neighbor_distances(
     if source == SOURCE_FEATURES:
         if not dists or "features" not in dists:
             raise GrowShrinkUnavailable("No feature vectors available.")
-        return _within_from_coords(np.asarray(dists["features"])[sel], metric)
+        # NaN handling mirrors `nearest_distance_to_selection` (which see);
+        # only the selected rows are used, so only those are checked.
+        X_sel = np.asarray(dists["features"])[sel]
+        try:
+            w = _within_from_coords(X_sel, metric)
+        except ValueError:
+            check_finite_features(X_sel, "grow/shrink selection")
+            raise
+        if np.isnan(w).any():
+            check_finite_features(X_sel, "grow/shrink selection")
+        return w
 
     if source == SOURCE_DISTANCES:
         if not dists or "distances" not in dists:
@@ -306,7 +331,7 @@ def _within_from_coords(X, metric):
         return _within_euclidean_gemm(X)
 
     # Any other metric: brute force.
-    from sklearn.metrics import pairwise_distances
+    from sklearn.metrics import pairwise_distances  
 
     D = pairwise_distances(X, X, metric=metric)
     np.fill_diagonal(D, np.inf)

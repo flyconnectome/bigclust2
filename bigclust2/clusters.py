@@ -11,6 +11,8 @@ import scipy.cluster.hierarchy as sch
 
 from scipy.spatial.distance import squareform, pdist
 
+from .utils import check_finite_features
+
 logger = logging.getLogger(__name__)
 
 
@@ -163,6 +165,9 @@ def run_clustering(
         return labels.astype(int)
 
     arr = np.asarray(data, dtype=np.float64)
+    if not is_precomputed:
+        # Covers every method below, incl. the noise-reassignment centroid path.
+        check_finite_features(arr, "clustering")
 
     if method == "HDBSCAN":
         from sklearn.cluster import HDBSCAN
@@ -937,6 +942,7 @@ def evaluate_clustering_sample(
             raise ValueError(
                 "`data` must be a 2D feature matrix when `is_precomputed=False`."
             )
+        check_finite_features(feats, "label evaluation")
         return silhouette_samples(feats, labels, metric=metric)
 
     if method in ("neighbor_consistency", "nn_consistency"):
@@ -978,6 +984,7 @@ def _knn_neighbors(data, k_neighbors, is_precomputed, metric):
                 "`data` must be a 2D feature matrix when `is_precomputed=False`."
             )
         n_samples = feats.shape[0]
+        check_finite_features(feats, "nearest-neighbor computation")
         n_neighbors = min(k_neighbors + 1, n_samples)
         nn = NearestNeighbors(n_neighbors=n_neighbors, metric=metric)
         nn.fit(feats)

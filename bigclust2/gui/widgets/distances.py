@@ -1,3 +1,5 @@
+import logging
+
 import numpy as np
 import pandas as pd
 
@@ -13,6 +15,8 @@ from bigclust2.embeddings import distance_matrix_from_features
 # many neurons both the O(k^2) compute and the QTableView render are too heavy,
 # so we show a hint instead of computing.
 MAX_HEATMAP_SELECTION = 5000
+
+logger = logging.getLogger(__name__)
 
 
 class RotatedHeaderView(QtWidgets.QHeaderView):
@@ -596,8 +600,10 @@ class DistancesTable(QtWidgets.QWidget):
         self._show_oversize_hint(None)
         try:
             sub = self._compute_selection_submatrix(positions)
-        except ValueError:
-            # No numeric feature columns survive for this subset.
+        except ValueError as e:
+            # No numeric feature columns survive for this subset, or the
+            # features contain non-finite values.
+            logger.warning(f"Selection distance matrix failed: {e}")
             self._model.set_view(pd.DataFrame())
             return
         self._model.set_view(sub)

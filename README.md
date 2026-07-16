@@ -1,7 +1,7 @@
 # BigClust 2.0
 
 > [!NOTE]
-> This project is under active development but you can already use it to explore your clustering datasets. If you have any feedback or questions, please open an issue here on GitHub.
+> This project is under active development but that shouldn't stop you from using it to explore your clustering datasets. If you have any feedback or questions, please open an issue here on GitHub.
 
 `bigclust2` is a re-design of [`bigclust`](https://github.com/flyconnectome/bigclust), a graphical interface for interactively exploring clusterings of high-dimensional connectomic data.
 Typically this means morphological or connectivity-based embeddings but it can be used for any kind of distances or features.
@@ -37,10 +37,15 @@ See the [Data Format](./DATA_FORMAT.md) documentation for details on the expecte
 First make sure you have the Python package manager `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/). Then run:
 
 ```bash
-uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
+uvx bigclust2@latest
 ```
 
-This will install the latest released version of `bigclust2` from this repository and start the GUI.
+To work with the latest development version of `bigclust2`, you can run it directly from this repository:
+
+
+```bash
+uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
+```
 
 > [!TIP]
 > Note the `@main` in above command? This is asking `uvx` to always use the latest version of `bigclust2`.

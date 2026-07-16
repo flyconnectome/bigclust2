@@ -1,0 +1,76 @@
+name: Publish to PyPI
+
+# Publishes bigclust2 to PyPI when a GitHub Release is published.
+# Uses PyPI Trusted Publishing (OIDC) - no API token/secret required.
+#
+# One-time setup on PyPI (https://pypi.org/manage/account/publishing/):
+#   Project name:    bigclust2
+#   Owner:           flyconnectome
+#   Repository:      bigclust2
+#   Workflow name:   publish.yml
+#   Environment:     pypi
+#
+# Release flow:
+#   1. Bump the version in bigclust2/__version__.py (e.g. "0.2.0").
+#   2. Commit, then create a GitHub Release with tag "v0.2.0".
+#   3. This workflow builds, validates, and uploads to PyPI.
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build distribution
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: "3.11"
+
+      - name: Build sdist and wheel
+        run: uv build
+
+      - name: Check package metadata
+        run: uvx twine check dist/*
+
+      - name: Verify tag matches package version
+        if: github.event_name == 'release'
+        run: |
+          PKG_VERSION=$(grep -oE '"[^"]+"' bigclust2/__version__.py | tr -d '"')
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          echo "Package version: $PKG_VERSION"
+          echo "Release tag:     $TAG_VERSION"
+          if [ "$PKG_VERSION" != "$TAG_VERSION" ]; then
+            echo "::error::Release tag ($TAG_VERSION) does not match bigclust2/__version__.py ($PKG_VERSION)."
+            exit 1
+          fi
+
+      - name: Upload distribution artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+  publish:
+    name: Publish to PyPI
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/bigclust2
+    permissions:
+      id-token: write  # required for Trusted Publishing (OIDC)
+    steps:
+      - name: Download distribution artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: dist
+          path: dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1

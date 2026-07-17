@@ -51,7 +51,7 @@ dependencies = [
     "navis>=1.10.0",
     "dvidtools>=0.6.0",
     "pyperclip>=1.11.0",
-    "nglscenes>=0.5.0",
+    "nglscenes>=0.5.1",
     "pyarrow>=23.0.0",
     "pyqtgraph>=0.14.0",
     "scikit-learn>=1.7.2",
@@ -90,5 +90,4 @@ exclude = ["assets*", "scripts*", "tests*"]
 bigclust2 = ["assets/*.png"]
 
 [tool.uv.sources]
-nglscenes = { git = "https://github.com/schlegelp/nglscenes", rev = "main" }
 clio-py = { git = "https://github.com/schlegelp/clio-py", rev = "main" }

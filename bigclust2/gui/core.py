@@ -76,6 +76,58 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 logger = logging.getLogger(__name__)
 
 
+class _TracebackInjectingFilter(logging.Filter):
+    """When enabled, attach the currently-handled exception to log records that
+    don't carry one, so handlers doing ``logger.error(f"...: {e}")`` inside an
+    ``except`` block still emit a full traceback.
+
+    Toggled by Help -> Debug -> Tracebacks. Outside an ``except`` block
+    ``sys.exc_info()`` is empty, so ordinary (non-exception) logs are untouched.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self.enabled = False
+
+    def filter(self, record):
+        if self.enabled and not record.exc_info:
+            exc = sys.exc_info()
+            if exc[0] is not None:
+                record.exc_info = exc
+        return True
+
+
+# Shared filter instance plus the handler we install when nothing else emits.
+_TRACEBACK_FILTER = _TracebackInjectingFilter()
+_TRACEBACK_HANDLER = None
+
+
+def _set_tracebacks_enabled(enabled):
+    """Enable/disable full console tracebacks for all bigclust2 error logs.
+
+    Attaches the traceback-injecting filter to whatever actually emits records:
+    existing root handlers if configured (e.g. launched with ``--debug``),
+    otherwise a dedicated handler on the ``bigclust2`` logger -- which also
+    suppresses logging's single-line ``lastResort`` fallback, so exactly one
+    traceback prints. Disabling just flips the flag; the (idempotent) wiring is
+    left in place as a no-op.
+    """
+    global _TRACEBACK_HANDLER
+    _TRACEBACK_FILTER.enabled = bool(enabled)
+    if not enabled:
+        return
+
+    root_handlers = logging.getLogger().handlers
+    if root_handlers:
+        for handler in root_handlers:
+            if _TRACEBACK_FILTER not in handler.filters:
+                handler.addFilter(_TRACEBACK_FILTER)
+    elif _TRACEBACK_HANDLER is None:
+        _TRACEBACK_HANDLER = logging.StreamHandler()
+        _TRACEBACK_HANDLER.addFilter(_TRACEBACK_FILTER)
+        logging.getLogger("bigclust2").addHandler(_TRACEBACK_HANDLER)
+
+
 def _subset_knn(graph, selected_indices):
     """Subset a KNNGraph to a selection, remapping neighbor row positions.
 
@@ -1886,10 +1938,22 @@ class MainWindow(QMainWindow):
             )
         )
 
+        # Global, app-wide toggle: surface full tracebacks in the console for
+        # every caught error (any bigclust2 module). Unlike Scatter/Viewer this
+        # is not per-view, so it is intentionally left out of
+        # `_sync_actions_to_view` and keeps its state across view switches.
+        self.debug_tracebacks_action = QAction("Tracebacks", self)
+        self.debug_tracebacks_action.setCheckable(True)
+        self.debug_tracebacks_action.toggled.connect(
+            lambda checked: _set_tracebacks_enabled(checked)
+        )
+
         debug_menu.addAction(self.debug_all_action)
         debug_menu.addSeparator()
         debug_menu.addAction(self.debug_scatter_action)
         debug_menu.addAction(self.debug_viewer_action)
+        debug_menu.addSeparator()
+        debug_menu.addAction(self.debug_tracebacks_action)
 
         help_menu.addSeparator()
 

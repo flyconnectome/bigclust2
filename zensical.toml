@@ -1,0 +1,176 @@
+# Docs: https://zensical.org/docs/
+#
+#   uv run --extra docs zensical serve -o     # live preview
+#   uv run --extra docs zensical build        # -> site/
+#
+# Note there is deliberately no mkdocstrings handler here. BigClust is an
+# application, not a library - its public surface is the GUI, and that is
+# documented by hand in `reference/`. Adding a generated API reference would
+# document internals nobody calls.
+
+[project]
+site_name = "BigClust"
+site_description = "A graphical interface for interactively exploring clusterings of high-dimensional connectomic data."
+site_author = "Philipp Schlegel"
+site_url = "https://flyconnectome.github.io/bigclust2/"
+repo_url = "https://github.com/flyconnectome/bigclust2"
+repo_name = "flyconnectome/bigclust2"
+edit_uri = "edit/main/docs/"
+
+copyright = """
+Copyright &copy; 2026 Philipp Schlegel &ndash;
+<a href="https://github.com/flyconnectome/bigclust2/blob/main/LICENSE">GPL-3.0-or-later</a>
+"""
+
+# Loaded on every page, not just the landing page. Instant navigation swaps the
+# page container, and anything linked from a per-page template block can go with
+# it; both files are scoped so they are inert everywhere except the homepage.
+extra_css = ["stylesheets/extra.css", "stylesheets/home.css"]
+extra_javascript = ["javascripts/clusters.js"]
+
+nav = [
+  { "Home" = "index.md" },
+  { "Get started" = [
+    { "Get started" = "get-started/index.md" },
+    { "Installation" = "get-started/installation.md" },
+    { "The example dataset" = "get-started/example-dataset.md" },
+    { "Your first project" = "get-started/first-project.md" },
+    { "Credentials" = "get-started/credentials.md" },
+  ] },
+  { "How-to" = [
+    { "How-to" = "how-to/index.md" },
+    { "Create a local dataset" = "how-to/create-a-local-dataset.md" },
+    { "Load a remote dataset" = "how-to/load-a-remote-dataset.md" },
+    { "Load part of a dataset" = "how-to/filter-a-dataset.md" },
+    { "Recompute the embedding" = "how-to/recompute-embeddings.md" },
+    { "Recluster the data" = "how-to/recluster.md" },
+    { "Find what separates two groups" = "how-to/compare-features.md" },
+    { "Refresh the meta data" = "how-to/update-meta-data.md" },
+    { "Push annotations" = "how-to/push-annotations.md" },
+    { "Export your work" = "how-to/export.md" },
+    { "Work in several views" = "how-to/work-in-several-views.md" },
+  ] },
+  { "Concepts" = [
+    { "Concepts" = "concepts/index.md" },
+    { "Embeddings, distances, features" = "concepts/data-model.md" },
+    { "Why data sources are directories" = "concepts/data-sources.md" },
+    { "How selection works" = "concepts/selection.md" },
+  ] },
+  { "Reference" = [
+    { "Reference" = "reference/index.md" },
+    { "Data format" = "reference/data-format.md" },
+    { "Keyboard and mouse" = "reference/shortcuts.md" },
+    { "Widgets" = "reference/widgets.md" },
+    { "Menus" = "reference/menus.md" },
+    { "Command line" = "reference/cli.md" },
+    { "Annotation backends" = "reference/backends.md" },
+    { "Troubleshooting" = "reference/troubleshooting.md" },
+  ] },
+]
+
+# ----------------------------------------------------------------------------
+
+[project.theme]
+logo = "assets/logo.svg"
+favicon = "assets/logo.svg"
+language = "en"
+
+features = [
+  "announce.dismiss",
+  "content.action.edit",
+  "content.code.annotate",
+  "content.code.copy",
+  "content.code.select",
+  "content.footnote.tooltips",
+  "content.tabs.link",
+  "content.tooltips",
+  "navigation.footer",
+  "navigation.indexes",
+  "navigation.instant",
+  "navigation.instant.prefetch",
+  "navigation.sections",
+  "navigation.tabs",
+  "navigation.top",
+  "navigation.tracking",
+  "search.highlight",
+  "search.suggest",
+  "toc.follow",
+]
+
+# The landing page overrides the `hero` block to mount the screenshot.
+custom_dir = "overrides"
+
+[project.theme.font]
+text = "Inter"
+code = "JetBrains Mono"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: light)"
+scheme = "default"
+primary = "deep orange"
+accent = "cyan"
+toggle.icon = "lucide/sun"
+toggle.name = "Switch to dark mode"
+
+[[project.theme.palette]]
+media = "(prefers-color-scheme: dark)"
+scheme = "slate"
+primary = "deep orange"
+accent = "cyan"
+toggle.icon = "lucide/moon"
+toggle.name = "Switch to light mode"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/github"
+link = "https://github.com/flyconnectome/bigclust2"
+
+[[project.extra.social]]
+icon = "fontawesome/brands/python"
+link = "https://pypi.org/project/bigclust2/"
+
+# ----------------------------------------------------------------------------
+
+[project.plugins.search]
+
+# ----------------------------------------------------------------------------
+
+[project.markdown_extensions.abbr]
+[project.markdown_extensions.admonition]
+[project.markdown_extensions.attr_list]
+[project.markdown_extensions.def_list]
+[project.markdown_extensions.footnotes]
+[project.markdown_extensions.md_in_html]
+[project.markdown_extensions.tables]
+[project.markdown_extensions.toc]
+permalink = true
+
+[project.markdown_extensions.pymdownx.betterem]
+[project.markdown_extensions.pymdownx.caret]
+[project.markdown_extensions.pymdownx.details]
+[project.markdown_extensions.pymdownx.mark]
+[project.markdown_extensions.pymdownx.smartsymbols]
+[project.markdown_extensions.pymdownx.tilde]
+[project.markdown_extensions.pymdownx.inlinehilite]
+[project.markdown_extensions.pymdownx.keys]
+[project.markdown_extensions.pymdownx.magiclink]
+
+[project.markdown_extensions.pymdownx.emoji]
+emoji_generator = "zensical.extensions.emoji.to_svg"
+emoji_index = "zensical.extensions.emoji.twemoji"
+
+[project.markdown_extensions.pymdownx.highlight]
+anchor_linenums = true
+line_spans = "__span"
+pygments_lang_class = true
+
+[project.markdown_extensions.pymdownx.superfences]
+custom_fences = [
+  { name = "mermaid", class = "mermaid", format = "pymdownx.superfences.fence_code_format" },
+]
+
+[project.markdown_extensions.pymdownx.tabbed]
+alternate_style = true
+combine_header_slug = true
+
+[project.markdown_extensions.pymdownx.tasklist]
+custom_checkbox = true

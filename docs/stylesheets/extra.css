@@ -1,0 +1,166 @@
+/* Site-wide tweaks. */
+
+[data-md-color-scheme="slate"] {
+  --md-hue: 232;
+}
+
+/* ------------------------------------------------------------------ callouts */
+
+/* The annotated screenshot on the landing page. The badges are positioned as
+   percentages over the image rather than burned into it, so the numbering can be
+   re-ordered, re-worded and translated without going back to an image editor -
+   and so the numbers stay crisp at every zoom level and screen density.
+   `--x` / `--y` are set per badge in the markup. */
+.bc-shot {
+  position: relative;
+  margin: 1.4rem 0 0.6rem;
+  line-height: 0;
+}
+
+.bc-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 0.4rem;
+  box-shadow: 0 0.4rem 1.6rem rgba(0, 0, 0, 0.32);
+}
+
+.bc-shot__pin {
+  position: absolute;
+  top: var(--y);
+  left: var(--x);
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.5em;
+  height: 1.5em;
+  border-radius: 50%;
+  background: var(--md-accent-fg-color);
+  box-shadow: 0 0 0 0.18em rgba(0, 0, 0, 0.55), 0 0.1rem 0.4rem rgba(0, 0, 0, 0.6);
+  color: #06232a;
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  text-decoration: none;
+  transform: translate(-50%, -50%);
+  transition: transform 0.15s, box-shadow 0.15s;
+}
+
+.bc-shot__pin:hover,
+.bc-shot__pin:focus {
+  color: #06232a;
+  transform: translate(-50%, -50%) scale(1.22);
+  box-shadow: 0 0 0 0.18em rgba(0, 0, 0, 0.55), 0 0.2rem 0.7rem rgba(0, 0, 0, 0.8);
+}
+
+/* The legend below the shot. Numbers here are the same tokens as the pins, so the
+   two read as one figure. */
+.md-typeset .bc-legend {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr));
+  gap: 0.5rem 1.2rem;
+  margin: 0.4rem 0 1.4rem;
+  padding: 0;
+  list-style: none;
+  counter-reset: bc-legend;
+}
+
+.md-typeset .bc-legend > li {
+  position: relative;
+  margin: 0;
+  padding-left: 1.9rem;
+  font-size: 0.7rem;
+  line-height: 1.55;
+  counter-increment: bc-legend;
+}
+
+.md-typeset .bc-legend > li::before {
+  position: absolute;
+  top: 0.1rem;
+  left: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.25rem;
+  height: 1.25rem;
+  border-radius: 50%;
+  background: var(--md-accent-fg-color);
+  color: #06232a;
+  content: counter(bc-legend);
+  font-size: 0.62rem;
+  font-weight: 700;
+}
+
+/* -------------------------------------------------------------------- media */
+
+/* Screen recordings of the app. Capped in height so a 30-second clip of the
+   scatter plot does not push the surrounding steps off the screen. */
+.md-typeset figure.bc-clip {
+  margin: 1.2rem 0;
+}
+
+.md-typeset figure.bc-clip img,
+.md-typeset figure.bc-clip video {
+  width: 100%;
+  max-width: 46rem;
+  border-radius: 0.4rem;
+  box-shadow: 0 0.2rem 0.9rem rgba(0, 0, 0, 0.28);
+}
+
+/* Stands in for a clip that has not been recorded yet. It is deliberately loud:
+   an obviously-missing figure gets replaced, a quietly-missing one does not.
+   See scripts/DOCS_MEDIA.md for the shot list. */
+.md-typeset .bc-clip--todo {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 7rem;
+  max-width: 46rem;
+  padding: 1rem;
+  border: 0.1rem dashed var(--md-default-fg-color--lighter);
+  border-radius: 0.4rem;
+  background: var(--md-code-bg-color);
+  color: var(--md-default-fg-color--light);
+  font-size: 0.68rem;
+  text-align: center;
+}
+
+.md-typeset .bc-clip--todo code {
+  font-size: 0.9em;
+}
+
+/* --------------------------------------------------------------- shortcuts */
+
+/* Shortcut tables are scanned, not read. Keep the key column narrow and stop the
+   chords wrapping mid-combination. */
+.md-typeset .bc-keys td:first-child,
+.md-typeset .bc-keys th:first-child {
+  white-space: nowrap;
+}
+
+.md-typeset .bc-keys td,
+.md-typeset .bc-keys th {
+  padding: 0.35rem 0.6rem;
+}
+
+/* ------------------------------------------------------------------- tables */
+
+/* Widget and menu reference tables carry a lot of short cells; the theme's
+   default padding makes them twice as tall as they need to be. */
+.md-typeset .bc-dense td,
+.md-typeset .bc-dense th {
+  padding: 0.35rem 0.6rem;
+  font-size: 0.68rem;
+}
+
+/* ---------------------------------------------------------------- misc */
+
+.md-typeset .md-button {
+  border-radius: 0.3rem;
+}
+
+/* IDs, column names and backend keys are the most-copied things on this site. */
+.md-typeset code {
+  word-break: normal;
+}

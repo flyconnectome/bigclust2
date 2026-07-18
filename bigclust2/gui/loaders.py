@@ -1,5 +1,6 @@
 import json
 import logging
+from html import escape
 
 import requests
 from PySide6.QtWidgets import (
@@ -21,6 +22,7 @@ from PySide6.QtCore import QSettings, Qt
 
 from ..data import parse_directory, SingleProjectLoader
 from ..utils import string_to_polars_filter, is_list_of_ids
+from .docs import docs_link
 
 logger = logging.getLogger(__name__)
 
@@ -90,6 +92,10 @@ class OpenProjectDialog(QDialog):
         self.path_error_label.setWordWrap(True)
         self.path_error_label.setStyleSheet("color: #a00; margin-left: 4px; font-size: 12px;")
         self.path_error_label.setVisible(False)
+        # Errors here carry a link to the page that explains them - this dialog
+        # is where most people meet a malformed project for the first time.
+        self.path_error_label.setTextFormat(Qt.RichText)
+        self.path_error_label.setOpenExternalLinks(True)
         path_group.addWidget(self.path_error_label)
 
         layout.addLayout(path_group)
@@ -288,21 +294,36 @@ class OpenProjectDialog(QDialog):
         self.path_error_label.setVisible(False)
 
     def _format_path_error(self, exc):
+        data_format = docs_link("reference/data-format/", "data format")
+        remote = docs_link("how-to/load-a-remote-dataset/", "loading a remote dataset")
+
         if isinstance(exc, FileNotFoundError):
             text = str(exc)
             if "No 'info' file found" in text:
-                return "No info file found in selected directory. Make sure the dataset folder contains an 'info' file."
+                return (
+                    "No info file found in selected directory. Make sure the "
+                    f"dataset folder contains an 'info' file - see {data_format}."
+                )
             if "Path does not exist" in text:
                 return "The path does not exist. Enter a valid local folder or URL."
             return "Path not found or inaccessible."
         if isinstance(exc, json.JSONDecodeError):
-            return "Malformed info file. The 'info' file must contain valid JSON."
+            return (
+                "Malformed info file. The 'info' file must contain valid JSON "
+                f"(note JSON has no comments) - see {data_format}."
+            )
         if isinstance(exc, ValueError):
             if "Invalid info format" in str(exc):
-                return "Malformed info file. Expected a JSON object or list in the 'info' file."
-            return f"Invalid dataset info: {exc}"
+                return (
+                    "Malformed info file. Expected a JSON object or list in the "
+                    f"'info' file - see {data_format}."
+                )
+            return f"Invalid dataset info: {escape(str(exc))}"
         if isinstance(exc, requests.exceptions.RequestException):
-            return "Unable to load remote info file. Check the URL and your network connection."
+            return (
+                "Unable to load remote info file. Check the URL and your network "
+                f"connection. Note only http:// and https:// are supported - see {remote}."
+            )
         return "Unable to parse path. Use a valid local dataset directory or remote URL."
 
     def validate_filter(self):

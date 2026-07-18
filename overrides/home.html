@@ -1,0 +1,53 @@
+{#-
+  The landing page.
+
+  The `hero` block renders inside `.md-container`, above the tabs and the main
+  content. Unlike a fixed-position hero this one stays in the flow, so the header
+  keeps its normal styling and no JavaScript is needed to manage a scroll state.
+
+  Two backdrops, in order of preference: `clusters.js` draws the animated point
+  cloud onto the canvas and marks the hero `--webgl`, which fades the blurred
+  screenshot out. Without JavaScript or WebGL the screenshot is simply what stays
+  on screen, so the fallback needs no code of its own.
+
+  The stylesheet and the script are loaded globally (see `extra_css` /
+  `extra_javascript` in zensical.toml) rather than from a block here, so that
+  instant navigation cannot swap them out from under the page.
+-#}
+{% extends "base.html" %}
+
+{% block hero %}
+  <div class="bc-hero">
+    <div class="bc-hero__bg" aria-hidden="true"></div>
+    <canvas class="bc-hero__canvas" id="bc-clusters" aria-hidden="true"></canvas>
+    <div class="bc-hero__scrim" aria-hidden="true"></div>
+
+    {#- `md-typeset` is what carries the theme's `.md-button` styling. -#}
+    <div class="bc-hero__inner">
+      <div class="md-typeset md-grid">
+        <div class="bc-hero__copy">
+          <p class="bc-hero__eyebrow">Explore clusterings, not spreadsheets</p>
+          <h1 class="bc-hero__title">A million neurons,<br>one scatter plot</h1>
+          <p class="bc-hero__text">
+            <strong>BigClust</strong> puts an interactive 2D clustering and a
+            Neuroglancer-style 3D viewer side by side. Lasso a group of points
+            and see the neurons. Recluster with a different method and watch the
+            structure move. Push the labels you settle on straight back to Clio
+            or SeaTable.
+          </p>
+          <p class="bc-hero__actions">
+            <a class="md-button md-button--primary" href="{{ 'get-started/' | url }}">
+              Get started
+            </a>
+            <a class="md-button" href="{{ 'how-to/' | url }}">
+              How-to guides
+            </a>
+          </p>
+          <p class="bc-hero__hint">
+            Already have <code>uv</code>? &nbsp;<code>uvx bigclust2@latest</code>
+          </p>
+        </div>
+      </div>
+    </div>
+  </div>
+{% endblock %}

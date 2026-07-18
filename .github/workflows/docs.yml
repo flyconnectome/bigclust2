@@ -1,0 +1,53 @@
+name: Documentation
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The docs are hand-written - nothing is generated from the source - so this
+      # deliberately does *not* install bigclust2 itself. That keeps the docs build
+      # off the heavy GUI stack (PySide6, pygfx, numba, cloud-volume) and makes it
+      # a ~20s job instead of a multi-minute one.
+      - run: uv venv
+      - run: uv pip install "zensical>=0.0.50"
+
+      # --strict turns the link checker's warnings into failures. A docs build that
+      # merrily ships dead cross-references is a docs build nobody trusts twice.
+      - run: uv run zensical build --clean --strict
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    # Pull requests get built and link-checked, but only main gets published.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
+        id: deployment

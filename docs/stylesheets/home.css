@@ -1,0 +1,294 @@
+/* The landing page.
+ *
+ * Everything here is scoped to the presence of the hero, so the file is safe to
+ * load on every page (which it has to be - `navigation.instant` swaps the page
+ * container, and a stylesheet linked from a per-page template block goes with it).
+ *
+ * Unlike connecto's landing page there is no JS here and nothing is `position:
+ * fixed`. The hero is an ordinary block in the flow, so the header needs no
+ * scroll-state handling and the page degrades to "a screenshot and some text"
+ * with styles off.
+ */
+
+:root {
+  --bc-orange: #ff7043;
+  --bc-cyan: #26c6da;
+  --bc-amber: #ffca28;
+  --bc-ink: #17151c;
+}
+
+/* ---------------------------------------------------------------------- hero */
+
+.bc-hero {
+  position: relative;
+  overflow: hidden;
+  background-color: var(--bc-ink);
+}
+
+/* The no-WebGL backdrop: the screenshot as atmosphere rather than information -
+   it is shown properly, annotated, further down the page. Blurred and scaled past
+   the edges so the blur has something to sample and does not vignette at the
+   borders.
+
+   This is the *fallback*. When `clusters.js` gets a context it marks the hero
+   `--webgl` and this fades out behind the point cloud. Doing it in that order
+   means no JavaScript and no GPU both land on something worth looking at, with
+   no flash of empty black while the script decides. */
+.bc-hero__bg {
+  position: absolute;
+  inset: -6%;
+  background-image: url("../_static/screenshot.png");
+  background-position: center 32%;
+  background-size: cover;
+  filter: blur(1.4rem) saturate(1.25);
+  opacity: 0.55;
+  transform: scale(1.06);
+  transition: opacity 0.9s ease;
+}
+
+.bc-hero--webgl .bc-hero__bg {
+  opacity: 0.09;
+}
+
+/* The animated embedding. Sits above the screenshot and below the scrim, so the
+   scrim darkens it under the copy just as it does the screenshot. */
+.bc-hero__canvas {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.bc-hero__scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(ellipse at 30% 40%, rgba(23, 21, 28, 0.55) 0%, rgba(23, 21, 28, 0.86) 55%, rgba(23, 21, 28, 0.97) 100%),
+    linear-gradient(to bottom, rgba(23, 21, 28, 0.55) 0%, rgba(23, 21, 28, 0) 30%, rgba(23, 21, 28, 0.9) 100%);
+}
+
+/* With the point cloud running the scrim only has to protect the copy on the
+   left - dimming the whole field would waste the artwork. */
+.bc-hero--webgl .bc-hero__scrim {
+  background:
+    linear-gradient(to right, rgba(23, 21, 28, 0.92) 0%, rgba(23, 21, 28, 0.72) 32%, rgba(23, 21, 28, 0.12) 62%, rgba(23, 21, 28, 0) 78%),
+    linear-gradient(to bottom, rgba(23, 21, 28, 0.55) 0%, rgba(23, 21, 28, 0) 26%, rgba(23, 21, 28, 0.55) 88%, rgba(23, 21, 28, 0.92) 100%);
+}
+
+.bc-hero__inner {
+  position: relative;
+  z-index: 1;
+  padding: 4.4rem 0.8rem 3.4rem;
+  /* The cloud needs vertical room to read as a cloud rather than a stripe. */
+  min-height: 27rem;
+  display: flex;
+  align-items: center;
+}
+
+/* `.bc-hero__inner` is a flex container so the copy centres against the cloud;
+   without this its single child (the theme's `.md-grid`) would shrink to fit. */
+.bc-hero__inner > .md-grid {
+  width: 100%;
+}
+
+.bc-hero__copy {
+  max-width: 33rem;
+}
+
+/* These all carry an explicit colour: the hero lives inside `.md-typeset` (which
+   is what gives the buttons their styling), and `.md-typeset h1` would otherwise
+   win on specificity and paint the headline near-black on a near-black backdrop. */
+.bc-hero .bc-hero__eyebrow {
+  margin: 0 0 0.9rem;
+  color: var(--bc-amber);
+  font-size: 0.62rem;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+}
+
+.bc-hero .bc-hero__title {
+  margin: 0 0 0.9rem;
+  color: #fff;
+  font-size: 2.3rem;
+  font-weight: 700;
+  line-height: 1.12;
+  letter-spacing: -0.04em;
+  text-shadow: 0 0.1rem 1.2rem rgba(0, 0, 0, 0.75);
+}
+
+.bc-hero .bc-hero__text {
+  margin: 0 0 1.6rem;
+  color: rgba(255, 255, 255, 0.84);
+  font-size: 0.82rem;
+  line-height: 1.65;
+  text-shadow: 0 0.05rem 0.6rem rgba(0, 0, 0, 0.85);
+}
+
+.bc-hero .bc-hero__text strong {
+  color: #fff;
+  font-weight: 600;
+}
+
+.bc-hero__actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.6rem;
+  margin: 0;
+}
+
+.bc-hero .md-button {
+  margin: 0;
+  border: none;
+  border-radius: 0.4rem;
+  color: #fff;
+  font-weight: 600;
+  background-color: rgba(255, 255, 255, 0.13);
+  -webkit-backdrop-filter: blur(0.2rem);
+  backdrop-filter: blur(0.2rem);
+  transition: transform 0.2s, box-shadow 0.2s, background-color 0.2s;
+}
+
+.bc-hero .md-button:hover,
+.bc-hero .md-button:focus {
+  color: #fff;
+  background-color: rgba(255, 255, 255, 0.24);
+  transform: translateY(-1px);
+}
+
+.bc-hero .md-button--primary {
+  background: linear-gradient(35deg, var(--bc-orange) 0%, var(--bc-amber) 100%);
+  box-shadow: 0 0.3rem 1.2rem rgba(255, 112, 67, 0.35);
+}
+
+.bc-hero .md-button--primary:hover,
+.bc-hero .md-button--primary:focus {
+  color: var(--bc-ink);
+  box-shadow: 0 0.4rem 1.6rem rgba(255, 112, 67, 0.55);
+}
+
+/* A one-line install hint sitting under the buttons. */
+.bc-hero__hint {
+  margin: 1.4rem 0 0;
+  color: rgba(255, 255, 255, 0.6);
+  font-size: 0.68rem;
+}
+
+.bc-hero .bc-hero__hint code {
+  padding: 0.15em 0.45em;
+  border-radius: 0.25rem;
+  background: rgba(255, 255, 255, 0.12);
+  color: #fff;
+}
+
+/* --------------------------------------------------------------- home content */
+
+/* The homepage has no sidebars, so let it use the full grid. */
+body:has(.bc-hero) .md-content {
+  max-width: none;
+}
+
+.bc-section {
+  padding: 1.4rem 0 0.4rem;
+}
+
+.bc-section > h2 {
+  margin-bottom: 0.2rem !important;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.bc-section__lead {
+  max-width: 36rem;
+  color: var(--md-default-fg-color--light);
+}
+
+.md-typeset .bc-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(14rem, 1fr));
+  gap: 0.8rem;
+  margin: 1.2rem 0 2rem;
+}
+
+.md-typeset .bc-card {
+  padding: 1rem;
+  border: 0.05rem solid var(--md-default-fg-color--lightest);
+  border-radius: 0.5rem;
+  background: var(--md-default-bg-color);
+  transition: border-color 0.2s, box-shadow 0.2s, transform 0.2s;
+}
+
+.md-typeset .bc-card:hover {
+  border-color: var(--bc-orange);
+  box-shadow: 0 0.4rem 1.2rem rgba(255, 112, 67, 0.14);
+  transform: translateY(-2px);
+}
+
+.md-typeset .bc-card > :first-child {
+  margin-top: 0;
+}
+
+.md-typeset .bc-card > :last-child {
+  margin-bottom: 0;
+}
+
+.md-typeset .bc-card h3 {
+  margin-bottom: 0.4rem;
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.md-typeset .bc-card p {
+  font-size: 0.7rem;
+  line-height: 1.6;
+}
+
+.bc-card__icon {
+  display: block;
+  margin-bottom: 0.5rem;
+  font-size: 1.2rem;
+  line-height: 1;
+}
+
+/* ------------------------------------------------------------------ responsive */
+
+@media screen and (max-width: 76.1875em) {
+  .bc-hero .bc-hero__title {
+    font-size: 1.9rem;
+  }
+}
+
+@media screen and (max-width: 59.9375em) {
+  .bc-hero__inner {
+    padding: 3rem 0.8rem 2.4rem;
+    min-height: 0;
+  }
+  .bc-hero .bc-hero__title {
+    font-size: 1.7rem;
+  }
+  /* Below 900px `clusters.js` lifts the cloud above the copy instead of sitting
+     it to the right, so the scrim runs top-to-bottom: near-clear over the band,
+     opaque under the text. A left-weighted gradient would darken exactly the
+     wrong half. */
+  .bc-hero--webgl .bc-hero__inner {
+    padding-top: 9rem;
+  }
+  .bc-hero--webgl .bc-hero__scrim {
+    background:
+      linear-gradient(to bottom, rgba(23, 21, 28, 0.30) 0%, rgba(23, 21, 28, 0.18) 16%, rgba(23, 21, 28, 0.72) 33%, rgba(23, 21, 28, 0.93) 46%, rgba(23, 21, 28, 0.97) 100%);
+  }
+  /* Below this width the pins crowd into each other and stop being clickable;
+     the numbered legend underneath carries the same information. */
+  .bc-shot__pin {
+    font-size: 0.6rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .bc-hero .md-button,
+  .md-typeset .bc-card,
+  .bc-shot__pin {
+    transition: none;
+  }
+}

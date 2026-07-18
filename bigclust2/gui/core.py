@@ -41,6 +41,7 @@ from PySide6.QtGui import QIcon, QAction, QActionGroup, QKeySequence, QShortcut,
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF, QThreadPool
 from importlib.resources import files
 
+from .docs import DOCS_URL, docs_url, open_docs
 from .loaders import OpenProjectDialog
 from .project import Project
 from .tabs import ViewTabWidget
@@ -1903,6 +1904,38 @@ class MainWindow(QMainWindow):
         # Help menu
         help_menu = menu_bar.addMenu("Help")
 
+        # Documentation lives on the web, not in the app. These entries deep-link
+        # straight to the relevant page so the in-app help stays a table of
+        # contents rather than a second copy that drifts out of sync.
+        documentation_action = QAction("Documentation", self)
+        documentation_action.setShortcut(QKeySequence.HelpContents)
+        documentation_action.setMenuRole(QAction.MenuRole.NoRole)
+        documentation_action.setToolTip(f"Open {DOCS_URL} in your browser.")
+        documentation_action.triggered.connect(lambda: open_docs())
+        help_menu.addAction(documentation_action)
+
+        docs_menu = help_menu.addMenu("Documentation Pages")
+        for label, page in (
+            ("Get Started", "get-started/"),
+            ("How-to Guides", "how-to/"),
+            (None, None),
+            ("Data Format", "reference/data-format/"),
+            ("Keyboard and Mouse", "reference/shortcuts/"),
+            ("Widgets", "reference/widgets/"),
+            ("Annotation Backends", "reference/backends/"),
+            (None, None),
+            ("Troubleshooting", "reference/troubleshooting/"),
+        ):
+            if label is None:
+                docs_menu.addSeparator()
+                continue
+            action = QAction(label, self)
+            action.setMenuRole(QAction.MenuRole.NoRole)
+            action.triggered.connect(lambda checked=False, p=page: open_docs(p))
+            docs_menu.addAction(action)
+
+        help_menu.addSeparator()
+
         # About action
         about_action = QAction("About", self)
         # Set role so macOS places this in the app menu (not Help menu)
@@ -1917,10 +1950,13 @@ class MainWindow(QMainWindow):
                 "BigClust<br><br>"
                 f"Version {__version__}<br>"
                 "A graphical interface for inspecting large clusterings.<br><br>"
-                "For more information visit<br>"
-                '<a href="https://github.com/flyconnectome/bigclust2">https://github.com/flyconnectome/bigclust2</a>'
+                f'<a href="{docs_url()}">Documentation</a>'
+                " &nbsp;·&nbsp; "
+                '<a href="https://github.com/flyconnectome/bigclust2">Source</a>'
             )
             about_label.setAlignment(Qt.AlignCenter)
+            # Without this the anchors render as links but do nothing when clicked.
+            about_label.setOpenExternalLinks(True)
             layout.addWidget(about_label)
             ok_button = QPushButton("OK")
             ok_button.clicked.connect(about_dialog.accept)
@@ -2096,8 +2132,10 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["C"], "Toggle the control panel")
         _add_row(cl, ["L"], "Toggle labels")
         _add_row(cl, ["Tab"], "Flip between two configured property states (Color / Labels)")
-        _add_row(cl, ["←", "/", "→"], "Increase / decrease label font size")
-        _add_row(cl, ["↑", "/", "↓"], "Increase / decrease marker size")
+        # Left/Down shrink, Right/Up grow - written in that order so the arrow
+        # glyphs line up with the verbs rather than reading backwards.
+        _add_row(cl, ["←", "/", "→"], "Decrease / increase label font size")
+        _add_row(cl, ["↓", "/", "↑"], "Decrease / increase marker size")
         _add_row(cl, ["Space"], "Cycle through embeddings")
         _add_row(cl, ["mouse:double-left"], "Highlight points with the same label")
         _add_row(cl, ["⇧", "mouse:double-left"], "Select points with the same label")
@@ -2130,6 +2168,13 @@ class MainWindow(QMainWindow):
         cl.addStretch()
         scroll.setWidget(content)
         dlg_layout.addWidget(scroll)
+
+        docs_link = QLabel(
+            f'<a href="{docs_url("reference/shortcuts/")}">Full reference online</a>'
+        )
+        docs_link.setOpenExternalLinks(True)
+        docs_link.setAlignment(Qt.AlignCenter)
+        dlg_layout.addWidget(docs_link)
 
         ok_btn = QPushButton("OK")
         ok_btn.clicked.connect(dialog.accept)

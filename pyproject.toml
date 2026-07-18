@@ -69,6 +69,10 @@ dev = [
     "pytest-cov",
     "ruff",
 ]
+# The docs are hand-written - nothing is generated from the source - so this
+# extra deliberately does not need bigclust2 itself to be importable.
+#   uv run --extra docs zensical serve -o
+docs = ["zensical>=0.0.50"]
 
 [project.urls]
 Homepage = "https://github.com/flyconnectome/bigclust2"

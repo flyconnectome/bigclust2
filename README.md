@@ -6,6 +6,8 @@
 `bigclust2` is a re-design of [`bigclust`](https://github.com/flyconnectome/bigclust), a graphical interface for interactively exploring clusterings of high-dimensional connectomic data.
 Typically this means morphological or connectivity-based embeddings but it can be used for any kind of distances or features.
 
+📖 **[Documentation](https://flyconnectome.github.io/bigclust2/)** — guides, reference and the data format specification.
+
 Highlights:
 - **Interactive 2D scatter plots**: Explore large clusterings interactively with zoom, pan, and selection.
 - **Neuroglancer-like 3D viewer**: Visualize neuron morphology in a 3D viewer.
@@ -14,25 +16,7 @@ Highlights:
 
 ![BigClust 2.0 GUI](./_static/screenshot.png)
 
-## Version 2.0 Notes
-A totally reworked GUI aside, this new version also fundamentally changes how data is represented:
-previously, data artifacts (distances, features, etc.) had to be manually loaded and passed to BigClust widgets.
-For this new version, we have switched to a Neuroglancer-like approach where data sources are whole directories
-(local or remote) containing both the data itself as well as metadata files describing the setup. Here is a simple
-example structure:
-
-```
-/my_clustering/
-    info                <- JSON-formatted settings for the dataset
-    meta.parquet        <- per-neuron metadata in Parquet (recommended) or Apache Arrow Feather format
-    distances.parquet   <- pairwise distances in Parquet (recommended) or Apache Arrow Feather format (optional)
-    embeddings.parquet  <- low-dimensional embeddings in Parquet (recommended) or Apache Arrow Feather format (optional)
-    features.parquet    <- high-dimensional features in Parquet (recommended) or Apache Arrow Feather format (optional)
-```
-
-See the [Data Format](./DATA_FORMAT.md) documentation for details on the expected files and how to set up your project.
-
-## Usage
+## Quick start
 
 First make sure you have the Python package manager `uv` [installed](https://docs.astral.sh/uv/getting-started/installation/). Then run:
 
@@ -40,8 +24,28 @@ First make sure you have the Python package manager `uv` [installed](https://doc
 uvx bigclust2@latest
 ```
 
-To work with the latest development version of `bigclust2`, you can run it directly from this repository:
+### Try the example dataset
 
+Don't have a project yet? Open the public example — no account, no credentials, nothing to download first:
+
+```bash
+uvx bigclust2@latest --from https://flyem.mrc-lmb.cam.ac.uk/flyconnectome/bigclust_data/examples/MaleCNS_FlyWire_hemibrain_central_brain_bigclust
+```
+
+That's a co-clustering of **87,263 central brain neurons** from FlyWire (32,384), MaleCNS (32,164) and Hemibrain (22,715), laid out by connectivity and streamed over HTTP (~63 MB). Select a cluster and the 3D viewer shows those neurons from all three connectomes together, in a common space.
+
+See [the example dataset](https://flyconnectome.github.io/bigclust2/get-started/example-dataset/) for things to try.
+
+### Open your own
+
+```bash
+uvx bigclust2@latest --from /path/to/my_clustering
+uvx bigclust2@latest --from https://example.org/my_clustering
+```
+
+To build one, see [create a local dataset](https://flyconnectome.github.io/bigclust2/how-to/create-a-local-dataset/).
+
+To work with the latest development version:
 
 ```bash
 uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
@@ -52,38 +56,52 @@ uvx --from git+https://github.com/flyconnectome/bigclust2@main bigclust2
 > Because of how `uvx` works, this can lead to slow start-up times when there are new releases. You can
 > avoid this by pinning to a specific version (e.g. `@0.1.0`) or a specific commit (e.g. `@02ea911`).
 
-### Controls
+See the [installation guide](https://flyconnectome.github.io/bigclust2/get-started/installation/) for the other options, and [your first project](https://flyconnectome.github.io/bigclust2/get-started/first-project/) for a walkthrough.
 
-Most UI elements are hopefully self-explanatory - when in doubt look for the tooltip.
+## Data Format
 
-#### Scatterplot
+Data sources are whole directories (local or remote) containing both the data itself as well as metadata files describing the setup — a Neuroglancer-like approach. A simple example:
 
-- left click to move the view
-- shift + left click to draw a selection box (add + cmd to add to selection)
-- shift + control + left click to draw a lasso selection (add + cmd to add to selection)
-- `ESC` to deselect all points
+```
+/my_clustering/
+    info                <- JSON-formatted settings for the dataset
+    meta.parquet        <- per-neuron metadata (required)
+    embeddings.parquet  <- low-dimensional embeddings for the scatter plot
+    distances.parquet   <- pairwise distances (optional)
+    features.parquet    <- high-dimensional features (optional)
+```
 
-- `C` to toggle the control panel
-- `L` to toggle labels
-- left/right arrows increase/decrease font size of labels
-- up/down arrows increase/decrease marker size
-- double-click on a label to highlight points with the same label
-- shift + double-click on a label to select points with the same label
-- CMD/control + shift + double-click on a label to add points with the same label to the current selection
+The full specification — the `info` file, the `meta`/`distances`/`embeddings`/`features` files, KNN graphs, multiple embeddings, multiple datasets, and best practices for Parquet formatting — is in the [data format reference](https://flyconnectome.github.io/bigclust2/reference/data-format/).
 
-#### 3D Viewer
+## Controls
 
-- left click + hold to rotate the view
-- middle button + hold to pan
-- scroll to zoom in and out
-- `C` to toggle the legend
-- to align the view: `1` (front), `2` (side), `3` (top)
+Most UI elements are hopefully self-explanatory — when in doubt look for the tooltip. The essentials:
 
-## Troubleshooting
+| Key | Does |
+| --- | ---- |
+| `C` | Toggle the control panel (scatter) / legend (3D viewer) |
+| `L` | Toggle labels |
+| shift + drag | Draw a selection box (add `CMD` to add to the selection) |
+| shift + ctrl + drag | Draw a lasso selection (add `CMD` to add to the selection) |
+| `ESC` | Deselect all points |
+| `SPACE` | Cycle through embeddings |
 
-| Error  | Solution |
-| ------ | -------  |
-| Running `uvx ...` fails with an error containing `realpath: command not found` | If you're on Mac, make sure your OS version is at least 13.x |
+The complete list is in the [keyboard and mouse reference](https://flyconnectome.github.io/bigclust2/reference/shortcuts/), and in the app under **Help → Keyboard Shortcuts**.
+
+## Documentation
+
+The docs are built with [Zensical](https://zensical.org/) and live in [`docs/`](./docs).
+
+```bash
+uv run --extra docs zensical serve -o    # live preview
+uv run --extra docs zensical build       # -> site/
+```
+
+They are published to GitHub Pages from `main` by [`.github/workflows/docs.yml`](./.github/workflows/docs.yml). Pull requests are built and link-checked with `--strict` but not published.
+
+The landing page hero is [`docs/javascripts/clusters.js`](./docs/javascripts/clusters.js) — a dependency-free WebGL point cloud that morphs between six layouts of the same 9,000 observations (UMAP-style blobs, a t-SNE sunflower, two lobes, filaments, a horseshoe and a continuum). Without JavaScript or WebGL it falls back to the blurred screenshot.
+
+Screen recordings referenced by the how-to pages are tracked in [`scripts/DOCS_MEDIA.md`](./scripts/DOCS_MEDIA.md); [`scripts/record_docs_media.sh`](./scripts/record_docs_media.sh) converts a capture into a GIF.
 
 ## Development
 
@@ -91,9 +109,15 @@ Most UI elements are hopefully self-explanatory - when in doubt look for the too
 2. `cd bigclust2` to change into this directory
 3. `uv run run.py --debug` to start the GUI
 
-## Data Format
+Note `run.py` only understands `--debug`; use `uv run bigclust2 --from ...` if you need the other [CLI flags](https://flyconnectome.github.io/bigclust2/reference/cli/).
 
-Data sources are whole directories (local or remote) containing the data itself plus metadata files describing the setup. The full specification — the `info` file, the `meta`/`distances`/`embeddings`/`features` files, KNN graphs, multiple embeddings, multiple datasets, and best practices for Parquet formatting — lives in [DATA_FORMAT.md](./DATA_FORMAT.md).
+## Troubleshooting
+
+See [troubleshooting](https://flyconnectome.github.io/bigclust2/reference/troubleshooting/).
+
+| Error  | Solution |
+| ------ | -------  |
+| Running `uvx ...` fails with an error containing `realpath: command not found` | If you're on Mac, make sure your OS version is at least 13.x |
 
 ## Ideas / TODOs
 - [x] Enable multiple embeddings per dataset (with a dropdown to select embedding)
@@ -107,3 +131,4 @@ Data sources are whole directories (local or remote) containing the data itself 
   - this turns out to not really be a problem from the client side; could still implement to reduce traffic on the server side
 - [ ] Support sharing figure state (e.g. `uvx bigclust --state <state_id>`)
 - [X] Fine-control over hover info
+- [ ] Record the screen captures listed in `scripts/DOCS_MEDIA.md`

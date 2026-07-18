@@ -37,6 +37,7 @@ dependencies = [
     "pandas>=2.3.3",
     "pyside6>=6.8.2.1",
     "requests>=2.32.5",
+    "packaging>=23.2",
     "polars>=1.36.1",
     "cmap>=0.6.2",
     "pygfx>=0.14.0",

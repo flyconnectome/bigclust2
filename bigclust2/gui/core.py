@@ -35,9 +35,10 @@ from PySide6.QtWidgets import (
     QCheckBox,
     QDialogButtonBox,
     QStyle,
+    QMessageBox,
 )
 from PySide6.QtGui import QIcon, QAction, QActionGroup, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
-from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF
+from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF, QThreadPool
 from importlib.resources import files
 
 from .loaders import OpenProjectDialog
@@ -53,6 +54,7 @@ from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
+from .update_check import UpdateCheckRunnable, is_outdated
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
 from ..embeddings import KNNGraph
@@ -1374,6 +1376,9 @@ class MainWindow(QMainWindow):
         self._hover_columns_menu = None
         self._adopt_view = adopt_view
         self._active_selection_counter = None
+        # Signal holder of an in-flight PyPI update check (also the guard
+        # against overlapping checks).
+        self._update_check_signals = None
         # Out-of-date meta banner (built lazily) and per-project dismissals.
         self._meta_staleness_banner = None
         self._meta_staleness_dismissed = set()
@@ -1616,6 +1621,16 @@ class MainWindow(QMainWindow):
             lambda: self.current_view().ngl_viewer.viewer.center_camera()
         )
         center_menu.addAction(center_3d_action)
+
+        center_selection_action = QAction("Selection", self)
+        center_selection_action.setShortcut(QKeySequence("Shift+C"))
+        # Shift+C types a capital "C" in text fields; like "H"/"Backspace" the
+        # real key trigger lives on the canvas (see ScatterFigure.key_events).
+        center_selection_action.setShortcutContext(Qt.WidgetShortcut)
+        center_selection_action.triggered.connect(
+            lambda: self.current_view().fig_scatter.center_on_selection()
+        )
+        center_menu.addAction(center_selection_action)
 
         view_menu.addSeparator()
 
@@ -1898,6 +1913,15 @@ class MainWindow(QMainWindow):
         about_action.triggered.connect(show_about_dialog)
         help_menu.addAction(about_action)
 
+        check_updates_action = QAction("Check for Updates…", self)
+        # Explicit role keeps this in the Help menu on all platforms (macOS
+        # would otherwise be free to relocate it via the text heuristic).
+        check_updates_action.setMenuRole(QAction.MenuRole.NoRole)
+        check_updates_action.triggered.connect(
+            lambda: self._start_update_check(manual=True)
+        )
+        help_menu.addAction(check_updates_action)
+
         help_menu.addSeparator()
 
         github_repo_action = QAction("GitHub Repository", self)
@@ -2050,6 +2074,7 @@ class MainWindow(QMainWindow):
         _add_row(cl, ["⇧", "⌃", "mouse:left"], "Draw a lasso selection")
         _add_row(cl, ["⇧", "⌃", "mouse:left", "⌘"], "Add lasso selection to current selection")
         _add_row(cl, ["Esc"], "Deselect all points")
+        _add_row(cl, ["⇧", "C"], "Center the view on the current selection")
         _add_row(cl, ["C"], "Toggle the control panel")
         _add_row(cl, ["L"], "Toggle labels")
         _add_row(cl, ["Tab"], "Flip between two configured property states (Color / Labels)")
@@ -4434,8 +4459,6 @@ class MainWindow(QMainWindow):
             finally:
                 progress.close()
 
-        from PySide6.QtWidgets import QMessageBox
-
         try:
             run(overwrite=False)
         except FileExistsError:
@@ -4711,15 +4734,90 @@ class MainWindow(QMainWindow):
         finally:
             progress.close()
 
+    def _start_update_check(self, manual=False):
+        """Check PyPI for a newer release in a background thread.
+
+        With ``manual=True`` (Help menu) the outcome is always reported;
+        the startup check only surfaces an available update.
+        """
+        if self._update_check_signals is not None:
+            return  # a check is already in flight
+
+        runnable = UpdateCheckRunnable()
+        # Pin the signal holder: the pool auto-deletes the runnable, which
+        # would otherwise take the QObject (and its connections) with it.
+        self._update_check_signals = runnable.signals
+        runnable.signals.result.connect(
+            lambda latest, m=manual: self._on_update_check_result(latest, m)
+        )
+        runnable.signals.error.connect(
+            lambda msg, m=manual: self._on_update_check_error(msg, m)
+        )
+        QThreadPool.globalInstance().start(runnable)
+
+    def _on_update_check_result(self, latest, manual):
+        """Handle the latest PyPI version fetched by the background check."""
+        self._update_check_signals = None
+
+        if not is_outdated(__version__, latest):
+            if manual:
+                QMessageBox.information(
+                    self,
+                    "Check for Updates",
+                    f"BigClust is up to date ({__version__}).",
+                )
+            return
+
+        # On startup, respect a previously skipped version (a newer release
+        # won't match the stored string, so prompting resumes naturally).
+        if not manual and latest == self.settings.value("updateCheck/skippedVersion"):
+            return
+
+        self._show_update_available_dialog(latest)
+
+    def _on_update_check_error(self, message, manual):
+        """Handle a failed update check (network, HTTP, unexpected response)."""
+        self._update_check_signals = None
+        if manual:
+            QMessageBox.warning(
+                self,
+                "Check for Updates",
+                f"Could not check for updates:\n{message}",
+            )
+        else:
+            logger.debug(f"Update check failed: {message}")
+
+    def _show_update_available_dialog(self, latest):
+        """Prompt the user to update to the given (newer) PyPI version."""
+        box = QMessageBox(self)
+        box.setWindowTitle("Update Available")
+        box.setIcon(QMessageBox.Information)
+        box.setText(
+            f"A new version of BigClust is available: {latest}\n"
+            f"You are running {__version__}."
+        )
+        box.setInformativeText(
+            "To update, quit BigClust and restart it via:\n\n"
+            "    uvx bigclust2@latest\n\n"
+            "or, if you installed with pip:\n\n"
+            "    pip install -U bigclust2"
+        )
+        ok = box.addButton("OK", QMessageBox.AcceptRole)
+        skip = box.addButton("Skip This Version", QMessageBox.RejectRole)
+        box.setDefaultButton(ok)
+        box.exec()
+        if box.clickedButton() is skip:
+            self.settings.setValue("updateCheck/skippedVersion", latest)
+
 
 def main(dataset=None):
     """Main application entry point."""
     app = QApplication(sys.argv)
     window = MainWindow()
     window.show()
+    # Check PyPI for updates once the window has had a chance to paint.
+    QTimer.singleShot(2000, window._start_update_check)
     if dataset is not None:
-        from PySide6.QtCore import QTimer
-
         QTimer.singleShot(0, lambda: _load_dataset_from_arg(window, dataset))
     sys.exit(app.exec())
 
@@ -4756,6 +4854,4 @@ def _load_dataset_from_arg(window, dataset):
         window._load_project(project)
     except Exception as e:
         logger.error(f"Failed to load dataset '{dataset}': {e}")
-        from PySide6.QtWidgets import QMessageBox
-
         QMessageBox.critical(window, "Load Error", f"Could not load dataset:\n{e}")

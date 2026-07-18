@@ -174,6 +174,7 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 	selectRequested = QtCore.Signal(object)
 	openInNewWindowRequested = QtCore.Signal(object)
 	manageSourcesRequested = QtCore.Signal()
+	mergeLocalRequested = QtCore.Signal()
 
 	def __init__(self, meta, figure=None, parent=None):
 		super().__init__(parent)
@@ -297,9 +298,17 @@ class MetaExplorerDialog(QtWidgets.QDialog):
 		update_icon = self.style().standardIcon(QtWidgets.QStyle.SP_BrowserReload)
 		self.sources_btn = QtWidgets.QPushButton(update_icon, "Update")
 		self.sources_btn.setToolTip(
-			"Configure where each dataset's meta data comes from and pull fresh values."
+			"Update meta data: pull fresh values from configured remote sources, "
+			"or merge a local file."
 		)
-		self.sources_btn.clicked.connect(self.manageSourcesRequested.emit)
+		self._update_menu = QtWidgets.QMenu(self.sources_btn)
+		self.update_remote_action = self._update_menu.addAction(
+			"From Remote…", self.manageSourcesRequested.emit
+		)
+		self.update_local_action = self._update_menu.addAction(
+			"From Local…", self.mergeLocalRequested.emit
+		)
+		self.sources_btn.setMenu(self._update_menu)
 		self.select_btn = QtWidgets.QPushButton("Select in Main Window")
 		self.select_btn.clicked.connect(self._on_select)
 		self.open_new_btn = QtWidgets.QPushButton("Open in New View")

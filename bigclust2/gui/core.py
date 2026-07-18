@@ -52,6 +52,7 @@ from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
 from .widgets.features import FeatureComparisonWidget
 from .widgets.meta_explorer import MetaExplorerDialog
+from .widgets.meta_merge import MetaMergeDialog
 from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
@@ -62,7 +63,7 @@ from .widgets.credentials import (
 )
 from .update_check import UpdateCheckRunnable, is_outdated
 from ..scatter import ScatterFigure
-from ..neuroglancer import NglViewer
+from ..neuroglancer import NglViewer, resolve_local_source
 from ..embeddings import KNNGraph
 from ..utils import is_url
 from ..__version__ import __version__
@@ -280,6 +281,7 @@ class MainWidget(QWidget):
         self._annotation_dialog = None
         self._meta_explorer_dialog = None
         self._meta_sources_dialog = None
+        self._meta_merge_dialog = None
         self._distance_widgets = []
 
         self.init_ui()
@@ -2903,6 +2905,7 @@ class MainWindow(QMainWindow):
             parent=self,
         )
         dialog.manageSourcesRequested.connect(self.show_meta_sources_dialog)
+        dialog.mergeLocalRequested.connect(self.show_meta_merge_dialog)
         self._register_aux_widget(view, dialog)
         dialog.setAttribute(Qt.WA_DeleteOnClose, True)
         dialog.show()
@@ -2948,6 +2951,39 @@ class MainWindow(QMainWindow):
         view._meta_sources_dialog = dialog
         dialog.destroyed.connect(
             lambda _obj=None, v=view: setattr(v, "_meta_sources_dialog", None)
+        )
+
+    def show_meta_merge_dialog(self):
+        """Open the local-file meta merge dialog for the current view's project."""
+        view = self.current_view()
+        if view is None:
+            return
+
+        data = view._data if isinstance(view._data, dict) else {}
+        meta_data = data.get("meta")
+        if not isinstance(meta_data, pd.DataFrame) or meta_data.empty:
+            return
+
+        existing = view._meta_merge_dialog
+        if existing is not None:
+            try:
+                self._present_aux_widget(existing)
+                return
+            except RuntimeError:
+                view._meta_merge_dialog = None
+
+        dialog = MetaMergeDialog(meta=meta_data, parent=self)
+        dialog.metaUpdated.connect(
+            lambda updated, report, v=view: self._apply_meta_update(v, updated, report)
+        )
+        self._register_aux_widget(view, dialog)
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+
+        view._meta_merge_dialog = dialog
+        dialog.destroyed.connect(
+            lambda _obj=None, v=view: setattr(v, "_meta_merge_dialog", None)
         )
 
     def _apply_meta_update(self, view, updated_meta, report):
@@ -3043,6 +3079,7 @@ class MainWindow(QMainWindow):
         self._dispose_annotation_dialog(view)
         self._dispose_meta_explorer_dialog(view)
         self._dispose_meta_sources_dialog(view)
+        self._dispose_meta_merge_dialog(view)
         self._dispose_distance_widgets(view)
 
     def _dispose_connectivity_widget(self, view):
@@ -3092,6 +3129,20 @@ class MainWindow(QMainWindow):
             return
 
         view._meta_sources_dialog = None
+        try:
+            dialog.close()
+            dialog.deleteLater()
+        except RuntimeError:
+            # Qt object may already be deleted.
+            pass
+
+    def _dispose_meta_merge_dialog(self, view):
+        """Dispose a view's local meta merge dialog."""
+        dialog = view._meta_merge_dialog
+        if dialog is None:
+            return
+
+        view._meta_merge_dialog = None
         try:
             dialog.close()
             dialog.deleteLater()
@@ -4729,6 +4780,13 @@ class MainWindow(QMainWindow):
                     else:
                         # Single source for all datasets
                         ngl_data["source"] = sources
+
+                    # Paths in local sources (e.g. `skeletons://`) may be given
+                    # relative to the project directory
+                    if not project.is_remote:
+                        ngl_data["source"] = ngl_data["source"].map(
+                            lambda s: resolve_local_source(s, project.resolve_path)
+                        )
 
                 color = project.info["neuroglancer"].get("color", None)
                 if color is not None:

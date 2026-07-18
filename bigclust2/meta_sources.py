@@ -15,6 +15,7 @@ from __future__ import annotations
 import logging
 
 from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -500,5 +501,300 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
 
     if progress_callback is not None:
         progress_callback(total, total, "")
+
+    return out, report
+
+
+# ---------------------------------------------------------------------------
+# Local-file merge ("Update -> From Local")
+# ---------------------------------------------------------------------------
+
+
+def read_table(path):
+    """Read a local table file into a DataFrame by suffix.
+
+    Supports ``.parquet``, ``.feather``, ``.csv`` and ``.tsv``; anything else
+    is attempted as CSV. Raises on unreadable files (callers wrap for the GUI).
+    """
+    path = Path(path)
+    if path.suffix == ".parquet":
+        return pd.read_parquet(path)
+    if path.suffix == ".feather":
+        return pd.read_feather(path)
+    if path.suffix == ".tsv":
+        return pd.read_csv(path, sep="\t")
+    return pd.read_csv(path)
+
+
+def _norm_key_col(series):
+    """Normalize one join-key column to comparable strings.
+
+    Integral floats (a CSV artifact when an id column contains gaps) are cast
+    through ``Int64`` first so ``123.0`` matches an integer ``123``.
+    """
+    if pd.api.types.is_float_dtype(series):
+        non_null = series.dropna()
+        if (
+            len(non_null)
+            and np.isfinite(non_null).all()
+            and (non_null == np.round(non_null)).all()
+        ):
+            try:
+                series = series.astype("Int64")
+            except (TypeError, ValueError, OverflowError):
+                pass
+    return series.astype(str).str.strip()
+
+
+def _join_key_series(df, join_columns):
+    """Build a join-key Series aligned to ``df.index``.
+
+    Single-column keys are normalized strings; composite keys become tuples of
+    them (tuples cannot collide the way separator-joined strings can).
+    """
+    normed = [_norm_key_col(df[col]) for col in join_columns]
+    if len(normed) == 1:
+        return normed[0]
+    return pd.Series(list(zip(*normed)), index=df.index)
+
+
+def _format_key(key):
+    """Render a (possibly composite) join key for display."""
+    if isinstance(key, tuple):
+        return "/".join(str(part) for part in key)
+    return str(key)
+
+
+@dataclass
+class LocalMergeReport:
+    """Outcome of a :func:`merge_local_meta` call.
+
+    Duck-compatible with :class:`UpdateReport` where the GUI relies on it:
+    ``summary()`` and an iterable ``datasets`` (always empty here — a local
+    merge is not scoped per dataset).
+    """
+
+    join_columns: list = field(default_factory=list)
+    rows_meta: int = 0
+    rows_source: int = 0
+    rows_matched: int = 0
+    rows_missing: int = 0
+    rows_new: int = 0
+    missing_keys_sample: list = field(default_factory=list)
+    new_keys_sample: list = field(default_factory=list)
+    duplicate_source_keys: int = 0
+    duplicate_meta_keys: int = 0
+    columns_updated: list = field(default_factory=list)
+    columns_added: list = field(default_factory=list)
+    columns_skipped: list = field(default_factory=list)
+    columns_failed: list = field(default_factory=list)
+    cells_changed: int = 0
+    cells_skipped_nan: int = 0
+    datasets: list = field(default_factory=list)
+
+    def summary(self):
+        """Human-readable one-paragraph summary."""
+        cols = sorted(set(self.columns_updated) | set(self.columns_added))
+        head = (
+            f"Updated {self.cells_changed:,} cells in {self.rows_matched:,} "
+            f"matched rows"
+        )
+        parts = [head + (f" ({', '.join(cols)})." if cols else ".")]
+        if self.rows_missing:
+            parts.append(
+                f"{self.rows_missing:,} meta "
+                f"row{'s' if self.rows_missing != 1 else ''} had no match "
+                "in the file."
+            )
+        if self.rows_new:
+            parts.append(
+                f"{self.rows_new:,} file "
+                f"row{'s' if self.rows_new != 1 else ''} matched no meta row "
+                "(ignored)."
+            )
+        if self.columns_failed:
+            parts.append(f"Failed columns: {', '.join(self.columns_failed)}.")
+        return " ".join(parts)
+
+
+def _clear_cells(out, target, clear_index):
+    """Set cells to NA, upcasting to ``object`` if the dtype can't hold NA."""
+    try:
+        out.loc[clear_index, target] = pd.NA
+    except (ValueError, TypeError):
+        out[target] = out[target].astype(object)
+        out.loc[clear_index, target] = pd.NA
+
+
+def _merge_one_local_column(
+    out,
+    report,
+    meta_key,
+    matched_mask,
+    src_key,
+    src_vals,
+    target,
+    *,
+    mode,
+    apply_source_nan,
+):
+    """Merge one source column into ``out[target]``."""
+    mapped = meta_key.map(dict(zip(src_key, src_vals)))
+    found = mapped.notna()
+    # Matched rows whose source cell is null (map() can't tell the two apart,
+    # but the match mask can).
+    matched_null = matched_mask & ~found
+
+    is_new_col = target not in out.columns
+    if is_new_col:
+        out[target] = pd.NA
+
+    write_mask = found
+    clear_mask = matched_null if apply_source_nan else None
+    if mode == "fill_missing" and not is_new_col:
+        old_obj = out[target].astype(object)
+        empty = out[target].isna() | old_obj.map(
+            lambda v: isinstance(v, str) and not v.strip()
+        )
+        write_mask = write_mask & empty
+        if clear_mask is not None:
+            clear_mask = clear_mask & empty
+
+    target_index = out.index[write_mask]
+    new_vals = mapped[write_mask]
+    clear_index = out.index[clear_mask] if clear_mask is not None else out.index[:0]
+    if clear_mask is None:
+        report.cells_skipped_nan += int(matched_null.sum())
+
+    if is_new_col:
+        report.columns_added.append(target)
+        report.cells_changed += int(len(new_vals))
+    else:
+        report.columns_updated.append(target)
+        old_vals = out.loc[target_index, target]
+        report.cells_changed += _count_changed(old_vals, new_vals)
+        if len(clear_index):
+            report.cells_changed += int(out.loc[clear_index, target].notna().sum())
+
+    if len(new_vals):
+        _assign_column(out, target, target_index, new_vals)
+    if len(clear_index):
+        _clear_cells(out, target, clear_index)
+
+
+def merge_local_meta(
+    meta_df,
+    source_df,
+    *,
+    join_columns,
+    columns,
+    mode="overwrite",
+    apply_source_nan=False,
+):
+    """Merge selected columns of a local table into a copy of ``meta_df``.
+
+    Rows are matched on ``join_columns`` (which must exist in both frames).
+    The returned DataFrame keeps ``meta_df``'s length, row order and index --
+    source rows that match no meta row are reported, never appended.
+
+    Parameters
+    ----------
+    meta_df, source_df : pandas.DataFrame
+    join_columns : list[str]
+        Column(s) to match rows on, e.g. ``["id"]`` or ``["id", "dataset"]``.
+        Duplicate keys in the source keep the first occurrence.
+    columns : dict
+        ``{target_meta_col: source_col}`` -- which source columns to import
+        and under which meta column name. Reserved targets (``id``,
+        ``dataset``, ``_*``) and join columns are skipped.
+    mode : "overwrite" | "fill_missing"
+        With ``"fill_missing"`` only cells currently null/empty-string in the
+        meta are written.
+    apply_source_nan : bool
+        When True, null source cells clear the meta value in matched rows;
+        by default they are skipped (and counted in ``cells_skipped_nan``).
+
+    Returns
+    -------
+    (pandas.DataFrame, LocalMergeReport)
+    """
+    if mode not in ("overwrite", "fill_missing"):
+        raise ValueError(f"Unknown mode: {mode!r}")
+
+    join_columns = [str(c) for c in (join_columns or [])]
+    if not join_columns:
+        raise ValueError("At least one join column is required.")
+    for col in join_columns:
+        if col not in meta_df.columns:
+            raise ValueError(f"Join column '{col}' not found in the meta data.")
+        if col not in source_df.columns:
+            raise ValueError(f"Join column '{col}' not found in the file.")
+
+    report = LocalMergeReport(join_columns=list(join_columns))
+    report.rows_meta = int(len(meta_df))
+    report.rows_source = int(len(source_df))
+
+    usable = {}
+    for target, source_col in (columns or {}).items():
+        target = str(target)
+        if (
+            _is_reserved(target)
+            or target in join_columns
+            or str(source_col) not in source_df.columns
+        ):
+            report.columns_skipped.append(target)
+            continue
+        usable[target] = str(source_col)
+    if not usable:
+        raise ValueError("No importable columns selected.")
+
+    meta_key = _join_key_series(meta_df, join_columns)
+    src_key = _join_key_series(source_df, join_columns)
+
+    keep = ~src_key.duplicated(keep="first")
+    report.duplicate_source_keys = int((~keep).sum())
+    src_key = src_key[keep]
+    src_kept = source_df[keep]
+
+    # Meta rows sharing a join key all receive the same source value; the
+    # report surfaces this so the UI can hint at adding e.g. `dataset`.
+    report.duplicate_meta_keys = int(meta_key.duplicated(keep=False).sum())
+
+    matched_mask = meta_key.isin(set(src_key))
+    report.rows_matched = int(matched_mask.sum())
+    report.rows_missing = int((~matched_mask).sum())
+    new_mask = ~src_key.isin(set(meta_key))
+    report.rows_new = int(new_mask.sum())
+    report.missing_keys_sample = [
+        _format_key(k) for k in meta_key[~matched_mask].unique()[:5]
+    ]
+    report.new_keys_sample = [
+        _format_key(k) for k in src_key[new_mask].unique()[:5]
+    ]
+
+    out = meta_df.copy()
+    for target, source_col in usable.items():
+        # A single bad column must not abort the rest of the merge.
+        try:
+            _merge_one_local_column(
+                out,
+                report,
+                meta_key,
+                matched_mask,
+                src_key,
+                src_kept[source_col],
+                target,
+                mode=mode,
+                apply_source_nan=apply_source_nan,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced in the report
+            detail = str(exc).strip() or exc.__class__.__name__
+            report.columns_failed.append(target)
+            logger.warning(
+                "Local meta merge: column '%s' failed: %s",
+                target,
+                detail,
+                exc_info=True,
+            )
 
     return out, report

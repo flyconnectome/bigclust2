@@ -13,6 +13,7 @@ import octarine as oc
 import nglscenes as ngl
 import cloudvolume as cv
 
+from pathlib import Path
 from collections import OrderedDict
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, TimeoutError
@@ -23,6 +24,10 @@ logger = logging.getLogger(__name__)
 
 # Restart the thread pool after this many tasks to prevent issues with requests sessions (too many open files/sockets).
 POOL_RESTART_INTERVAL = 10_000
+
+# Source schemes that only exist on this machine and can therefore not be
+# handed over to neuroglancer
+LOCAL_SOURCE_SCHEMES = ("skeletons://",)
 
 # Hide navis' progress bar
 navis.config.pbar_hide = True
@@ -109,7 +114,9 @@ class NglViewer:
 
         self.viewer = oc.Viewer(**viewer_kwargs)
         self.viewer.render_trigger = "reactive"
-        self.viewer.objects_pickable = True # need to set here once so we can set neuropil to non-pickable later
+        self.viewer.objects_pickable = (
+            True  # need to set here once so we can set neuropil to non-pickable later
+        )
         self.viewer.on_double_click = self._deselect_on_doubleclick
         self._centered = False
 
@@ -121,6 +128,9 @@ class NglViewer:
 
         # Tracks which neurons we've already loaded
         self._segments = {}
+
+        # Set via `set_neuropil_mesh`; used when generating neuroglancer scenes
+        self.neuropil_source = None
 
         # Optional per-dataset on-the-fly transforms (dataset -> navis transform)
         self._transforms = {}
@@ -177,15 +187,26 @@ class NglViewer:
         hover_objects = viewer.objects[hover_name]
 
         # Get the actual (id, dataset) for this object
-        hover_id = [k for k, v in self._segments.items() if v in hover_objects]
+        hover_id = [
+            k
+            for k, visuals in self._segments.items()
+            if any(v in hover_objects for v in visuals)
+        ]
 
         # Translate the ID (likely: id, dataset) to indices in the data
-        hover_indices = [self.data.index.get_loc(h) for h in hover_id if h in self.data.index]
+        hover_indices = [
+            self.data.index.get_loc(h) for h in hover_id if h in self.data.index
+        ]
 
-        self.report(f"Double-clicked on {hover_name} (ID: {hover_id}, indices: {hover_indices}), deselecting in figure.", flush=True)
+        self.report(
+            f"Double-clicked on {hover_name} (ID: {hover_id}, indices: {hover_indices}), deselecting in figure.",
+            flush=True,
+        )
 
         # This should also take care of removing the clicked-on neuron from the viewer
-        self.figure.selected = list(set(list(self.figure.selected)) - set(hover_indices))
+        self.figure.selected = list(
+            set(list(self.figure.selected)) - set(hover_indices)
+        )
 
     def set_neuropil_mesh(self, neuropil_mesh, neuropil_source=None):
         """Set the neuropil mesh."""
@@ -280,7 +301,10 @@ class NglViewer:
             self._transforms[dataset] = navis.transforms.TPStransform(
                 np.asarray(src), np.asarray(trg)
             )
-        self.report(f"Set transforms for {len(self._transforms)} datasets: {list(self._transforms.keys())}", flush=True)
+        self.report(
+            f"Set transforms for {len(self._transforms)} datasets: {list(self._transforms.keys())}",
+            flush=True,
+        )
 
     def set_default_colors(self):
         # Check for color column
@@ -306,9 +330,11 @@ class NglViewer:
 
     def sync_colors(self):
         """Sync the colors of the loaded visuals with the colors in self._colors."""
-        for key, vis in self._segments.items():
+        for key, visuals in self._segments.items():
             if key in self._colors:
-                vis.material.color = gfx.Color(self._colors[key])
+                color = gfx.Color(self._colors[key])
+                for vis in visuals:
+                    vis.material.color = color
         if getattr(self.viewer, "controls", None):
             self.viewer.controls.update_legend()
         self.viewer._render_stale = True
@@ -320,6 +346,8 @@ class NglViewer:
             return MemoryVolume()
         elif url.startswith("dvid://"):
             return DVIDVolume(url)
+        elif url.startswith("skeletons://"):
+            return SkeletonVolume(url)
         else:
             try:
                 return cv.CloudVolume(url, progress=False, use_https=True)
@@ -448,8 +476,9 @@ class NglViewer:
 
             if (id, dataset) in self.cache:
                 self.report(f"  Using cached visual for {id} ({dataset})", flush=True)
-                # Get the cached visual
-                visual = self.cache[(id, dataset)]
+                # Get the cached visual(s) - a skeleton consists of more than one
+                # (e.g. a line for the neurites plus a mesh for the soma)
+                visuals = self.cache[(id, dataset)]
 
                 # It's possible that the color scheme changed or that
                 # the user changed the color manually. We will need to
@@ -461,13 +490,18 @@ class NglViewer:
                         color = self._colors[(id, dataset)]
                     else:
                         color = self.viewer._next_color()
-                visual.material.color = gfx.Color(color)
+                color = gfx.Color(color)
 
-                # We also need to make sure that the visual is visible
-                visual.visible = True
+                for visual in visuals:
+                    visual.material.color = color
 
-                self.viewer.add(visual, group=str(name), name=str(id), center=False)
-                self._segments[(id, dataset)] = visual
+                    # We also need to make sure that the visual is visible
+                    visual.visible = True
+
+                    self.viewer.add(
+                        visual, group=str(name), name=str(id), center=False
+                    )
+                self._segments[(id, dataset)] = visuals
             else:
                 self.report(f"  Loading visual for {id} ({dataset})", flush=True)
                 self.futures[((id, dataset), name)] = self.pool.submit(
@@ -486,7 +520,7 @@ class NglViewer:
         for x in objects:
             if x not in self._segments:
                 raise ValueError(f"Segment {x} not found in viewer.")
-            self.viewer.remove_objects([self._segments[x]])
+            self.viewer.remove_objects(list(self._segments[x]))
             self._segments.pop(x, None)
 
     def clear(self):
@@ -569,16 +603,12 @@ class NglViewer:
         id2source = self.data.source.to_dict()
         if group_by == "source":
             for source in self.data.source.unique():
+                # Local-only sources can't be resolved by neuroglancer
+                if is_local_source(source):
+                    self.report(f"Skipping local source {source}", flush=True)
+                    continue
                 layer = ngl.SegmentationLayer(source)
-                layer["source"] = {
-                    "url": fix_dvid_source(source),
-                    "subsources": {
-                        "default": True,
-                        "meshes": True,
-                        "bounds": False,
-                        "skeletons": False,
-                    },
-                }
+                layer["source"] = self.make_ngl_source(source)
                 # Collect all IDs for this source
                 ids = [i for i, _ in self._segments.items() if id2source[i] == source]
                 ids += [i for i, _ in self.futures.keys() if id2source[i] == source]
@@ -596,7 +626,7 @@ class NglViewer:
                     # Collect colors from the actual viewer
                     if use_colors == "viewer":
                         colors = {
-                            i[0]: self._segments[i].material.color.hex
+                            i[0]: self._segments[i][0].material.color.hex
                             for i in ids
                             if i in self._segments
                         }
@@ -628,27 +658,21 @@ class NglViewer:
                 if len(ids) == 0:
                     continue
 
-                # Collect the sources for this colors
-                sources = list(set([id2source[i] for i in ids]))
+                # Collect the sources for this colors (skipping local-only ones,
+                # which neuroglancer can't resolve)
+                sources = list(
+                    set([id2source[i] for i in ids if not is_local_source(id2source[i])])
+                )
+
+                # Without a source there is nothing for neuroglancer to show
+                if not len(sources):
+                    continue
 
                 # Sort sources such that the DVID source comes first
                 sources = sorted(
                     sources, key=lambda x: x.startswith("dvid://"), reverse=True
                 )
-                layer["source"] = []
-                for source in sources:
-                    # Add the source to the layer
-                    layer["source"].append(
-                        {
-                            "url": fix_dvid_source(source),
-                            "subsources": {
-                                "default": True,
-                                "meshes": True,
-                                "bounds": False,
-                                "skeletons": False,
-                            },
-                        }
-                    )
+                layer["source"] = [self.make_ngl_source(s) for s in sources]
 
                 # IDs can be a list of (id, dataset) tuples or just a list of IDs
                 if isinstance(ids[0], (list, tuple)):
@@ -663,35 +687,34 @@ class NglViewer:
 
                 layers.append(layer)
         elif group_by == "label":
-            # Map the labels in the viewer's legend to IDs
-            object2id = {v: k for k, v in self._segments.items()}
+            # Map the labels in the viewer's legend to IDs. Note that a single
+            # segment can consist of multiple visuals (e.g. neurites + soma),
+            # hence we need to de-duplicate the IDs we collect per label.
+            object2id = {v: k for k, visuals in self._segments.items() for v in visuals}
             label2id = {
-                label: [object2id[o] for o in objects if o in object2id]
+                label: list(
+                    dict.fromkeys(object2id[o] for o in objects if o in object2id)
+                )
                 for label, objects in self.viewer.objects.items()
             }
             label2id = {k: v for k, v in label2id.items() if len(v) > 0}
             for label, ids in label2id.items():
                 layer = ngl.SegmentationLayer(label)
 
-                sources = list(set([id2source[i] for i in ids]))
+                # Skip local-only sources, which neuroglancer can't resolve
+                sources = list(
+                    set([id2source[i] for i in ids if not is_local_source(id2source[i])])
+                )
+
+                # Without a source there is nothing for neuroglancer to show
+                if not len(sources):
+                    continue
+
                 # Sort sources such that the DVID source comes first
                 sources = sorted(
                     sources, key=lambda x: x.startswith("dvid://"), reverse=True
                 )
-                layer["source"] = []
-                for source in sources:
-                    # Add the source to the layer
-                    layer["source"].append(
-                        {
-                            "url": fix_dvid_source(source),
-                            "subsources": {
-                                "default": True,
-                                "meshes": True,
-                                "bounds": False,
-                                "skeletons": False,
-                            },
-                        }
-                    )
+                layer["source"] = [self.make_ngl_source(s) for s in sources]
 
                 # IDs can be a list of (id, dataset) tuples or just a list of IDs
                 if isinstance(ids[0], (list, tuple)):
@@ -761,8 +784,37 @@ class NglViewer:
 
         return s
 
+    def make_ngl_source(self, source):
+        """Make the neuroglancer source spec for a segmentation layer.
+
+        We request whichever subsource we are actually displaying: skeletons for
+        sources we had to fall back to skeletons for, meshes otherwise.
+
+        """
+        vol = self.volumes.get(source)
+        skeletons = getattr(vol, "_served_kind", "mesh") == "skeleton"
+
+        return {
+            "url": fix_dvid_source(source),
+            "subsources": {
+                "default": True,
+                "meshes": not skeletons,
+                "bounds": False,
+                "skeletons": skeletons,
+            },
+        }
+
     def _load_mesh(self, x, vol, lod=-1, **kwargs):
-        """Load a single mesh."""
+        """Load a single neuron and convert it to pygfx visual(s).
+
+        Meshes take precedence over skeletons: we only fall back to the volume's
+        skeleton source if it has no mesh source, or if fetching the mesh failed
+        (e.g. because this particular segment has not been meshed).
+
+        Returns a *list* of visuals - a mesh produces a single one, a skeleton
+        produces one per component (neurites, soma, ...).
+
+        """
         if isinstance(x, tuple):
             x, dataset = x
         else:
@@ -778,24 +830,21 @@ class NglViewer:
             else:
                 kwargs["color"] = self.viewer._next_color()
 
-        try:
-            if "lod" in inspect.signature(vol.mesh.get).parameters:
-                m = vol.mesh.get(x, lod=lod)
-            else:
-                m = vol.mesh.get(x)
+        # Normalise to an RGBA tuple: `_next_color` hands us a `cmap.Color`,
+        # which navis (used for skeletons) is unable to interpret
+        kwargs["color"] = tuple(cmap.Color(kwargs["color"]).rgba)
 
-            if isinstance(m, dict):
-                m = m[x]
+        try:
+            m, kind = fetch_segment(vol, x, lod=lod)
+            # Remember what we ended up showing for this volume so that the
+            # neuroglancer scene can request the matching subsource
+            vol._served_kind = kind
         except BaseException as e:
             import traceback
 
-            print(f"Error loading mesh for {x} ({dataset}):")
+            print(f"Error loading neuron for {x} ({dataset}):")
             traceback.print_exc()
             return e
-
-        if isinstance(m, navis.NeuronList):
-            assert len(m) == 1, f"Expected exactly one neuron for {x}, got {len(m)}"
-            m = m[0]
 
         # Apply an optional on-the-fly transform for this dataset (e.g. to bring
         # a source into a common coordinate space). Done before visual creation so
@@ -808,10 +857,11 @@ class NglViewer:
             else:  # trimesh.Trimesh and similar mesh-likes
                 m.vertices = tf.xform(m.vertices.copy())
 
-        if isinstance(m, navis.TreeNeuron):
-            return octarine_navis_plugin.neuron2gfx(m, color=kwargs["color"])
+        if isinstance(m, navis.BaseNeuron):
+            # This returns a list of visuals (e.g. neurites + soma)
+            return octarine_navis_plugin.neuron2gfx(m, **kwargs)
         else:
-            return oc.visuals.mesh2gfx(m, **kwargs)
+            return [oc.visuals.mesh2gfx(m, **kwargs)]
 
     def check_futures(self):
         """Check if any futures are done."""
@@ -829,7 +879,7 @@ class NglViewer:
 
             try:
                 # Let the future time out after
-                visual = future.result(60)  # wait up to 60 seconds for the result
+                visuals = future.result(60)  # wait up to 60 seconds for the result
             except TimeoutError:
                 finished_futures.append(((id, dataset), name))
                 self.report(f"Future for {id} ({dataset}) timed out.")
@@ -841,16 +891,21 @@ class NglViewer:
 
             self.pool._task_counter += 1  # Increment the number of tasks processed
 
-            # If there is no mesh, skip
-            if isinstance(visual, BaseException):
+            # If loading raised, or produced nothing to show (e.g. a skeleton
+            # without nodes), count it as a failure and drop the future
+            if isinstance(visuals, BaseException) or not len(visuals):
                 self.n_failed += 1
-                self.report(f"  Failed to load {id} ({dataset}): {visual}", flush=True)
+                self.report(f"  Failed to load {id} ({dataset}): {visuals}", flush=True)
+                finished_futures.append(((id, dataset), name))
                 continue
 
-            self.report(f"  Adding {id} ({dataset}) as {str(id)} (group '{name}')", flush=True)
-            visual.material.pick_write = True  # make sure the visual is pickable
-            self.viewer.add(visual, group=str(name), name=str(id), center=False)
-            self._segments[(id, dataset)] = visual
+            self.report(
+                f"  Adding {id} ({dataset}) as {str(id)} (group '{name}')", flush=True
+            )
+            for visual in visuals:
+                visual.material.pick_write = True  # make sure the visual is pickable
+                self.viewer.add(visual, group=str(name), name=str(id), center=False)
+            self._segments[(id, dataset)] = visuals
 
             # Remove this future
             finished_futures.append(((id, dataset), name))
@@ -863,7 +918,7 @@ class NglViewer:
             # Populate cache if necessary
             if self.use_cache:
                 self.report(f"  Caching visual for {id}", flush=True)
-                self.cache[(id, dataset)] = visual
+                self.cache[(id, dataset)] = visuals
 
         # Drop completed futures
         for key in finished_futures:
@@ -956,14 +1011,25 @@ class DVIDMesh:
 
 
 class PrecomputedVolume:
-    """Helper class for loading precomputed meshes using navis."""
+    """Helper class for loading precomputed meshes/skeletons using navis."""
 
     def __init__(self, url):
         self.url = url
         self.mesh = PrecomputedMesh(url)
+        self.skeleton = PrecomputedSkeleton(url)
 
 
-class PrecomputedMesh:
+class PrecomputedSource:
+    """Loads precomputed data using navis.
+
+    Assumes a flat layout, i.e. that the files sit directly in `url` and are
+    named after their segment ID.
+
+    """
+
+    #: Datatype to tell navis to expect; set by subclasses.
+    DATATYPE = "auto"
+
     def __init__(self, url):
         if url.endswith("/"):
             url = url[:-1]
@@ -975,9 +1041,105 @@ class PrecomputedMesh:
     def get(self, x, lod=None):
         return {
             int(x): navis.read_precomputed(
-                f"{self.url}/{x}", progress=False, datatype="mesh"
+                f"{self.url}/{x}", progress=False, datatype=self.DATATYPE
             )
         }
+
+
+class PrecomputedMesh(PrecomputedSource):
+    DATATYPE = "mesh"
+
+
+class PrecomputedSkeleton(PrecomputedSource):
+    DATATYPE = "skeleton"
+
+
+class SkeletonVolume:
+    """Serves skeletons from a local directory of SWC files.
+
+    Parameters
+    ----------
+    url : str
+        A `skeletons://path/to/swc/` URL. The directory is expected to contain
+        one SWC file per neuron, named after its segment ID (e.g. `12345.swc`).
+
+    """
+
+    def __init__(self, url):
+        self.url = url
+        self.skeleton = SwcSource(url)
+
+
+class SwcSource:
+    """Loads skeletons from a directory of SWC files."""
+
+    #: Recognised file extensions (navis transparently handles gzipped files).
+    EXTENSIONS = (".swc", ".swc.gz")
+
+    def __init__(self, url):
+        path = url
+        for scheme in LOCAL_SOURCE_SCHEMES:
+            if path.startswith(scheme):
+                path = path[len(scheme) :]
+                break
+
+        self.path = Path(path).expanduser()
+
+        if not self.path.is_dir():
+            raise ValueError(
+                f"Skeleton source must point to an existing directory, got '{self.path}'"
+            )
+
+        self._files = None
+
+    def __repr__(self):
+        return f"SwcSource(<{self.path}>)"
+
+    @property
+    def files(self):
+        """Map of segment ID to filepath; indexed lazily on first access.
+
+        Neurons are loaded from a thread pool, so we fill a local dict and
+        publish it in one assignment. Several threads may end up building the
+        index redundantly but none can ever observe a partially filled one.
+
+        """
+        if self._files is None:
+            files = {}
+            for fp in sorted(self.path.iterdir()):
+                for ext in self.EXTENSIONS:
+                    if fp.name.endswith(ext):
+                        stem = fp.name[: -len(ext)]
+                        break
+                else:
+                    continue
+
+                try:
+                    files[int(stem)] = fp
+                except ValueError:
+                    # Files not named after a segment ID aren't addressable
+                    logger.warning(
+                        f"Ignoring SWC file with non-numeric name: '{fp.name}'"
+                    )
+
+            logger.info(f"Indexed {len(files)} SWC files in '{self.path}'")
+            self._files = files
+
+        return self._files
+
+    def get(self, x):
+        x = int(x)
+        fp = self.files.get(x)
+
+        if fp is None:
+            raise ValueError(f"No SWC file found for segment {x} in '{self.path}'")
+
+        n = navis.read_swc(fp)
+        # The ID navis parses out of the file (or generates) need not match the
+        # segment ID we were asked for - the filename is what we index by
+        n.id = x
+
+        return {x: n}
 
 
 class MemoryVolume:
@@ -1003,6 +1165,135 @@ class MemorySource:
 
     def get(self, x):
         return {x: self.neurons.idx[x]}
+
+
+def is_local_source(source):
+    """Whether a source is local-only and hence meaningless to neuroglancer."""
+    source = str(source)
+    return source == "memory" or source.startswith(LOCAL_SOURCE_SCHEMES)
+
+
+def resolve_local_source(source, resolve_path):
+    """Resolve the path of a local source (e.g. `skeletons://`).
+
+    Paths in local sources may be given relative to the project directory.
+    Anything that isn't a local source is returned unchanged.
+
+    Parameters
+    ----------
+    source : str
+        The source string, e.g. `skeletons://path/to/swc/`.
+    resolve_path : callable
+        Turns a possibly-relative path into an absolute one; see
+        `bigclust2.data.Project.resolve_path`.
+
+    """
+    if not isinstance(source, str):
+        return source
+
+    for scheme in LOCAL_SOURCE_SCHEMES:
+        if source.startswith(scheme):
+            return f"{scheme}{resolve_path(source[len(scheme) :])}"
+
+    return source
+
+
+def get_subsource(vol, kind):
+    """Return a volume's "mesh"/"skeleton" source, or None if it has none."""
+    try:
+        return getattr(vol, kind, None)
+    except BaseException:
+        # CloudVolume raises for datasets that don't have the given subsource
+        return None
+
+
+def unpack_segment(data, x):
+    """Unpack what a mesh/skeleton source returned into a single object.
+
+    Sources variously return the object itself, a `{id: object}` dict (keyed by
+    either int or str) or a list/NeuronList of length one.
+
+    """
+    if isinstance(data, dict):
+        if x in data:
+            data = data[x]
+        elif str(x) in data:
+            data = data[str(x)]
+        elif len(data) == 1:
+            data = next(iter(data.values()))
+        else:
+            return None
+
+    if isinstance(data, (list, tuple, navis.NeuronList)):
+        if not len(data):
+            return None
+        assert len(data) == 1, f"Expected exactly one neuron for {x}, got {len(data)}"
+        data = data[0]
+
+    if isinstance(data, cv.Skeleton):
+        data = cv_skeleton_to_navis(data, id=x)
+
+    return data
+
+
+def cv_skeleton_to_navis(skeleton, id=None):
+    """Convert a CloudVolume Skeleton into a navis TreeNeuron."""
+    n = navis.read_swc(skeleton.to_swc())
+    n.id = id if id is not None else getattr(skeleton, "id", None)
+    n.units = "nm"
+    return n
+
+
+def fetch_segment(vol, x, lod=-1):
+    """Fetch a single segment from a volume, preferring meshes over skeletons.
+
+    We only fall back to the skeleton if the volume has no mesh source or if
+    fetching the mesh failed (e.g. because this segment has not been meshed).
+
+    Parameters
+    ----------
+    vol :   volume
+            Must have a `.mesh` and/or a `.skeleton` attribute providing a
+            `.get(id)` method.
+    x :     int
+            ID of the segment to fetch.
+    lod :   int
+            Level of detail; only passed on to sources that accept it.
+
+    Returns
+    -------
+    data :  mesh-like | navis.BaseNeuron
+    kind :  "mesh" | "skeleton"
+            Which of the volume's sources the data came from.
+
+    """
+    errors = []
+    for kind in ("mesh", "skeleton"):
+        source = get_subsource(vol, kind)
+        if source is None:
+            continue
+
+        try:
+            if "lod" in inspect.signature(source.get).parameters:
+                data = source.get(x, lod=lod)
+            else:
+                data = source.get(x)
+        except BaseException as e:
+            errors.append(e)
+            continue
+
+        data = unpack_segment(data, x)
+        if data is not None:
+            return data, kind
+
+        errors.append(ValueError(f"{kind} source returned nothing for {x}"))
+
+    if errors:
+        # Re-raise the first error - i.e. the mesh error if we have one, since
+        # that's the source we would have preferred
+        raise errors[0]
+
+    raise ValueError(f"Volume {vol} provides neither meshes nor skeletons.")
 
 
 @lru_cache

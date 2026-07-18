@@ -54,6 +54,11 @@ from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
+from .widgets.credentials import (
+    CredentialsDialog,
+    CredentialsManager,
+    apply_saved_credentials,
+)
 from .update_check import UpdateCheckRunnable, is_outdated
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer
@@ -1388,6 +1393,10 @@ class MainWindow(QMainWindow):
         self._hide_inactive_aux_widgets = self.settings.value(
             "auxWidgets/hideInactiveTabWidgets", True, type=bool
         )
+        # Stored tokens for the authenticated backends. Applying is idempotent,
+        # so this also covers windows constructed without going through main().
+        apply_saved_credentials()
+        self.credentials_manager = CredentialsManager()
         self._annotation_log = []
         self._annotation_log_dir = Path.home() / ".bigclust"
         self._annotation_log_dir.mkdir(parents=True, exist_ok=True)
@@ -1881,6 +1890,15 @@ class MainWindow(QMainWindow):
         show_project_details_action = QAction("Show Project Details", self)
         show_project_details_action.triggered.connect(self.show_project_details)
         window_menu.addAction(show_project_details_action)
+
+        credentials_action = QAction("Credentials...", self)
+        # Set role so macOS places this in the app menu as "Preferences"
+        credentials_action.setMenuRole(QAction.MenuRole.PreferencesRole)
+        credentials_action.setToolTip(
+            "Set or clear the tokens used for neuPrint, FlyTable and Clio."
+        )
+        credentials_action.triggered.connect(self.show_credentials_dialog)
+        window_menu.addAction(credentials_action)
 
         # Help menu
         help_menu = menu_bar.addMenu("Help")
@@ -3207,6 +3225,10 @@ class MainWindow(QMainWindow):
         """Open a dialog showing the current window's annotation log."""
         dialog = AnnotationLogDialog(self, entries=self._annotation_log)
         dialog.exec()
+
+    def show_credentials_dialog(self):
+        """Open the dialog for reviewing and updating stored service tokens."""
+        CredentialsDialog(self.credentials_manager, parent=self).exec()
 
     def show_project_details(self):
         """Open a dialog summarizing the current project's metadata."""
@@ -4813,6 +4835,8 @@ class MainWindow(QMainWindow):
 def main(dataset=None):
     """Main application entry point."""
     app = QApplication(sys.argv)
+    # Push stored tokens into the environment before any backend is built.
+    apply_saved_credentials()
     window = MainWindow()
     window.show()
     # Check PyPI for updates once the window has had a chance to paint.

@@ -463,8 +463,8 @@ wheels = [
 
 [[package]]
 name = "clio-py"
-version = "0.1.0"
-source = { git = "https://github.com/schlegelp/clio-py?rev=main#2a79d3242e1211a65711e4c06fbff1fdca256a93" }
+version = "0.1.1"
+source = { git = "https://github.com/schlegelp/clio-py?rev=main#d84df229993ee04a1c4593eb9254691fbb5816cb" }
 dependencies = [
     { name = "dvidtools" },
     { name = "numpy" },

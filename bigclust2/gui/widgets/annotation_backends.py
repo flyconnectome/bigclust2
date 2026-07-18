@@ -16,6 +16,11 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, dataclass, field, fields as dataclass_fields
 
+try:
+    from ...credentials import raise_for_auth_error
+except ImportError:  # pragma: no cover - script execution fallback
+    from bigclust2.credentials import raise_for_auth_error
+
 
 @dataclass(frozen=True)
 class FlyTableConfig:
@@ -316,9 +321,15 @@ class NeuprintBackend(AnnotationBackend):
     @property
     def client(self):
         if self._client is None:
-            self._client = self._get_neuprint_module().Client(
-                server=self.config.server, dataset=self.config.dataset
-            )
+            try:
+                self._client = self._get_neuprint_module().Client(
+                    server=self.config.server, dataset=self.config.dataset
+                )
+            except Exception as exc:
+                # Turns a missing/rejected token into a MissingCredentialsError
+                # the GUI can prompt on; anything else propagates unchanged.
+                raise_for_auth_error("neuprint", exc)
+                raise
         return self._client
 
     def _get_neuprint_module(self):
@@ -327,7 +338,8 @@ class NeuprintBackend(AnnotationBackend):
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "neuprint-python (github.com/connectome-neuprint/neuprint-python) is required for NeuprintBackend. "
-                "Install it and ensure your API token is set as an environment variable (see docs for details)."
+                "Install it and set your token via Window > Credentials... or the "
+                "NEUPRINT_APPLICATION_CREDENTIALS environment variable."
             ) from exc
 
     def validate(self):
@@ -383,9 +395,15 @@ class ClioBackend(AnnotationBackend):
     @property
     def client(self):
         if self._client is None:
-            self._client = self._get_clio_module().Client(
-                dataset=self.config.dataset_name
-            )
+            # No explicit token: clio resolves its own token file first and
+            # falls back to gcloud, so existing set-ups keep working.
+            try:
+                self._client = self._get_clio_module().Client(
+                    dataset=self.config.dataset_name
+                )
+            except Exception as exc:
+                raise_for_auth_error("clio", exc)
+                raise
         return self._client
 
     def _get_clio_module(self):
@@ -394,7 +412,8 @@ class ClioBackend(AnnotationBackend):
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "clio-py (github.com/schlegelp/clio-py) is required for ClioBackend. "
-                "Install it and ensure `gcloud` authentication is configured."
+                "Install it and set your token via Window > Credentials... "
+                "(or configure `gcloud` authentication)."
             ) from exc
 
     @property
@@ -483,12 +502,16 @@ class FlyTableBackend(AnnotationBackend):
         """Lazily load the FlyTable module and return the target table."""
         if self._table is None:
             ss = self._get_seaserpent_module()
-            self._table = ss.Table(
-                self.config.table_name,
-                base=self.config.base_name,
-                server=self.config.server,
-                read_only=False,
-            )
+            try:
+                self._table = ss.Table(
+                    self.config.table_name,
+                    base=self.config.base_name,
+                    server=self.config.server,
+                    read_only=False,
+                )
+            except Exception as exc:
+                raise_for_auth_error("flytable", exc)
+                raise
         return self._table
 
     @property
@@ -508,7 +531,8 @@ class FlyTableBackend(AnnotationBackend):
         except ModuleNotFoundError as exc:
             raise ModuleNotFoundError(
                 "seaserpent (github.com/schlegelp/seaserpent) is required for FlyTableBackend. "
-                "Install it and ensure `gcloud` authentication is configured."
+                "Install it and set your token via Window > Credentials... or the "
+                "SEATABLE_TOKEN environment variable."
             ) from exc
 
     def validate(self):

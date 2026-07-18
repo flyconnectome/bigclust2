@@ -19,8 +19,12 @@ from PySide6 import QtCore, QtWidgets
 
 try:
     from .annotation_backends import BACKEND_REGISTRY, build_backend
+    from .credentials import CredentialsManager
 except ImportError:  # pragma: no cover - script execution fallback
     from annotation_backends import BACKEND_REGISTRY, build_backend
+    from credentials import CredentialsManager
+
+from ...credentials import service_key_for_backend
 
 from ...meta_sources import (
     MetaSourceSpec,
@@ -487,12 +491,36 @@ class MetaSourcesDialog(QtWidgets.QDialog):
     # Auto-map: fetch columns + auto-match (async)
     # ------------------------------------------------------------------ #
 
+    def _credentials_manager(self):
+        """Shared credentials manager (created on first use)."""
+        manager = getattr(self, "_credentials_manager_instance", None)
+        if manager is None:
+            manager = CredentialsManager()
+            self._credentials_manager_instance = manager
+        return manager
+
+    def _ensure_credentials_for(self, backend_names):
+        """Prompt for missing tokens before dispatching to worker threads."""
+        manager = self._credentials_manager()
+        for name in dict.fromkeys(backend_names):
+            service_key = service_key_for_backend(name)
+            if service_key and not manager.ensure_credentials(service_key, parent=self):
+                return False
+        return True
+
     def _on_auto_map(self):
         if self._busy:
             return
         datasets = self._configured_datasets()
         if not datasets:
             self._set_status("Select a backend for at least one dataset first.")
+            return
+
+        # Workers cannot show dialogs, so resolve credentials up front.
+        if not self._ensure_credentials_for(
+            self._dataset_backends[ds] for ds in datasets
+        ):
+            self._set_status("Auto-map cancelled: credentials required.")
             return
 
         self._set_busy(True, f"Auto-mapping {len(datasets)} source(s)…")
@@ -619,6 +647,10 @@ class MetaSourcesDialog(QtWidgets.QDialog):
             self._set_status(
                 "Configure a backend and map at least one column first."
             )
+            return
+
+        if not self._ensure_credentials_for(spec.backend for spec in specs):
+            self._set_status("Update cancelled: credentials required.")
             return
 
         # Persist the source definitions before pulling.

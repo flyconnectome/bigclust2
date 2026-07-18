@@ -15,9 +15,19 @@ from PySide6 import QtCore, QtWidgets
 
 try:
     from .annotation_backends import BACKEND_REGISTRY
+    from .credentials import CredentialsManager
 except ImportError:
     # For testing we need absolute imports
     from annotation_backends import BACKEND_REGISTRY
+    from credentials import CredentialsManager
+
+try:
+    from ...credentials import MissingCredentialsError, service_key_for_backend
+except ImportError:  # pragma: no cover - script execution fallback
+    from bigclust2.credentials import (
+        MissingCredentialsError,
+        service_key_for_backend,
+    )
 
 
 @dataclass(frozen=True)
@@ -583,6 +593,40 @@ class AnnotationDialog(QtWidgets.QDialog):
         """Return runtime backend class for a backend name."""
         return self.WRITEABLE_BACKENDS.get(backend_name)
 
+    def _credentials_manager(self):
+        """Shared credentials manager (created on first use)."""
+        manager = getattr(self, "_credentials_manager_instance", None)
+        if manager is None:
+            manager = CredentialsManager()
+            self._credentials_manager_instance = manager
+        return manager
+
+    def _validate_with_credentials(self, backend, backend_name):
+        """Validate a backend, prompting for a token once if one is needed."""
+        try:
+            backend.validate()
+        except MissingCredentialsError as exc:
+            manager = self._credentials_manager()
+            if not manager.prompt_for_credentials(
+                exc.service_key, parent=self, invalid=exc.invalid
+            ):
+                raise
+            # Drop the half-built client so the retry reconnects with the
+            # freshly stored token.
+            for attr in ("_client", "_table"):
+                if hasattr(backend, attr):
+                    setattr(backend, attr, None)
+            backend.validate()
+
+    def _ensure_backend_credentials(self, backend_names):
+        """Prompt for any missing tokens before dispatching background work."""
+        manager = self._credentials_manager()
+        for name in dict.fromkeys(backend_names):
+            service_key = service_key_for_backend(name)
+            if service_key and not manager.ensure_credentials(service_key, parent=self):
+                return False
+        return True
+
     def _validate_backend_configs(self):
         """Validate backend configs and cache dataset-to-backend instances."""
         instances = {}
@@ -609,7 +653,7 @@ class AnnotationDialog(QtWidgets.QDialog):
             if backend is None:
                 backend = backend_cls(config=config)
                 try:
-                    backend.validate()
+                    self._validate_with_credentials(backend, backend_name)
                 except Exception as exc:
                     detail = str(exc).strip() or exc.__class__.__name__
                     return (
@@ -1684,6 +1728,16 @@ class AnnotationDialog(QtWidgets.QDialog):
         errors = self._validation_errors()
         if errors:
             self._set_submit_status(errors[0], is_error=True)
+            return
+
+        # Writes run on a thread pool, which cannot show dialogs — so make sure
+        # tokens are in place here (they may have expired since Validate).
+        if not self._ensure_backend_credentials(
+            self._dataset_backends.get(ds, "") for ds in self._writable_datasets()
+        ):
+            self._set_submit_status(
+                "Submit cancelled: credentials required.", is_error=True
+            )
             return
 
         self._remember_recent_submit_plan()

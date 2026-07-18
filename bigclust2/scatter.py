@@ -161,6 +161,10 @@ class ScatterFigure(BaseFigure):
         )
         self.key_events["Escape"] = lambda: self.deselect_all()
         self.key_events["l"] = lambda: self.toggle_labels()
+        # Shift+C centers on the selection. The key arrives as the typed
+        # character ("C", or "c" with Caps Lock on), so register both.
+        self.key_events[("C", ("Shift",))] = lambda: self.center_on_selection()
+        self.key_events[("c", ("Shift",))] = self.key_events[("C", ("Shift",))]
 
         def _hide_selection():
             """Hide the selected neurons via the scope (see ScatterControls)."""
@@ -247,6 +251,27 @@ class ScatterFigure(BaseFigure):
             return
 
         self.camera.show_object(self.scatter_group)
+
+    def center_on_selection(self):
+        """Center and zoom the camera on the currently selected points."""
+        if self.positions is None or self.selected is None or not len(self.selected):
+            return
+
+        pts = np.asarray(self.positions[self.selected], dtype=np.float64)
+        finite = np.isfinite(pts).all(axis=1)
+        if not finite.any():
+            return
+        pts = pts[finite]
+
+        lo = pts.min(axis=0)
+        hi = pts.max(axis=0)
+        center = (lo + hi) / 2.0
+        radius = float(np.linalg.norm(hi - lo)) / 2.0
+        if not np.isfinite(radius) or radius <= 0:
+            # Single point / degenerate box -> sane zoom level
+            radius = 1.0
+        self.camera.show_object((center[0], center[1], 1.0, radius))
+        self._render_stale = True
 
     def clear(self):
         """Clear contents of the scatter plot."""

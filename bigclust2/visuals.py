@@ -5,6 +5,8 @@ import pandas as pd
 import numpy as np
 import pygfx as gfx
 
+from octarine.shaders import FlexPointsMaterial
+
 
 def text2gfx(
     text,
@@ -66,7 +68,19 @@ def text2gfx(
 
 
 def points2gfx(
-    points, color, size=2, marker=None, size_space="screen", pick_write=False
+    points,
+    color,
+    size=2,
+    marker=None,
+    size_space="screen",
+    pick_write=False,
+    edge_size_space=None,
+    min_size=None,
+    max_size=None,
+    min_edge_width=None,
+    edge_width=None,
+    edge_color=None,
+    edge_mode=None,
 ):
     """Convert points to pygfx visuals.
 
@@ -87,6 +101,33 @@ def points2gfx(
                     will keep the line width constant on the screen, while
                     "world" and "model" will keep it constant in world and
                     model coordinates, respectively.
+    edge_size_space : "screen" | "world" | "model", optional
+                    Units to use for the marker's edge width. By default
+                    (None) the edge width uses `size_space`. E.g. combine
+                    ``size_space="world"`` with ``edge_size_space="screen"``
+                    for world-sized markers with a constant on-screen edge.
+    min_size :      float, optional
+                    Minimum on-screen marker size in (logical) pixels.
+                    Useful with ``size_space="world"`` to keep far-away
+                    points visible.
+    max_size :      float, optional
+                    Maximum on-screen marker size in (logical) pixels.
+    min_edge_width : float, optional
+                    Minimum on-screen edge width in (logical) pixels. Only
+                    applies when the edge is enabled (edge_width > 0).
+    edge_width :    float, optional
+                    Width of the marker's edge, expressed in `size_space`
+                    units (or `edge_size_space`, if set). If no edge
+                    parameter is given, the edge is disabled (width 0).
+    edge_color :    str | tuple, optional
+                    Color of the marker's edge. Defaults to pygfx's default
+                    (currently black). Only relevant for markers.
+                    Note: passing only `edge_color` enables an edge with
+                    pygfx's default width of 1 - in world `size_space` that
+                    can dwarf small markers, so pass `edge_width` too.
+    edge_mode :     "centered" | "inner" | "outer", optional
+                    How the edge is drawn relative to the marker's outline.
+                    Defaults to pygfx's default (currently "centered").
 
     Returns
     -------
@@ -137,12 +178,34 @@ def points2gfx(
             color = color.astype(np.float32, copy=False)
         material_kwargs["color"] = color
 
+    # Everything is drawn with the (marker-based) flex material; plain points
+    # become circle markers.
     if marker is None:
-        material = gfx.PointsMaterial(size_space=size_space, **material_kwargs)
-    else:
-        material = gfx.PointsMarkerMaterial(
-            marker=marker, size_space=size_space, **material_kwargs, edge_width=0
-        )
+        marker = "circle"
+
+    if edge_width is not None:
+        material_kwargs["edge_width"] = edge_width
+    if edge_color is not None:
+        material_kwargs["edge_color"] = edge_color
+    if edge_mode is not None:
+        material_kwargs["edge_mode"] = edge_mode
+    if edge_width is None and edge_color is None and edge_mode is None:
+        # No edge unless explicitly requested - matches gfx.PointsMaterial
+        # and the edge_width=0 we used to pass to PointsMarkerMaterial.
+        # NB: edge_width shares size_space, so pygfx's default of 1 would
+        # dwarf world-sized markers (e.g. the scatter's ~0.01 units).
+        material_kwargs["edge_width"] = 0
+        material_kwargs["edge_color"] = (0, 0, 0, 0)
+
+    material = FlexPointsMaterial(
+        marker=marker,
+        size_space=size_space,
+        edge_size_space=edge_size_space,
+        min_size=min_size,
+        max_size=max_size,
+        min_edge_width=min_edge_width,
+        **material_kwargs,
+    )
 
     vis = gfx.Points(gfx.Geometry(positions=points, **geometry_kwargs), material)
 

@@ -983,8 +983,8 @@ class ScatterFigure(BaseFigure):
                 vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
                 vis.material.color = (1, 1, 1, 0)
                 vis.material.edge_mode = "outer"
+                vis.material.min_edge_width = 2  # min size in pixels
                 self.scatter_group.add(vis)
-                print(vis.material.alpha_mode, vis.material.alpha_method)
 
     @update_figure
     def toggle_labels(self):

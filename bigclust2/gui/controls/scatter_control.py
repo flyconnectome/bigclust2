@@ -5309,6 +5309,70 @@ class ScatterControls(QtWidgets.QWidget):
         if self.umap_auto_run.isChecked():
             self.calculate_embeddings()
 
+    #: Buttons in this panel that are also worth reaching from the command
+    #: palette: ``(attribute, breadcrumb, key, title, aliases)``.
+    #:
+    #: ``title`` of ``None`` means "use the button's current label", which is
+    #: what keeps the dimensionality-reduction entry in step with the method
+    #: combo ("Run UMAP" / "Run MDS" / "Run t-SNE"). Buttons labelled "Run" or
+    #: "Export" get an explicit title instead, since their own text says nothing
+    #: once it is out of the panel.
+    _PALETTE_BUTTONS = (
+        (
+            "umap_button",
+            "Embedding",
+            "recompute",
+            None,
+            ["umap", "t-sne", "tsne", "mds", "dimensionality reduction", "recalculate positions"],
+        ),
+        ("cluster_run_button", "Clustering", "run", "Run Clustering", ["hdbscan", "kmeans"]),
+        ("cluster_clear_button", "Clustering", "clear", "Clear Clustering", None),
+        ("cluster_apply_button", "Clustering", "apply", "Apply Cluster Labels", None),
+        ("cluster_export_button", "Clustering", "export", "Export Cluster Labels", None),
+        (
+            "fidelity_compute_button",
+            "Embedding",
+            "fidelity",
+            "Compute Neighborhood Fidelity",
+            ["fidelity", "quality"],
+        ),
+        (
+            "ngl_clear_cache_button",
+            "3D Viewer",
+            "clear_cache",
+            "Clear Neuroglancer Cache",
+            None,
+        ),
+        (
+            "toggle_config_button",
+            "Selection",
+            "tab_toggle",
+            "Configure Tab Toggle",
+            ["a/b", "compare"],
+        ),
+    )
+
+    def palette_commands(self):
+        """Expose panel buttons to the command palette.
+
+        Called fresh each time the palette opens, so labels and enabled state
+        are always current. Buttons that have not been built yet are skipped.
+        """
+        from ..widgets.command_palette import command_from_button
+
+        commands = []
+        for attr, breadcrumb, key, title, aliases in self._PALETTE_BUTTONS:
+            cmd = command_from_button(
+                getattr(self, attr, None),
+                breadcrumb,
+                key=key,
+                title=title,
+                aliases=aliases,
+            )
+            if cmd is not None:
+                commands.append(cmd)
+        return commands
+
 
 class QHLine(QtWidgets.QFrame):
     def __init__(self):

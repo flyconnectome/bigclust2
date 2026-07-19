@@ -6,6 +6,51 @@ Modifiers are written with macOS names — see [the conventions
 note](index.md#conventions-in-this-documentation) for the mapping to Linux and
 Windows.
 
+## General
+
+| Key | Does |
+|---|---|
+| ++cmd+shift+p++ | Open the [command palette](#command-palette) |
+
+### Command palette
+
+If you only remember one shortcut, make it this one. ++cmd+shift+p++ opens a
+search box listing **every** command in the menu bar — type a few letters, press
+++enter++ to run the highlighted one.
+
+Matching is fuzzy and skips ahead, so initials work: `gs` finds **Grow
+Selection**, `dh` finds **Distance Heatmap**, `csv` finds **Export ▸ Meta Data ▸
+To CSV**. You can also search by the menu a command lives in — typing `export`
+lists everything under the Export menu.
+
+Each row shows the command's own shortcut on the right, which makes the palette a
+practical way to *learn* the shortcuts for the things you do often. Commands you
+have run recently are offered first.
+
+Commands that are unavailable right now — the Distance Heatmap before a project
+is loaded, say — are still listed, greyed out, rather than hidden, so you can see
+that a feature exists and that it is merely waiting on something.
+
+Navigate with ++up++ / ++down++, and ++esc++ to dismiss.
+
+Not everything in the palette comes from the menu bar: a few control-panel
+buttons are in there too, listed under the panel they belong to — **Run
+UMAP/MDS/t-SNE** and **Compute Neighborhood Fidelity** under *Embedding*, the
+clustering **Run** / **Clear** / **Apply** / **Export** actions under
+*Clustering*, and so on. The dimensionality-reduction entry follows whichever
+method is selected, so it reads "Run t-SNE" when t-SNE is chosen — but searching
+`umap` finds it either way.
+
+!!! info "Adding your own"
+
+    Any panel can contribute commands by defining a `palette_commands()` method
+    returning `Command` objects; `command_from_button()` wraps an existing
+    `QPushButton` in one line. See
+    `ScatterControls._PALETTE_BUTTONS` in
+    [`bigclust2/gui/controls/scatter_control.py`](https://github.com/flyconnectome/bigclust2/blob/main/bigclust2/gui/controls/scatter_control.py)
+    for the pattern. Everything already in the menu bar is picked up
+    automatically and needs no registration.
+
 ## Scatter plot
 
 Bare-letter shortcuts only fire when the scatter plot has focus, so they never

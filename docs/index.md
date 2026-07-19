@@ -19,7 +19,7 @@ That opens a public example project: **87,263 central brain neurons from FlyWire
 MaleCNS and Hemibrain**, co-clustered by connectivity and streamed straight over
 HTTP. No account, no credentials, nothing to download first.
 
-Select a cluster and the 3D viewer shows you those neurons from all three
+Select a cluster (Shift+Drag) and the 3D viewer shows you those neurons from all three
 connectomes at once, in a common space.
 
 [About the example dataset &rarr;](get-started/example-dataset.md) ·

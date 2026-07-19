@@ -18,6 +18,7 @@ conventions note](index.md#conventions-in-this-documentation).
 
 | Item | Shortcut | Does |
 |---|---|---|
+| **Command Palette…** | ++cmd+shift+p++ | Search and run any command — see [shortcuts](shortcuts.md#command-palette) |
 | **Connectivity Table** | ++shift+cmd+c++ | [Widget](widgets.md#connectivity-table) |
 | **Distance Heatmap** | ++shift+cmd+d++ | [Widget](widgets.md#distance-heatmap) |
 | **Feature Comparison** | ++shift+cmd+f++ | [Widget](widgets.md#feature-comparison) |

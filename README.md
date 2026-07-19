@@ -79,12 +79,15 @@ Most UI elements are hopefully self-explanatory — when in doubt look for the t
 
 | Key | Does |
 | --- | ---- |
+| `CMD/ctrl + shift + P` | Open the command palette — search and run any command |
 | `C` | Toggle the control panel (scatter) / legend (3D viewer) |
 | `L` | Toggle labels |
 | shift + drag | Draw a selection box (add `CMD` to add to the selection) |
 | shift + ctrl + drag | Draw a lasso selection (add `CMD` to add to the selection) |
 | `ESC` | Deselect all points |
 | `SPACE` | Cycle through embeddings |
+
+If you only remember one, make it the command palette: it lists every command in the menu bar with fuzzy search (`gs` → "Grow Selection", `dh` → "Distance Heatmap") and shows each one's shortcut, so you pick those up as you go.
 
 The complete list is in the [keyboard and mouse reference](https://flyconnectome.github.io/bigclust2/reference/shortcuts/), and in the app under **Help → Keyboard Shortcuts**.
 

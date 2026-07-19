@@ -48,6 +48,13 @@ from .tabs import ViewTabWidget
 from ..data import parse_directory, SingleProjectLoader, apply_meta_color
 from ..meta_sources import ensure_meta_dict, source_entry_datasets, parse_meta_sources
 from .controls import ScatterControls
+from .widgets.command_palette import (
+    COMMAND_PALETTE_ACTION_NAME,
+    CommandPalette,
+    collect_commands,
+    load_recent,
+    remember_recent,
+)
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
 from .widgets.features import FeatureComparisonWidget
@@ -400,6 +407,24 @@ class MainWidget(QWidget):
             matches.extend(idx.tolist())
         if matches:
             fig.set_label_color(matches, "#ff69b4")
+
+    def palette_commands(self):
+        """Commands this view contributes to the command palette.
+
+        Anything not reachable from the menu bar - currently the control-panel
+        buttons. Each panel owns its own list via its own ``palette_commands``,
+        so adding an entry means touching that panel, not the palette.
+        """
+        commands = []
+        for panel_attr in ("scatter_controls",):
+            panel = getattr(self, panel_attr, None)
+            hook = getattr(panel, "palette_commands", None)
+            if callable(hook):
+                try:
+                    commands.extend(hook() or [])
+                except Exception:
+                    logger.debug("palette_commands failed for %s", panel_attr, exc_info=True)
+        return commands
 
     def focus_canvas(self):
         """Give keyboard focus to the scatter canvas.
@@ -1594,6 +1619,26 @@ class MainWindow(QMainWindow):
 
         # View menu
         view_menu = menu_bar.addMenu("View")
+
+        # Listed first (and in the menu at all) so the palette is itself
+        # discoverable rather than being a shortcut you have to already know.
+        self.command_palette_action = QAction("Command Palette…", self)
+        self.command_palette_action.setObjectName(COMMAND_PALETTE_ACTION_NAME)
+        # "Ctrl" maps to Cmd on macOS and Ctrl elsewhere (this app does not set
+        # AA_MacDontSwapCtrlAndMeta), so this is Cmd+Shift+P / Ctrl+Shift+P -
+        # matching editors on both platforms.
+        self.command_palette_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
+        # Window scope (Qt's default), deliberately *not* ApplicationShortcut:
+        # every MainWindow installs this action, and two application-scoped
+        # copies make the shortcut ambiguous, at which point Qt fires neither.
+        # Opening a second window would silently kill the palette.
+        self.command_palette_action.setShortcutContext(Qt.WindowShortcut)
+        self.command_palette_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.command_palette_action.triggered.connect(self.show_command_palette)
+        view_menu.addAction(self.command_palette_action)
+
+        view_menu.addSeparator()
+
         self.connectivity_table_action = QAction("Connectivity Table", self)
         self.connectivity_table_action.setShortcut(QKeySequence("Shift+Meta+C"))
         self.connectivity_table_action.setEnabled(False)
@@ -2052,6 +2097,38 @@ class MainWindow(QMainWindow):
         # action states and status bar to it now.
         self._on_current_view_changed(self._view_tabs.currentIndex())
 
+    def show_command_palette(self):
+        """Open the command palette for this window.
+
+        Commands are collected fresh on every open so enabled/checked state and
+        the lazily-populated menus reflect the current view.
+        """
+        commands = collect_commands(self)
+        palette = CommandPalette(
+            commands, parent=self, recent_ids=load_recent(self.settings)
+        )
+        palette.center_on_parent()
+        try:
+            palette.exec()
+            chosen = palette.chosen
+        finally:
+            # A text input over the wgpu canvases can leave the platform's key
+            # routing pointing at a dead native subwindow; re-assert it and hand
+            # focus back to the canvas so single-key shortcuts keep working.
+            palette.deleteLater()
+            self._reassert_native_key_focus()
+            view = self.current_view()
+            if view is not None and hasattr(view, "focus_canvas"):
+                view.focus_canvas()
+
+        if chosen is None:
+            return
+
+        remember_recent(self.settings, chosen.id)
+        # Run after focus has been restored, so commands that open dialogs or
+        # move focus themselves are not undone by the restoration above.
+        QTimer.singleShot(0, chosen.run)
+
     def show_keyboard_shortcuts(self):
         """Show a dialog listing all keyboard shortcuts."""
 
@@ -2122,6 +2199,9 @@ class MainWindow(QMainWindow):
         cl = QVBoxLayout(content)
         cl.setSpacing(1)
         cl.setContentsMargins(8, 8, 8, 8)
+
+        _add_section(cl, "General")
+        _add_row(cl, ["⌘", "⇧", "P"], "Open the command palette (search every command)")
 
         _add_section(cl, "Scatterplot")
         _add_row(cl, ["mouse:left"], "Move the view")

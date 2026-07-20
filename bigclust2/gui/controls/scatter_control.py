@@ -4589,7 +4589,7 @@ class ScatterControls(QtWidgets.QWidget):
         ):
             data = np.asarray(self.meta_data[size_col].values, dtype=float)
             data = data[np.isfinite(data)]
-            has_range = data.size > 0 and data.min() != data.max()
+            has_range = bool(data.size > 0 and data.min() != data.max())
             if has_range:
                 lo = float(data.min())
                 hi = float(data.max())

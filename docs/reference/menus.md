@@ -30,10 +30,17 @@ conventions note](index.md#conventions-in-this-documentation).
 | **Toggle Viewer Controls** | | Show/hide the viewer sidebar |
 | **Reset Layout** | | Restore the default stacked 50/50 panes |
 | **Synchronize Viewer** | | *Checkable, on by default.* Couple scatter selection to the 3D viewer |
+| **Labels** ▸ **Show Labels** | ++l++ | *Checkable, on by default.* Show/hide the point labels |
+| **Labels** ▸ **Declutter Labels** | | *Checkable, on by default.* Automatically arrange labels so they cover neither points nor each other |
+| **Labels** ▸ **Declutter Mode** ▸ | | **Individual Labels** (default): every visible point gets its own label. **One Label Per Group**: a single label per unique value, with connector lines fanning out to all its points |
+| **Labels** ▸ **Connector Lines** | | *Checkable, on by default.* Draw a short line from each label to the point it belongs to |
+| **Labels** ▸ **When Labels Don't Fit** ▸ | | What to do with labels that can't be placed without overlap: **Hide** (default), **Show Dimmed** (faded, drawn behind the points) or **Show Normally** |
 | **Show Hoverinfo** | | *Checkable, on by default.* Tooltips on hover |
 | **Hover Columns** ▸ | | Which meta columns appear in the tooltip, plus **Show All** / **Hide All** |
 
-The four widget entries are disabled until a project is loaded.
+The four widget entries are disabled until a project is loaded. The **Labels**
+settings (except **Show Labels** itself) are remembered across sessions and
+apply to new tabs and windows.
 
 ## Selection
 
@@ -103,6 +110,7 @@ See [exporting your work](../how-to/export.md).
 | **GitHub Repository** | <https://github.com/flyconnectome/bigclust2> |
 | **Report a Problem** | <https://github.com/flyconnectome/bigclust2/issues> |
 | **Debug** ▸ **Scatter** / **Viewer** / **All** | *Checkable, per view.* Render debug overlays |
+| **Debug** ▸ **Labels…** | Diagnose label placement for the current view: which labels were placed where, and why the rest were dropped (every rejected candidate position with its reason). Copy the report when reporting label issues |
 | **Debug** ▸ **Tracebacks** | *Checkable, app-wide.* Include full tracebacks in the log |
 | **Keyboard Shortcuts** | The list on [this page](shortcuts.md) |
 

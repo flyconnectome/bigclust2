@@ -15,6 +15,15 @@ from scipy.spatial import ConvexHull, Delaunay
 
 from .figure import BaseFigure, update_figure
 from .embeddings import neighborhood_fidelity
+from .label_placement import (
+    SLOT_RIGHT,
+    connector_offsets,
+    estimate_text_wh,
+    measure_text_wh,
+    slot_name,
+    solve_label_placement,
+    spatial_components,
+)
 from .selection import LassoGizmo, SelectionGizmo
 from .utils import check_finite_features
 from .visuals import points2gfx, text2gfx, lines2gfx
@@ -24,7 +33,34 @@ AVAILABLE_MARKERS = list(gfx.MarkerShape)
 AVAILABLE_MARKERS.remove("ring")
 
 # Alpha multiplier for points outside the current selection scope
-SCOPE_FADE_ALPHA = 0.15
+SCOPE_FADE_ALPHA = 0.05
+
+# Opacity for labels that could not be placed without overlap when
+# `unplaced_labels` is set to "dim"
+UNPLACED_LABEL_ALPHA = 0.15
+
+# Color of the short connector lines between points and their labels
+LABEL_CONNECTOR_COLOR = (0.3, 0.3, 0.3, 0.5)
+
+# Candidate rings for group labels: crowded scenes get fallback slots farther
+# out instead of dropping the label (see `slot_box`)
+GROUP_LABEL_RINGS = 3
+
+# Same-label islands further apart than this multiple of the typical point
+# spacing each get their own group label (instead of one label with connector
+# lines running across the whole view)
+GROUP_SPLIT_FACTOR = 5.0
+
+# Standoff between the marker edge and the start of its connector line, as a
+# fraction of the marker-to-label padding
+LABEL_CONNECTOR_STANDOFF = 0.35
+
+# Z-layers for the label system. Points sit at z=0/1 (`make_points` /
+# `update_point_position`); placed labels render above them, unplaced "dimmed"
+# labels behind them, connector lines just below the points.
+LABEL_Z = 2.0
+LABEL_Z_BEHIND = -1.0
+LABEL_CONNECTOR_Z = -0.5
 
 
 def auto_point_size(n, base=10.0, ref=1000, min_size=0.1):
@@ -109,6 +145,12 @@ class ScatterFigure(BaseFigure):
         self._point_scale = 0.001  # used for scaling points uniformly
         self.label_vis_limit = 400  # number of labels shown at once before hiding all
         self.label_refresh_rate = 30  # update labels every n frames
+        self._smart_label_placement = True  # de-clutter labels via greedy placement
+        self._declutter_mode = "individual"  # individual | grouped (one per value)
+        self._unplaced_labels = "hide"  # labels that don't fit: hide | dim | show
+        self._label_connectors = True  # draw lines from points to their labels
+        self._label_layout_version = 0  # bumped by anything invalidating placement
+        self._reset_label_placement_state()
         self._viewer_sync_enabled = True
 
         # Add the selection gizmo (Shift+drag → rectangle)
@@ -211,17 +253,24 @@ class ScatterFigure(BaseFigure):
             # Check which leafs are currently visible
             iv = self.is_visible_pos(self.positions)
 
-            # If more than the limit, don't show any labels
+            # If more points than the limit are visible, don't show any
+            # labels (this applies per-point in both declutter modes)
             if iv.sum() > self.label_vis_limit:
                 for i, t in enumerate(self.label_group.children):
                     t.visible = False
+            elif self._smart_label_placement and self._declutter_mode == "grouped":
+                # One label per unique value among the visible points
+                self._update_group_labels(np.where(iv)[0])
             else:
-                self.show_labels(np.where(iv)[0])
+                vis_ix = np.where(iv)[0]
+                self.show_labels(vis_ix)
                 self.hide_labels(np.where(~iv)[0])
+                self._update_label_placement(vis_ix)
 
         # Turns out this is too slow to be run every frame - we're throttling it to every N frames
         self.control_label_vis_tick = 1
         self.add_animation(_control_label_vis)
+        self.add_animation(self._animate_label_placement)
 
         self.add_animation(self.process_moves)
 
@@ -283,6 +332,7 @@ class ScatterFigure(BaseFigure):
         self.labels = None
         self.label_visuals = None
         self._label_colors = None
+        self._reset_label_placement_state()
         self.point_visuals = None
         self.positions = None
         self.metadata = None
@@ -320,6 +370,131 @@ class ScatterFigure(BaseFigure):
         for t in self.label_visuals:
             if isinstance(t, gfx.Text):
                 t.font_size = size
+        for t in getattr(self, "_group_label_visuals", {}).values():
+            t.font_size = size
+        self._invalidate_label_placement()
+
+    @property
+    def smart_label_placement(self):
+        """Whether labels are automatically arranged to avoid overlaps."""
+        return self._smart_label_placement
+
+    @smart_label_placement.setter
+    @update_figure
+    def smart_label_placement(self, x):
+        assert isinstance(x, bool), "`smart_label_placement` must be a boolean."
+        if x == self._smart_label_placement:
+            return
+        self._smart_label_placement = x
+
+        if not x:
+            # Restore the legacy fixed label positions and undo any
+            # dimming/suppression the placement may have applied
+            self._reset_label_placement_state()
+            if self.label_visuals is not None and self.positions is not None:
+                for i, vis in enumerate(self.label_visuals):
+                    if vis is None:
+                        continue
+                    vis._label_offset = None
+                    vis._label_target = None
+                    vis.material.opacity = 1.0
+                    vis.local.position = (
+                        self.positions[i, 0] + 0.005,
+                        self.positions[i, 1],
+                        LABEL_Z,
+                    )
+        self._invalidate_label_placement()
+
+    @property
+    def declutter_mode(self):
+        """How labels are decluttered while `smart_label_placement` is on.
+
+        One of:
+         - "individual": every visible point gets its own label, arranged to
+           avoid overlaps (default)
+         - "grouped": a single label per unique label value, with connector
+           lines pointing to all associated points
+        """
+        return self._declutter_mode
+
+    @declutter_mode.setter
+    @update_figure
+    def declutter_mode(self, x):
+        if x not in ("individual", "grouped"):
+            raise ValueError(f"Expected 'individual' or 'grouped', got {x!r}.")
+        if x == self._declutter_mode:
+            return
+        self._declutter_mode = x
+
+        if x == "grouped":
+            # Hide the per-point machinery; the next refresh tick builds the
+            # group labels
+            self.hide_labels()
+            vis = getattr(self, "_label_connector_vis", None)
+            if vis is not None:
+                vis.visible = False
+            self._label_anim_active.clear()
+            self._label_suppressed = set()
+            self._label_placement_key = None
+        else:
+            grp = getattr(self, "_group_label_grp", None)
+            if grp is not None:
+                grp.visible = False
+            self._group_placement_key = None
+            self._group_data = None
+            # Grouped mode only tracks highlighted indices - the per-point
+            # labels still need their highlight color applied
+            if self._label_highlighted:
+                self.highlight_labels(
+                    sorted(self._label_highlighted),
+                    color=self._label_highlight_color,
+                )
+
+        self._invalidate_label_placement()
+
+    @property
+    def label_connectors(self):
+        """Whether placed labels get a short connector line to their point.
+
+        Only relevant while `smart_label_placement` is enabled.
+        """
+        return self._label_connectors
+
+    @label_connectors.setter
+    @update_figure
+    def label_connectors(self, x):
+        assert isinstance(x, bool), "`label_connectors` must be a boolean."
+        if x == self._label_connectors:
+            return
+        self._label_connectors = x
+        if not x:
+            vis = getattr(self, "_label_connector_vis", None)
+            if vis is not None:
+                vis.visible = False
+        self._invalidate_label_placement()
+
+    @property
+    def unplaced_labels(self):
+        """What to do with labels that can not be placed without overlap.
+
+        One of:
+         - "hide": don't show them at all (default)
+         - "dim": show them faded at their default position
+         - "show": show them normally at their default position
+
+        Only relevant while `smart_label_placement` is enabled.
+        """
+        return self._unplaced_labels
+
+    @unplaced_labels.setter
+    @update_figure
+    def unplaced_labels(self, x):
+        if x not in ("hide", "dim", "show"):
+            raise ValueError(f"Expected 'hide', 'dim' or 'show', got {x!r}.")
+        if x == self._unplaced_labels:
+            return
+        self._unplaced_labels = x
+        self._invalidate_label_placement()
 
     @property
     def point_size(self):
@@ -357,6 +532,8 @@ class ScatterFigure(BaseFigure):
                     vis.geometry.sizes.set_data(this_point_size * self._point_scale)
 
                 vis.material.size_mode = "vertex"
+
+        self._invalidate_label_placement()
 
     @property
     def point_scale(self):
@@ -1634,7 +1811,7 @@ class ScatterFigure(BaseFigure):
                     position=(
                         self.positions[ix, 0] + 0.005,
                         self.positions[ix, 1],
-                        0,
+                        LABEL_Z,
                     ),
                     color=label_color,
                     font_size=self._font_size,
@@ -1689,6 +1866,1027 @@ class ScatterFigure(BaseFigure):
                 continue
 
             self.label_visuals[ix].visible = False
+
+    def _invalidate_label_placement(self):
+        """Mark the current label placement as stale.
+
+        Called whenever something invalidates the solution: label text,
+        font size, point size/scale or point positions. The actual re-solve
+        happens at the next label refresh tick (see `_update_label_placement`).
+        """
+        self._label_layout_version += 1
+
+    def _reset_label_placement_state(self):
+        """Reset all cached label placement state (e.g. after `set_points`)."""
+        self._label_placement_key = None  # (version, visible set) of last solve
+        self._label_slots = {}  # label index -> last assigned slot (hysteresis)
+        self._label_suppressed = set()  # labels hidden because no free slot
+        self._label_extent_cache = {}  # label index -> (text, font size, (w, h), measured)
+        self._label_anim_active = set()  # labels currently easing to a new position
+        self._label_highlighted = set()  # labels highlighted via `highlight_labels`
+        self._label_highlight_color = "y"  # color applied to highlighted labels
+        # Connector lines: label index, start offset (relative to the point)
+        # and end offset (relative to the label anchor) per placed label
+        self._label_connector_ix = np.empty(0, dtype=int)
+        self._label_connector_start = np.empty((0, 2), dtype=np.float32)
+        self._label_connector_end_rel = np.empty((0, 2), dtype=np.float32)
+        vis = getattr(self, "_label_connector_vis", None)
+        if vis is not None:
+            vis.visible = False
+        # Grouped mode (one label per unique value, see `declutter_mode`)
+        self._group_placement_key = None
+        self._group_label_slots = {}  # label text -> last slot (hysteresis)
+        self._group_label_extent_cache = {}  # label text -> (font size, (w, h), measured)
+        self._group_label_visuals = {}  # label text -> gfx.Text
+        self._group_data = None  # solution of the last grouped solve
+        self._label_codes_cache = None  # cached factorization of self.labels
+        self._group_connector_vis = None  # child of _group_label_grp (see below)
+        grp = getattr(self, "_group_label_grp", None)
+        if grp is not None:
+            grp.clear()
+            grp.visible = False
+
+    def _label_extent(self, ix):
+        """Return the (width, height) of a label in world units.
+
+        Prefers exact extents measured from the glyph layout of an existing
+        text visual; falls back to a character-count estimate for labels
+        whose visual has not been created yet. Cached per label until the
+        text or font size changes.
+        """
+        text = str(self.labels[ix])
+        fs = self._font_size
+        cached = self._label_extent_cache.get(ix)
+        if cached is not None and cached[0] == text and cached[1] == fs and cached[3]:
+            return cached[2]
+
+        vis = self.label_visuals[ix]
+        wh = measure_text_wh(vis, fs) if vis is not None else None
+        measured = wh is not None
+        if wh is None:
+            # Re-use a previous estimate if still valid, else make a new one
+            if cached is not None and cached[0] == text and cached[1] == fs:
+                return cached[2]
+            wh = estimate_text_wh(text, fs)
+
+        self._label_extent_cache[ix] = (text, fs, wh, measured)
+        return wh
+
+    def _update_label_placement(self, visible_idx, debug=None):
+        """(Re-)solve the placement for the currently visible labels.
+
+        Greedily moves labels into free candidate slots around their points
+        so they overlap neither markers nor each other; labels with no free
+        slot are temporarily hidden ("suppressed"). Because points and labels
+        are both sized in world units, a solution stays valid under pan/zoom -
+        we only re-solve when the set of visible labels changes or the layout
+        version was bumped (label text, font/point size, positions).
+
+        Pass a dict as `debug` to force a re-solve and collect diagnostics
+        (see `label_debug_report`).
+        """
+        if not self.smart_label_placement:
+            return
+        if self.labels is None or self.label_visuals is None:
+            return
+
+        key = (self._label_layout_version, hash(visible_idx.tobytes()))
+        if debug is None and key == self._label_placement_key:
+            # Solution still valid. Just re-assert suppression: show_labels()
+            # in the refresh tick will have re-shown suppressed labels.
+            if self._unplaced_labels == "hide":
+                for ix in self._label_suppressed:
+                    if self.label_visuals[ix] is not None:
+                        self.label_visuals[ix].visible = False
+            return
+        self._label_placement_key = key
+
+        # Point marker radii in world units (see `make_points`: world-space
+        # size = point_size * point_scale, and size is the diameter)
+        point_size = getattr(self, "_point_size", 1)
+        scale = float(getattr(self, "_point_scale", 1.0))
+        if isinstance(point_size, np.ndarray):
+            radii = point_size[visible_idx].astype(float) * scale / 2
+        else:
+            radii = np.full(len(visible_idx), float(point_size) * scale / 2)
+
+        extents = np.array([self._label_extent(ix) for ix in visible_idx]).reshape(
+            -1, 2
+        )
+
+        # Highlighted labels get placed first (= best slots), then labels of
+        # selected points, then the rest
+        priority = np.full(len(visible_idx), 2.0)
+        if self._selected is not None and len(self._selected):
+            priority[np.isin(visible_idx, self._selected)] = 1
+        if self._label_highlighted:
+            priority[np.isin(visible_idx, list(self._label_highlighted))] = 0
+
+        prev_slots = np.array(
+            [self._label_slots.get(int(ix), -1) for ix in visible_idx], dtype=int
+        )
+
+        # Leave a wider gap between marker and label when connector lines are
+        # drawn, so the lines are actually visible
+        if len(extents):
+            pad = (0.5 if self._label_connectors else 0.2) * float(
+                np.median(extents[:, 1])
+            )
+        else:
+            pad = None
+
+        candidates = [] if debug is not None else None
+        slots, offsets = solve_label_placement(
+            self.positions[visible_idx],
+            radii,
+            extents,
+            priority=priority,
+            prev_slots=prev_slots,
+            pad=pad,
+            debug=candidates,
+        )
+        if debug is not None:
+            debug.update(
+                mode="individual",
+                n_visible=len(visible_idx),
+                visible_idx=visible_idx,
+                pad=pad,
+                extents=extents,
+                slots=slots,
+                prev_slots=prev_slots,
+                candidates=candidates,
+                policy=self._unplaced_labels,
+            )
+
+        policy = self._unplaced_labels
+        self._label_suppressed = set()
+        for j, ix in enumerate(visible_idx):
+            ix = int(ix)
+            vis = self.label_visuals[ix]
+            if vis is None:
+                continue
+
+            placed = slots[j] >= 0
+            if placed:
+                self._label_slots[ix] = int(slots[j])
+            else:
+                self._label_suppressed.add(ix)
+                if policy == "hide":
+                    vis.visible = False
+                    continue
+
+            # Unplaced labels that are shown anyway ("dim"/"show") sit at the
+            # preferred right-hand slot (the solver returns that offset);
+            # dimmed ones additionally go *behind* the points
+            dimmed = not placed and policy == "dim"
+            vis.material.opacity = UNPLACED_LABEL_ALPHA if dimmed else 1.0
+            # N.B. the third component is not an offset but the absolute
+            # z-layer of the label
+            offset = np.array(
+                [
+                    offsets[j, 0],
+                    offsets[j, 1],
+                    LABEL_Z_BEHIND if dimmed else LABEL_Z,
+                ],
+                dtype=np.float32,
+            )
+            target = np.array(
+                [
+                    self.positions[ix, 0] + offset[0],
+                    self.positions[ix, 1] + offset[1],
+                    offset[2],
+                ],
+                dtype=np.float32,
+            )
+            vis._label_offset = offset
+            vis._label_target = target
+            if not np.allclose(vis.local.position, target):
+                self._label_anim_active.add(ix)
+
+        # (Re-)build the connector lines pointing from markers to their labels
+        connector_ix = []
+        connector_start = []
+        connector_end_rel = []
+        if self._label_connectors:
+            for j, ix in enumerate(visible_idx):
+                ix = int(ix)
+                if slots[j] < 0 or self.label_visuals[ix] is None:
+                    continue
+                start, end_rel = connector_offsets(
+                    int(slots[j]),
+                    extents[j, 0],
+                    extents[j, 1],
+                    radii[j],
+                    gap=pad * LABEL_CONNECTOR_STANDOFF,
+                )
+                connector_ix.append(ix)
+                connector_start.append(start)
+                connector_end_rel.append(end_rel)
+        self._label_connector_ix = np.array(connector_ix, dtype=int)
+        self._label_connector_start = np.array(
+            connector_start, dtype=np.float32
+        ).reshape(-1, 2)
+        self._label_connector_end_rel = np.array(
+            connector_end_rel, dtype=np.float32
+        ).reshape(-1, 2)
+        self._rebuild_label_connector_visual()
+
+        self._render_stale = True
+
+    def _rebuild_label_connector_visual(self):
+        """(Re-)create the line visual holding the point-to-label connectors."""
+        n = len(self._label_connector_ix)
+        vis = getattr(self, "_label_connector_vis", None)
+
+        if n == 0:
+            if vis is not None:
+                vis.visible = False
+            return
+
+        # The number of segments changes between solves, so we swap in a
+        # fresh geometry; the endpoints themselves are filled in (and kept
+        # up-to-date during animations) by `_sync_label_connector_positions`
+        positions = np.zeros((2 * n, 3), dtype=np.float32)
+        positions[:, 2] = LABEL_CONNECTOR_Z  # just below the points
+        geometry = gfx.Geometry(positions=positions)
+        if vis is None:
+            vis = gfx.Line(
+                geometry,
+                gfx.LineSegmentMaterial(
+                    thickness=1.0, color=LABEL_CONNECTOR_COLOR, aa=True
+                ),
+            )
+            self._label_connector_vis = vis
+        else:
+            vis.geometry = geometry
+
+        # (Re-)parent - e.g. after `clear()` emptied the label group
+        if vis.parent is not self.label_group:
+            self.label_group.add(vis)
+        vis.visible = True
+
+        self._sync_label_connector_positions()
+
+    def _sync_label_connector_positions(self):
+        """Update the connector endpoints from the current label positions.
+
+        Called after each placement solve and while labels are moving (label
+        animation, point moves) so the lines stay attached to both the marker
+        and the label.
+        """
+        vis = getattr(self, "_label_connector_vis", None)
+        ix = self._label_connector_ix
+        if vis is None or not len(ix) or not vis.visible:
+            return
+
+        positions = vis.geometry.positions
+        for row, gix in enumerate(ix):
+            label = self.label_visuals[gix]
+            if label is None:
+                continue
+            positions.data[2 * row, :2] = (
+                self.positions[gix, :2] + self._label_connector_start[row]
+            )
+            positions.data[2 * row + 1, :2] = (
+                np.asarray(label.local.position, dtype=np.float32)[:2]
+                + self._label_connector_end_rel[row]
+            )
+        positions.update_full()
+
+    def _view_bounds(self):
+        """Return the current viewport in world coordinates as (x0, y0, x1, y1).
+
+        Returns None if the bounds can not be determined (e.g. headless).
+        """
+        try:
+            top_left = self.screen_to_world((0, 0))
+            bottom_right = self.screen_to_world(self.size)
+            if top_left is None or bottom_right is None:
+                return None
+            return (top_left[0], bottom_right[1], bottom_right[0], top_left[1])
+        except Exception:
+            return None
+
+    def _label_codes(self):
+        """Return a cached factorization (codes, uniques) of `self.labels`."""
+        cached = self._label_codes_cache
+        if cached is not None and cached[0] is self.labels:
+            return cached[1], cached[2]
+        codes, uniques = pd.factorize(self.labels)
+        self._label_codes_cache = (self.labels, codes, uniques)
+        return codes, uniques
+
+    def _group_label_extent(self, text):
+        """Like `_label_extent` but for group labels (keyed by text)."""
+        fs = self._font_size
+        cached = self._group_label_extent_cache.get(text)
+        if cached is not None and cached[0] == fs and cached[2]:
+            return cached[1]
+
+        vis = self._group_label_visuals.get(text)
+        wh = measure_text_wh(vis, fs) if vis is not None else None
+        measured = wh is not None
+        if wh is None:
+            if cached is not None and cached[0] == fs:
+                return cached[1]
+            wh = estimate_text_wh(text, fs)
+
+        self._group_label_extent_cache[text] = (fs, wh, measured)
+        return wh
+
+    def _ensure_group_label_grp(self):
+        """Return the (lazily created) group holding the grouped-mode visuals."""
+        grp = getattr(self, "_group_label_grp", None)
+        if grp is None:
+            grp = gfx.Group()
+            self._group_label_grp = grp
+        # (Re-)parent - e.g. after `clear()` emptied the label group
+        if grp.parent is not self.label_group:
+            self.label_group.add(grp)
+        return grp
+
+    def _make_group_label_visual(self, key, text):
+        """Create (and register) the text visual for a group label.
+
+        `key` is a ``(text, island)`` tuple - a label value split into
+        multiple spatial islands gets one visual (with the same text) per
+        island.
+        """
+        t = text2gfx(
+            text,
+            position=(0, 0, LABEL_Z),
+            color="w",
+            font_size=self._font_size,
+            anchor="middle-left",
+            pickable=True,
+        )
+        t.text_align = "center"
+
+        # Same interaction as per-point labels: double-click highlights,
+        # Shift+double-click selects all points with this label
+        def _highlight(event, text_vis):
+            ls = self.find_label(text_vis._text, go_to_first=False)
+            if "Shift" in event.modifiers:
+                ls.select_all(add="Control" in event.modifiers)
+
+        t.add_event_handler(partial(_highlight, text_vis=t), "double_click")
+
+        self._group_label_visuals[key] = t
+        self._group_label_grp.add(t)
+        return t
+
+    def _update_group_labels(self, visible_idx, debug=None):
+        """(Re-)compute grouped labels: one label per unique value.
+
+        Each group of visible same-labeled points gets a single label,
+        anchored at the group's centroid and placed by the same greedy solver
+        as individual labels - the group's spread acts as the "marker radius",
+        so labels end up just outside their group and avoid the other groups.
+        Connector lines fan out from the label to all member points.
+
+        Pass a dict as `debug` to force a re-solve and collect diagnostics
+        (see `label_debug_report`).
+        """
+        if self.labels is None:
+            return
+
+        grp = self._ensure_group_label_grp()
+
+        key = (self._label_layout_version, hash(visible_idx.tobytes()))
+        if debug is None and key == self._group_placement_key:
+            # Solution still valid - but the group may have been hidden
+            # wholesale by the over-limit branch of the visibility tick
+            grp.visible = self._group_data is not None
+            return
+        self._group_placement_key = key
+
+        # Group the visible points by label value
+        codes, uniques = self._label_codes()
+        vis_codes = codes[visible_idx]
+        val_codes, val_ids = np.unique(vis_codes, return_inverse=True)
+
+        if len(val_codes) == 0:
+            grp.visible = False
+            self._group_data = None
+            self._rebuild_group_connectors()
+            if debug is not None:
+                debug.update(
+                    mode="grouped",
+                    n_visible=len(visible_idx),
+                    n_groups=0,
+                    over_limit=False,
+                )
+            return
+
+        pts = self.positions[visible_idx].astype(float)
+
+        # Typical point spacing, used to decide when same-label islands are
+        # "disjoint": spatial clusters of one value that are further apart
+        # than a multiple of it each get their own label
+        if len(pts) > 1:
+            pair_d = np.linalg.norm(pts[:, None, :] - pts[None, :, :], axis=-1)
+            np.fill_diagonal(pair_d, np.inf)
+            global_spacing = float(np.median(pair_d.min(axis=1)))
+        else:
+            pair_d = None
+            global_spacing = 0.0
+
+        group_ids = np.zeros(len(visible_idx), dtype=int)
+        texts = []  # label text per group (duplicated for split islands)
+        keys = []  # (text, island) - keys `_group_label_visuals` etc.
+        first_members = []  # first member (index into visible_idx) per group
+        for vi in range(len(val_codes)):
+            members = np.where(val_ids == vi)[0]
+            text = str(uniques[val_codes[vi]])
+            # The value's own spacing keeps sparse-but-contiguous groups in
+            # one piece; only meaningful with >2 members (for fewer, their
+            # mutual distance IS the spacing and nothing would ever split)
+            if pair_d is not None and len(members) > 2:
+                sub_d = pair_d[np.ix_(members, members)]
+                value_spacing = float(np.median(sub_d.min(axis=1)))
+            else:
+                value_spacing = 0.0
+            threshold = max(
+                GROUP_SPLIT_FACTOR * max(global_spacing, value_spacing),
+                2 * self._font_size,  # never split what sits label-close
+            )
+            comps = spatial_components(pts[members], threshold)
+            for k in range(int(comps.max()) + 1):
+                island = members[comps == k]
+                group_ids[island] = len(texts)
+                texts.append(text)
+                keys.append((text, k))
+                first_members.append(int(island[0]))
+
+        n_groups = len(texts)
+        if n_groups > self.label_vis_limit:
+            grp.visible = False
+            self._group_data = None
+            self._rebuild_group_connectors()
+            if debug is not None:
+                debug.update(
+                    mode="grouped",
+                    n_visible=len(visible_idx),
+                    n_groups=n_groups,
+                    over_limit=True,
+                )
+            return
+        grp.visible = True
+
+        counts = np.bincount(group_ids)
+        centroids = (
+            np.column_stack(
+                [
+                    np.bincount(group_ids, weights=pts[:, 0]),
+                    np.bincount(group_ids, weights=pts[:, 1]),
+                ]
+            )
+            / counts[:, None]
+        )
+
+        # Marker radii of the members
+        point_size = getattr(self, "_point_size", 1)
+        scale = float(getattr(self, "_point_scale", 1.0))
+        if isinstance(point_size, np.ndarray):
+            member_radii = point_size[visible_idx].astype(float) * scale / 2
+        else:
+            member_radii = np.full(len(visible_idx), float(point_size) * scale / 2)
+
+        # Effective group radius: the full member spread, capped at twice the
+        # 90th percentile so stray outliers don't push the label far away.
+        # Add the group's *largest* marker radius so size-mapped points at
+        # the rim stay clear of the label.
+        dists = np.linalg.norm(pts - centroids[group_ids], axis=1)
+        order = np.lexsort((dists, group_ids))
+        sorted_d = dists[order]
+        starts = np.concatenate([[0], np.cumsum(counts)[:-1]])
+        q_ix = starts + np.minimum((0.9 * (counts - 1)).astype(int), counts - 1)
+        spread = np.minimum(sorted_d[starts + counts - 1], 2 * sorted_d[q_ix])
+        max_marker = np.zeros(n_groups)
+        np.maximum.at(max_marker, group_ids, member_radii)
+        radii = spread + max_marker
+
+        # Create any missing visuals up front so the solve works with
+        # measured text extents rather than estimates
+        for key, text in zip(keys, texts):
+            if key not in self._group_label_visuals:
+                self._make_group_label_visual(key, text)
+        extents = np.array([self._group_label_extent(t) for t in texts]).reshape(
+            -1, 2
+        )
+
+        pad = (0.5 if self._label_connectors else 0.2) * float(
+            np.median(extents[:, 1])
+        )
+
+        # A value's largest island is its "primary": unique labels place
+        # first, extra islands from splitting only get labels if there is
+        # space left afterwards
+        primary = np.zeros(n_groups, dtype=bool)
+        best_by_text = {}
+        for gi, text in enumerate(texts):
+            best = best_by_text.get(text)
+            if best is None or counts[gi] > counts[best]:
+                best_by_text[text] = gi
+        primary[list(best_by_text.values())] = True
+
+        has_selected = np.zeros(n_groups, dtype=bool)
+        if self._selected is not None and len(self._selected):
+            sel = np.isin(visible_idx, self._selected).astype(float)
+            has_selected = np.bincount(group_ids, weights=sel) > 0
+
+        # Groups containing a highlighted point (see `highlight_labels`) get
+        # the highlight color and top placement priority
+        highlighted = np.zeros(n_groups, dtype=bool)
+        if self._label_highlighted:
+            hl = np.isin(visible_idx, list(self._label_highlighted)).astype(float)
+            highlighted = np.bincount(group_ids, weights=hl) > 0
+
+        # Keep group labels inside the current viewport (a label at a
+        # group's rim can otherwise easily stick out of view), with farther
+        # fallback rings for crowded scenes
+        bounds = self._view_bounds()
+
+        slots = np.full(n_groups, -1, dtype=int)
+        offsets = np.zeros((n_groups, 2), dtype=float)
+        candidates = [None] * n_groups if debug is not None else None
+
+        def _placed_boxes():
+            """Boxes of the labels placed so far - obstacles for later passes."""
+            return np.array(
+                [
+                    (
+                        centroids[gi, 0] + offsets[gi, 0],
+                        centroids[gi, 1] + offsets[gi, 1] - extents[gi, 1] / 2,
+                        centroids[gi, 0] + offsets[gi, 0] + extents[gi, 0],
+                        centroids[gi, 1] + offsets[gi, 1] + extents[gi, 1] / 2,
+                    )
+                    for gi in np.where(slots >= 0)[0]
+                ]
+            ).reshape(-1, 4)
+
+        def _solve(subset, obstacle_boxes=None):
+            """Solve one pass for `subset` (bigger/selected groups first)."""
+            priority = -counts[subset].astype(float)
+            priority[has_selected[subset]] -= 1e9
+            priority[highlighted[subset]] -= 2e9
+            prev = np.array(
+                [self._group_label_slots.get(keys[gi], -1) for gi in subset],
+                dtype=int,
+            )
+            cand = [] if debug is not None else None
+            sub_slots, sub_offsets = solve_label_placement(
+                centroids[subset],
+                radii[subset],
+                extents[subset],
+                priority=priority,
+                prev_slots=prev,
+                pad=pad,
+                rings=GROUP_LABEL_RINGS,
+                bounds=bounds,
+                # Avoid the actual points, not the groups' bounding discs -
+                # a diffuse group's disc can easily cover the whole view and
+                # would block everyone else's label (the disc still anchors
+                # the group's own candidate slots via `radii`)
+                obstacles=pts,
+                obstacle_radii=member_radii,
+                obstacle_boxes=obstacle_boxes,
+                anchor_obstacles=False,
+                debug=cand,
+            )
+            slots[subset] = sub_slots
+            offsets[subset] = sub_offsets
+            if debug is not None:
+                for j, gi in enumerate(subset):
+                    candidates[gi] = cand[j]
+
+        prim_ix = np.where(primary)[0]
+        _solve(prim_ix)
+
+        # Second chance for unplaced unique labels: a group larger than the
+        # viewport can never place a label on its rim (every slot is out of
+        # view), so retry anchored at the - view-clamped - centroid with a
+        # small radius. The label then sits over the group, still avoiding
+        # the actual points and the labels placed above.
+        fallback = np.zeros(n_groups, dtype=bool)
+        failed = prim_ix[slots[prim_ix] < 0]
+        if len(failed):
+            anchors = centroids[failed].copy()
+            if bounds is not None:
+                anchors[:, 0] = np.clip(anchors[:, 0], bounds[0], bounds[2])
+                anchors[:, 1] = np.clip(anchors[:, 1], bounds[1], bounds[3])
+
+            fb_slots, fb_offsets = solve_label_placement(
+                anchors,
+                float(np.median(member_radii)),
+                extents[failed],
+                pad=pad,
+                rings=GROUP_LABEL_RINGS,
+                bounds=bounds,
+                obstacles=pts,
+                obstacle_radii=member_radii,
+                obstacle_boxes=_placed_boxes(),
+                anchor_obstacles=False,
+            )
+            for k, gi in enumerate(failed):
+                if fb_slots[k] >= 0:
+                    slots[gi] = fb_slots[k]
+                    offsets[gi] = anchors[k] + fb_offsets[k] - centroids[gi]
+                    fallback[gi] = True
+
+        # Extra islands of already-labeled values fill the remaining space
+        sec_ix = np.where(~primary)[0]
+        if len(sec_ix):
+            _solve(sec_ix, obstacle_boxes=_placed_boxes())
+
+        if debug is not None:
+            debug.update(
+                mode="grouped",
+                fallback=fallback,
+                primary=primary,
+                n_visible=len(visible_idx),
+                visible_idx=visible_idx,
+                n_groups=n_groups,
+                over_limit=False,
+                bounds=bounds,
+                pad=pad,
+                texts=texts,
+                keys=keys,
+                counts=counts,
+                centroids=centroids,
+                radii=radii,
+                extents=extents,
+                slots=slots,
+                candidates=candidates,
+                policy=self._unplaced_labels,
+            )
+
+        # Hide labels of groups that are no longer in view
+        active = set(keys)
+        for key, vis in self._group_label_visuals.items():
+            if key not in active:
+                vis.visible = False
+
+        policy = self._unplaced_labels
+        label_pos = np.zeros((n_groups, 3), dtype=np.float32)
+        attach_rel = np.zeros((n_groups, 2), dtype=np.float32)
+        shown = np.zeros(n_groups, dtype=bool)
+        for gi, key in enumerate(keys):
+            vis = self._group_label_visuals.get(key)
+            if vis is None:
+                vis = self._make_group_label_visual(key, texts[gi])
+
+            # Group labels take the color of their first visible member -
+            # unless the value is highlighted (e.g. via double-click)
+            if highlighted[gi]:
+                vis.material.color = self._label_highlight_color
+            else:
+                color = None
+                if self._label_colors is not None:
+                    color = self._label_colors[int(visible_idx[first_members[gi]])]
+                vis.material.color = color if color is not None else "w"
+
+            placed = slots[gi] >= 0
+            if placed:
+                self._group_label_slots[key] = int(slots[gi])
+            elif policy == "hide":
+                vis.visible = False
+                continue
+
+            dimmed = not placed and policy == "dim"
+            vis.material.opacity = UNPLACED_LABEL_ALPHA if dimmed else 1.0
+            lx = centroids[gi, 0] + offsets[gi, 0]
+            ly = centroids[gi, 1] + offsets[gi, 1]
+            if not placed and bounds is not None:
+                # Labels shown despite not fitting get pulled back into view
+                w_, h_ = extents[gi]
+                lx = np.clip(lx, bounds[0], max(bounds[0], bounds[2] - w_))
+                ly = np.clip(
+                    ly,
+                    bounds[1] + h_ / 2,
+                    max(bounds[1] + h_ / 2, bounds[3] - h_ / 2),
+                )
+                # Store the effective offset so move-syncs stay consistent
+                offsets[gi] = (lx - centroids[gi, 0], ly - centroids[gi, 1])
+            label_pos[gi] = (lx, ly, LABEL_Z_BEHIND if dimmed else LABEL_Z)
+            vis.local.position = label_pos[gi]
+            vis.visible = True
+            shown[gi] = True
+
+            slot = int(slots[gi]) if placed else SLOT_RIGHT
+            attach_rel[gi] = connector_offsets(
+                slot, extents[gi, 0], extents[gi, 1], 0.0
+            )[1]
+
+        self._group_data = {
+            "member_ix": visible_idx,
+            "group_ids": group_ids,
+            "texts": texts,
+            "keys": keys,
+            "offsets": offsets,
+            "label_pos": label_pos,
+            "attach_rel": attach_rel,
+            "shown": shown,
+            "member_radii": member_radii,
+            "gap": pad * LABEL_CONNECTOR_STANDOFF,
+        }
+        self._rebuild_group_connectors()
+
+        self._render_stale = True
+
+    def _rebuild_group_connectors(self):
+        """(Re-)build the connector lines from group labels to their members.
+
+        One segment per member point, from the label's attach point to just
+        outside the member's marker; fully vectorized since member counts can
+        be large. Rendered behind the points (see LABEL_CONNECTOR_Z).
+        """
+        data = self._group_data
+        vis = self._group_connector_vis
+
+        if data is None or not self._label_connectors or not data["shown"].any():
+            if vis is not None:
+                vis.visible = False
+            return
+
+        g = data["group_ids"]
+        mask = data["shown"][g]
+        member_pos = self.positions[data["member_ix"][mask]][:, :2].astype(
+            np.float32
+        )
+        g = g[mask]
+
+        attach = data["label_pos"][g][:, :2] + data["attach_rel"][g]
+        dvec = attach - member_pos
+        dist = np.linalg.norm(dvec, axis=1, keepdims=True)
+        direction = np.where(dist > 1e-12, dvec / np.maximum(dist, 1e-12), 0.0)
+        standoff = (data["member_radii"][mask] + data["gap"])[:, None]
+        # Clamp so the line never overshoots a member that sits closer to the
+        # label than the standoff
+        ends = member_pos + direction * np.minimum(standoff, dist)
+
+        n = len(member_pos)
+        positions = np.empty((2 * n, 3), dtype=np.float32)
+        positions[0::2, :2] = attach
+        positions[1::2, :2] = ends
+        positions[:, 2] = LABEL_CONNECTOR_Z
+
+        geometry = gfx.Geometry(positions=positions)
+        if vis is None:
+            vis = gfx.Line(
+                geometry,
+                gfx.LineSegmentMaterial(
+                    thickness=1.0, color=LABEL_CONNECTOR_COLOR, aa=True
+                ),
+            )
+            self._group_connector_vis = vis
+        else:
+            vis.geometry = geometry
+        if vis.parent is not self._group_label_grp:
+            self._group_label_grp.add(vis)
+        vis.visible = True
+
+    def _sync_group_label_positions(self):
+        """Re-anchor group labels and their connectors after point moves."""
+        data = self._group_data
+        if data is None:
+            return
+
+        pts = self.positions[data["member_ix"]].astype(float)
+        group_ids = data["group_ids"]
+        counts = np.bincount(group_ids)
+        centroids = (
+            np.column_stack(
+                [
+                    np.bincount(group_ids, weights=pts[:, 0]),
+                    np.bincount(group_ids, weights=pts[:, 1]),
+                ]
+            )
+            / counts[:, None]
+        )
+
+        for gi, key in enumerate(data["keys"]):
+            if not data["shown"][gi]:
+                continue
+            vis = self._group_label_visuals.get(key)
+            if vis is None:
+                continue
+            data["label_pos"][gi, :2] = centroids[gi] + data["offsets"][gi]
+            vis.local.position = data["label_pos"][gi]
+
+        self._rebuild_group_connectors()
+
+    def label_debug_report(self):
+        """Diagnose label placement for the current view.
+
+        Re-runs the placement solve with instrumentation and returns a
+        human-readable report - useful to understand why a particular label
+        is not showing (all candidate slots blocked, out of view, over the
+        visibility limit, ...). Wired to Help -> Debug -> Labels in the GUI.
+        """
+        lines = ["=== Label placement debug report ==="]
+        if self.labels is None or self.positions is None:
+            lines.append("No labels loaded.")
+            return "\n".join(lines)
+
+        lines.append(f"Labels shown (L toggle): {self.label_group.visible}")
+        lines.append(
+            f"Declutter: {'on' if self._smart_label_placement else 'OFF'}"
+            f" | mode: {self._declutter_mode}"
+            f" | unplaced policy: {self._unplaced_labels}"
+            f" | connectors: {self._label_connectors}"
+            f" | font size: {self._font_size * 100:g}"
+        )
+
+        try:
+            iv = self.is_visible_pos(self.positions)
+            vis_note = ""
+        except Exception:
+            iv = np.ones(len(self.positions), dtype=bool)
+            vis_note = " (visibility check unavailable - assuming all visible)"
+        n_vis = int(iv.sum())
+        lines.append(
+            f"Visible points: {n_vis} / {len(self.positions)}"
+            f" (limit: {self.label_vis_limit}){vis_note}"
+        )
+        bounds = self._view_bounds()
+        if bounds is not None:
+            bounds_str = ", ".join(f"{float(b):.4g}" for b in bounds)
+            lines.append(f"View bounds (x0, y0, x1, y1): ({bounds_str})")
+        else:
+            lines.append("View bounds: unknown")
+
+        if n_vis > self.label_vis_limit:
+            lines.append(
+                "=> Over the visibility limit: ALL labels are hidden at this "
+                "zoom level. Zoom in further to see labels."
+            )
+            return "\n".join(lines)
+        if not self._smart_label_placement:
+            lines.append(
+                "=> Decluttering is off: labels use fixed positions, "
+                "nothing to diagnose."
+            )
+            return "\n".join(lines)
+
+        vis_ix = np.where(iv)[0]
+        dbg = {}
+        if self._declutter_mode == "grouped":
+            self._update_group_labels(vis_ix, debug=dbg)
+            lines.extend(self._format_group_label_debug(dbg))
+        else:
+            self._update_label_placement(vis_ix, debug=dbg)
+            lines.extend(self._format_individual_label_debug(dbg))
+        return "\n".join(lines)
+
+    @staticmethod
+    def _describe_blocker(kind, blocker, names, marker_word, obstacle_names=None):
+        """One-phrase description of why a candidate slot was rejected."""
+        if kind == "out-of-view":
+            return "out of view"
+        if isinstance(blocker, tuple):
+            tag, k = blocker
+            if tag == "obstacle" and obstacle_names is not None:
+                return f"blocked by {obstacle_names[int(k)]}"
+            if tag == "box":
+                return "blocked by an already-placed label"
+            return f"blocked by the label {names[int(k)]!r}"
+        return f"blocked by {marker_word} {names[int(blocker)]!r}"
+
+    def _format_group_label_debug(self, dbg):
+        """Format the grouped-mode part of `label_debug_report`."""
+        if not dbg:
+            return ["No solve ran (no debug data collected)."]
+        if dbg.get("over_limit"):
+            return [
+                f"=> {dbg['n_groups']} groups exceed the limit of "
+                f"{self.label_vis_limit} - all group labels are hidden."
+            ]
+        if dbg.get("n_groups", 0) == 0:
+            return ["No label groups among the visible points."]
+
+        slots = dbg["slots"]
+        texts = dbg["texts"]
+        # Obstacles are the individual visible points, in visible_idx order
+        obstacle_names = [
+            f"point #{int(gix)} ({str(self.labels[int(gix)])!r})"
+            for gix in dbg["visible_idx"]
+        ]
+        n_placed = int((slots >= 0).sum())
+        lines = [
+            f"Groups: {dbg['n_groups']} | placed: {n_placed} | unplaced: "
+            f"{dbg['n_groups'] - n_placed} (policy: {dbg['policy']})"
+        ]
+        dbg_keys = dbg.get("keys")
+        for gi, text in enumerate(texts):
+            display = f"{text!r}"
+            # A value split into multiple spatial islands gets one label each
+            if dbg_keys is not None and texts.count(text) > 1:
+                display += f" (island {dbg_keys[gi][1] + 1})"
+            cx, cy = dbg["centroids"][gi]
+            w, h = dbg["extents"][gi]
+            head = (
+                f"[{display}] members={int(dbg['counts'][gi])}"
+                f" centroid=({cx:.4g}, {cy:.4g})"
+                f" radius={dbg['radii'][gi]:.4g}"
+                f" label={w:.4g}x{h:.4g}"
+            )
+            fallback = dbg.get("fallback")
+            prim_mask = dbg.get("primary")
+            secondary = prim_mask is not None and not prim_mask[gi]
+            if slots[gi] >= 0:
+                rejected = len(dbg["candidates"][gi])
+                note = f" (after {rejected} rejected slots)" if rejected else ""
+                if fallback is not None and fallback[gi]:
+                    note += " [via centroid fallback]"
+                if secondary:
+                    note += " [extra island]"
+                lines.append(f"{head} -> placed {slot_name(slots[gi])}{note}")
+            else:
+                if secondary:
+                    lines.append(
+                        f"{head} -> UNPLACED extra island (no space left; "
+                        "the value keeps its other label)"
+                    )
+                else:
+                    lines.append(
+                        f"{head} -> UNPLACED (policy: {dbg['policy']}; "
+                        "centroid fallback also failed)"
+                    )
+                for slot, kind, blocker in dbg["candidates"][gi]:
+                    reason = self._describe_blocker(
+                        kind, blocker, texts, "group", obstacle_names
+                    )
+                    lines.append(f"    {slot_name(slot)}: {reason}")
+        return lines
+
+    def _format_individual_label_debug(self, dbg):
+        """Format the individual-mode part of `label_debug_report`."""
+        if not dbg:
+            return ["No solve ran (no debug data collected)."]
+
+        slots = dbg["slots"]
+        vis_ix = dbg["visible_idx"]
+        names = [str(self.labels[int(i)]) for i in vis_ix]
+        n = len(vis_ix)
+        n_placed = int((slots >= 0).sum())
+        lines = [
+            f"Labels: {n} visible | placed: {n_placed} | unplaced: "
+            f"{n - n_placed} (policy: {dbg['policy']})"
+        ]
+        if n == n_placed:
+            lines.append("All labels placed - nothing was dropped.")
+        for j in np.where(slots < 0)[0]:
+            gix = int(vis_ix[j])
+            w, h = dbg["extents"][j]
+            lines.append(
+                f"[{names[j]!r}] point #{gix}"
+                f" at ({self.positions[gix, 0]:.4g}, {self.positions[gix, 1]:.4g})"
+                f" label={w:.4g}x{h:.4g} -> UNPLACED (policy: {dbg['policy']})"
+            )
+            for slot, kind, blocker in dbg["candidates"][j]:
+                reason = self._describe_blocker(kind, blocker, names, "the marker of")
+                lines.append(f"    {slot_name(slot)}: {reason}")
+        return lines
+
+    def _animate_label_placement(self):
+        """Ease label visuals towards their assigned positions.
+
+        Runs as an animation but early-exits (cheaply) unless a placement
+        update has just moved labels.
+        """
+        if not self._label_anim_active or self.label_visuals is None:
+            self._label_anim_active.clear()
+            return
+
+        done = []
+        for ix in self._label_anim_active:
+            vis = self.label_visuals[ix] if ix < len(self.label_visuals) else None
+            target = getattr(vis, "_label_target", None)
+            if vis is None or target is None or not vis.visible:
+                done.append(ix)
+                continue
+
+            current = np.asarray(vis.local.position, dtype=np.float32)
+            delta = target - current
+            # Snap once we're within a fraction of the font size
+            if np.abs(delta).max() < self._font_size * 0.05:
+                vis.local.position = target
+                done.append(ix)
+            else:
+                eased = current + delta * 0.35
+                # Never ease z: layer changes apply instantly so labels don't
+                # transiently pop through the points mid-animation
+                eased[2] = target[2]
+                vis.local.position = eased
+
+        for ix in done:
+            self._label_anim_active.discard(ix)
+
+        # Keep the connector lines attached to the moving labels
+        self._sync_label_connector_positions()
+
+        self._render_stale = True
 
     @update_figure
     def find_label(
@@ -1750,32 +2948,44 @@ class ScatterFigure(BaseFigure):
             if hasattr(vis.material, "_original_color"):
                 vis.material.color = vis.material._original_color
 
+        # Highlighted labels are exempt from placement suppression and get
+        # priority slots - changing the highlights hence requires a re-solve
+        # (in grouped mode the re-solve is also what (re-)colors the labels)
+        self._label_highlighted = set()
+        self._label_highlight_color = color
+        self._invalidate_label_placement()
+
         # Return here if we're only clearing the highlights
         if x is None:
             return
 
         if isinstance(x, str):
-            for i, label in enumerate(self.labels):
-                if label != x:
-                    continue
-
-                if self.label_visuals[i] is None:
-                    self.show_labels(i)
-                visual = self.label_visuals[i]
-
-                visual.material._original_color = visual.material.color
-                visual.material.color = color
+            indices = [i for i, label in enumerate(self.labels) if label == x]
         elif isinstance(x, (list, np.ndarray)):
-            for ix in x:
-                # Index in the original order
-                if self.label_visuals[ix] is None:
-                    self.show_labels(ix)
-                visual = self.label_visuals[ix]
-
-                visual.material._original_color = visual.material.color
-                visual.material.color = color
+            indices = x
         else:
             raise ValueError(f"Expected str or list, got {type(x)}.")
+
+        # In grouped mode there are no per-point labels to recolor (creating
+        # them here would wrongly show individual labels on top of the group
+        # ones) - the group labels pick up the highlight on the re-solve
+        grouped = self._smart_label_placement and self._declutter_mode == "grouped"
+
+        for ix in indices:
+            # Index in the original order
+            ix = int(ix)
+            self._label_highlighted.add(ix)
+            self._label_suppressed.discard(ix)
+
+            if grouped:
+                continue
+
+            if self.label_visuals[ix] is None:
+                self.show_labels(ix)
+            visual = self.label_visuals[ix]
+
+            visual.material._original_color = visual.material.color
+            visual.material.color = color
 
     @update_figure
     def select_points(self, bounds, additive=False):
@@ -1920,6 +3130,8 @@ class ScatterFigure(BaseFigure):
         self.default_color_col = color_col
         self.label_visuals = [None] * len(metadata) if label_col else None
         self._label_colors = [None] * len(metadata) if label_col else None
+        self._reset_label_placement_state()
+        self._invalidate_label_placement()
         self.labels = metadata[label_col].astype(str).values if label_col else None
         self.ids = metadata[id_col].values if id_col else None
         self.colors = metadata[color_col].values if color_col else None
@@ -2322,6 +3534,10 @@ class ScatterFigure(BaseFigure):
             l.set_text(self.labels[i])
             l._text = self.labels[i]
 
+        # New texts = new label extents and new grouping
+        self._label_codes_cache = None
+        self._invalidate_label_placement()
+
     @update_figure
     def update_point_position(self):
         """Update the point positions from the figure's `positions` property."""
@@ -2335,15 +3551,30 @@ class ScatterFigure(BaseFigure):
             vis.geometry.positions.set_data(xyz[vis._point_ix])
             vis.geometry.positions.update_full()
 
-        # Update the positions of the labels
-        for i, l in enumerate(self.label_visuals):
-            if l is None:
-                continue
-            l.local.position = (
-                self.positions[i, 0] + 0.005,
-                self.positions[i, 1],
-                0,
-            )
+        # Update the positions of the labels (keeping any offset - and
+        # z-layer, stored in the third component - the smart placement has
+        # assigned)
+        if self.label_visuals is not None:
+            for i, l in enumerate(self.label_visuals):
+                if l is None:
+                    continue
+                offset = getattr(l, "_label_offset", None)
+                if offset is None:
+                    offset = (0.005, 0.0, LABEL_Z)
+                l.local.position = (
+                    self.positions[i, 0] + offset[0],
+                    self.positions[i, 1] + offset[1],
+                    offset[2],
+                )
+
+        # Keep the connector lines attached while points (and labels) move
+        self._sync_label_connector_positions()
+        self._sync_group_label_positions()
+
+        # Point positions changed -> current placement (and any in-flight
+        # label animation targets) are stale
+        self._label_anim_active.clear()
+        self._invalidate_label_placement()
 
         # Update the positions of selected points
         if hasattr(self, "highlight_visuals"):
@@ -2615,6 +3846,11 @@ class ScatterFigure(BaseFigure):
             if self.label_visuals[ix] is not None:
                 self.label_visuals[ix].set_text(label)
                 self.label_visuals[ix]._text = label
+
+        # New texts = new label extents and new grouping (N.B. the labels
+        # array was mutated in place, so the factorization cache is stale)
+        self._label_codes_cache = None
+        self._invalidate_label_placement()
 
     @update_figure
     def set_label_color(self, indices, new_color):

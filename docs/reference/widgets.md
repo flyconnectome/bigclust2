@@ -63,6 +63,29 @@ The sidebar on the left of the scatter pane. Toggle with ++c++ over the plot, or
 The column dropdowns have an inline filter box, which matters when your meta
 table has a hundred columns.
 
+Labels only appear once you have zoomed in far enough that a manageable number
+of points is in view. They are then automatically arranged around their points
+to avoid covering points or each other — a label may shift to the other side of
+its point, and in very crowded spots labels that cannot be placed without
+overlap are hidden until you zoom in further. A short connector line ties each
+label to its point. Labels of selected points and of search matches get placed
+first. All of this is configurable via [**View → Labels**](menus.md#view):
+decluttering and the connector lines can be turned off, and labels that don't
+fit can be hidden (the default), shown dimmed (tucked behind the points), or
+shown normally. These choices are remembered across sessions (the **Show
+Labels** toggle itself is not — it resets to on, like the camera).
+
+As an alternative to labeling every point, **View → Labels → Declutter Mode →
+One Label Per Group** shows a single label per unique value instead: the label
+sits at the edge of its group of points, kept within the current view, with
+connector lines fanning out to all of its points (drawn behind them). If a
+value's points form several clearly separated islands, each island gets its
+own copy of the label with its own local connector lines — rather than one
+label with lines running across the whole view. Labeling every unique value
+takes precedence: the extra island labels are only added where space is left,
+so they never crowd out another value's only label. Double-clicking a group label
+highlights/selects its points just like a regular label.
+
 ### Embeddings
 
 Recomputes the scatter plot's layout. See [recompute the

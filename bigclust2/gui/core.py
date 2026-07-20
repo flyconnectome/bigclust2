@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QStyle,
     QMessageBox,
 )
-from PySide6.QtGui import QIcon, QAction, QActionGroup, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
+from PySide6.QtGui import QIcon, QAction, QActionGroup, QFontDatabase, QKeySequence, QShortcut, QDesktopServices, QPainter, QPainterPath, QColor, QPen, QBrush, QPixmap
 from PySide6.QtCore import Qt, QSize, QSettings, QPoint, QTimer, QEvent, Signal, QUrl, QRectF, QPointF, QThreadPool
 from importlib.resources import files
 
@@ -90,6 +90,37 @@ __all__ = ["MainWindow", "MainWidget", "main"]
 
 
 logger = logging.getLogger(__name__)
+
+
+# View -> Labels settings persisted across sessions, as figure property ->
+# (settings key, type, default). "Show Labels" is deliberately not persisted:
+# it's a transient view toggle (the L key), not a preference.
+LABEL_SETTINGS = {
+    "smart_label_placement": ("labels/declutter", bool, True),
+    "declutter_mode": ("labels/declutterMode", str, "individual"),
+    "unplaced_labels": ("labels/unplacedLabels", str, "hide"),
+    "label_connectors": ("labels/connectorLines", bool, True),
+}
+
+
+def apply_saved_label_settings(fig, settings=None):
+    """Apply the persisted View -> Labels settings to a (new) scatter figure."""
+    if settings is None:
+        settings = QSettings("BigClust", "BigClustGUI")
+    for attr, (key, typ, default) in LABEL_SETTINGS.items():
+        try:
+            setattr(fig, attr, settings.value(key, default, type=typ))
+        except Exception as e:
+            # A corrupted stored value must not break figure creation
+            logger.debug(f"Ignoring stored label setting {key}: {e}")
+
+
+def save_label_settings(fig, settings=None):
+    """Persist the figure's current View -> Labels settings."""
+    if settings is None:
+        settings = QSettings("BigClust", "BigClustGUI")
+    for attr, (key, _typ, _default) in LABEL_SETTINGS.items():
+        settings.setValue(key, getattr(fig, attr))
 
 
 class _TracebackInjectingFilter(logging.Filter):
@@ -698,6 +729,7 @@ class MainWidget(QWidget):
         """Set up the scatter pane with overlay buttons and a left-positioned button."""
         # Initialize and connect the figure to the scatter pane
         self.fig_scatter = ScatterFigure(selection_counter=self._selection_counter, parent=self.scatter_widget)
+        apply_saved_label_settings(self.fig_scatter)
         self.fig_scatter.show()
 
         # Create main layout for scatter pane
@@ -1614,7 +1646,13 @@ class MainWindow(QMainWindow):
         close_window_action.triggered.connect(self.close)
         file_menu.addAction(close_window_action)
 
-        self.open_recent_menu = file_menu.addMenu("Open Recent")
+        # Stored submenus are created with an explicit window parent instead of
+        # `addMenu(title)`: PySide6's gc can otherwise invalidate the Python
+        # wrapper of an addMenu-created submenu after the command palette walks
+        # the menus, and later refreshes crash on "Internal C++ object already
+        # deleted". Same for the other `QMenu(..., self)` submenus below.
+        self.open_recent_menu = QMenu("Open Recent", self)
+        file_menu.addMenu(self.open_recent_menu)
         self.refresh_open_recent_menu()
 
         # View menu
@@ -1726,6 +1764,82 @@ class MainWindow(QMainWindow):
         )
         view_menu.addAction(self.sync_viewer_action)
 
+        self._labels_menu = QMenu("Labels", self)
+        view_menu.addMenu(self._labels_menu)
+        self._labels_menu.aboutToShow.connect(self._refresh_labels_menu)
+
+        self.show_labels_action = QAction("Show Labels", self)
+        self.show_labels_action.setCheckable(True)
+        self.show_labels_action.setChecked(True)
+        # "L" types a letter in text fields; like "Shift+C" the real key
+        # trigger lives on the canvas (see ScatterFigure.key_events)
+        self.show_labels_action.setShortcut(QKeySequence("L"))
+        self.show_labels_action.setShortcutContext(Qt.WidgetShortcut)
+        self.show_labels_action.triggered.connect(self._on_show_labels_toggled)
+        self._labels_menu.addAction(self.show_labels_action)
+
+        self.declutter_labels_action = QAction("Declutter Labels", self)
+        self.declutter_labels_action.setCheckable(True)
+        self.declutter_labels_action.setChecked(True)
+        self.declutter_labels_action.setToolTip(
+            "Automatically arrange labels around their points so they cover "
+            "neither points nor each other."
+        )
+        self.declutter_labels_action.triggered.connect(
+            self._on_declutter_labels_toggled
+        )
+        self._labels_menu.addAction(self.declutter_labels_action)
+
+        self._declutter_mode_menu = QMenu("Declutter Mode", self)
+        self._labels_menu.addMenu(self._declutter_mode_menu)
+        declutter_mode_group = QActionGroup(self)
+        declutter_mode_group.setExclusive(True)
+        self._declutter_mode_actions = {}
+        for name, value in (
+            ("Individual Labels", "individual"),
+            ("One Label Per Group", "grouped"),
+        ):
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(value == "individual")
+            action.triggered.connect(
+                lambda checked, v=value: self._on_declutter_mode_changed(v)
+            )
+            declutter_mode_group.addAction(action)
+            self._declutter_mode_menu.addAction(action)
+            self._declutter_mode_actions[value] = action
+
+        self.label_connectors_action = QAction("Connector Lines", self)
+        self.label_connectors_action.setCheckable(True)
+        self.label_connectors_action.setChecked(True)
+        self.label_connectors_action.setToolTip(
+            "Draw a short line from each label to the point it belongs to."
+        )
+        self.label_connectors_action.triggered.connect(
+            self._on_label_connectors_toggled
+        )
+        self._labels_menu.addAction(self.label_connectors_action)
+
+        self._unplaced_labels_menu = QMenu("When Labels Don't Fit", self)
+        self._labels_menu.addMenu(self._unplaced_labels_menu)
+        unplaced_labels_group = QActionGroup(self)
+        unplaced_labels_group.setExclusive(True)
+        self._unplaced_labels_actions = {}
+        for name, value in (
+            ("Hide", "hide"),
+            ("Show Dimmed", "dim"),
+            ("Show Normally", "show"),
+        ):
+            action = QAction(name, self)
+            action.setCheckable(True)
+            action.setChecked(value == "hide")
+            action.triggered.connect(
+                lambda checked, v=value: self._on_unplaced_labels_changed(v)
+            )
+            unplaced_labels_group.addAction(action)
+            self._unplaced_labels_menu.addAction(action)
+            self._unplaced_labels_actions[value] = action
+
         self.show_hoverinfo_action = QAction("Show Hoverinfo", self)
         self.show_hoverinfo_action.setCheckable(True)
         self.show_hoverinfo_action.setChecked(True)
@@ -1790,7 +1904,8 @@ class MainWindow(QMainWindow):
 
         # Rebuilt on show so it reflects the current view's figure (see
         # `_refresh_grow_shrink_menu`).
-        self._grow_shrink_menu = selection_menu.addMenu("Grow/Shrink Options")
+        self._grow_shrink_menu = QMenu("Grow/Shrink Options", self)
+        selection_menu.addMenu(self._grow_shrink_menu)
         self._grow_shrink_menu.aboutToShow.connect(self._refresh_grow_shrink_menu)
 
         selection_menu.addSeparator()
@@ -2063,6 +2178,13 @@ class MainWindow(QMainWindow):
             )
         )
 
+        self.debug_labels_action = QAction("Labels…", self)
+        self.debug_labels_action.setToolTip(
+            "Diagnose label placement for the current view - e.g. why a "
+            "label is not showing."
+        )
+        self.debug_labels_action.triggered.connect(self._on_debug_labels)
+
         # Global, app-wide toggle: surface full tracebacks in the console for
         # every caught error (any bigclust2 module). Unlike Scatter/Viewer this
         # is not per-view, so it is intentionally left out of
@@ -2077,6 +2199,8 @@ class MainWindow(QMainWindow):
         debug_menu.addSeparator()
         debug_menu.addAction(self.debug_scatter_action)
         debug_menu.addAction(self.debug_viewer_action)
+        debug_menu.addSeparator()
+        debug_menu.addAction(self.debug_labels_action)
         debug_menu.addSeparator()
         debug_menu.addAction(self.debug_tracebacks_action)
 
@@ -3844,6 +3968,120 @@ class MainWindow(QMainWindow):
                 fig._recompute_hover_info()
         except Exception as e:
             logger.debug(f"Hover recompute on menu close failed: {e}")
+
+    def _refresh_labels_menu(self):
+        """Sync the Labels menu check states with the current view's figure."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            fig = None
+
+        actions = (
+            self.show_labels_action,
+            self.declutter_labels_action,
+            *self._unplaced_labels_actions.values(),
+        )
+        for action in actions:
+            action.setEnabled(fig is not None)
+        for menu_or_action in (
+            self._declutter_mode_menu,
+            self.label_connectors_action,
+            self._unplaced_labels_menu,
+        ):
+            menu_or_action.setEnabled(fig is not None and fig.smart_label_placement)
+        if fig is None:
+            return
+
+        self.show_labels_action.setChecked(fig.label_group.visible)
+        self.declutter_labels_action.setChecked(fig.smart_label_placement)
+        self.label_connectors_action.setChecked(fig.label_connectors)
+        for value, action in self._declutter_mode_actions.items():
+            action.setChecked(value == fig.declutter_mode)
+        for value, action in self._unplaced_labels_actions.items():
+            action.setChecked(value == fig.unplaced_labels)
+
+    def _on_show_labels_toggled(self, checked):
+        """Show/hide the scatter labels (same as pressing L over the plot)."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        fig.label_group.visible = checked
+        fig._render_stale = True
+        fig.canvas.request_draw()
+
+    def _on_declutter_labels_toggled(self, checked):
+        """Toggle automatic label placement on the current view's figure."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        fig.smart_label_placement = bool(checked)
+        save_label_settings(fig, self.settings)
+
+    def _on_declutter_mode_changed(self, value):
+        """Set the declutter mode (individual/grouped) on the current figure."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        fig.declutter_mode = value
+        save_label_settings(fig, self.settings)
+
+    def _on_label_connectors_toggled(self, checked):
+        """Toggle point-to-label connector lines on the current view's figure."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        fig.label_connectors = bool(checked)
+        save_label_settings(fig, self.settings)
+
+    def _on_unplaced_labels_changed(self, value):
+        """Set how the current view's figure treats labels that don't fit."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        fig.unplaced_labels = value
+        save_label_settings(fig, self.settings)
+
+    def _on_debug_labels(self):
+        """Show a label placement diagnostic report for the current view."""
+        try:
+            fig = self.current_view().fig_scatter
+        except Exception:
+            return
+        try:
+            report = fig.label_debug_report()
+        except Exception as e:
+            report = f"Failed to generate the report: {e!r}"
+            logger.debug("Label debug report failed", exc_info=True)
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("Label Placement Debug")
+        layout = QVBoxLayout(dialog)
+
+        text = QPlainTextEdit(report)
+        text.setReadOnly(True)
+        text.setFont(QFontDatabase.systemFont(QFontDatabase.FixedFont))
+        text.setLineWrapMode(QPlainTextEdit.NoWrap)
+        layout.addWidget(text)
+
+        buttons = QHBoxLayout()
+        copy_button = QPushButton("Copy to Clipboard")
+        copy_button.clicked.connect(
+            lambda: QApplication.clipboard().setText(report)
+        )
+        close_button = QPushButton("Close")
+        close_button.clicked.connect(dialog.accept)
+        buttons.addWidget(copy_button)
+        buttons.addStretch()
+        buttons.addWidget(close_button)
+        layout.addLayout(buttons)
+
+        dialog.resize(760, 520)
+        dialog.show()
 
     def _refresh_grow_shrink_menu(self):
         """Rebuild the Grow/Shrink Options submenu for the current view's figure."""

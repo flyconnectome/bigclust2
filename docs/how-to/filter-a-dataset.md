@@ -113,7 +113,9 @@ subsets, do it in the app instead:
 
 - **Scope filters** in the control panel's General tab (**+ Add filter**) hide
   points without unloading them. Reversible, stackable with AND/OR, and the
-  match count updates as you type.
+  match count updates as you type. To find the gaps in a column, either uncheck
+  everything but *(empty)* (few distinct values) or set the selector next to the
+  substring field to `empty` — `non-empty` gives you the complement.
 - **Hide Selection** (++h++) removes the current selection from view;
   ++alt+h++ brings everything back.
 - **Open in New View** (++shift+cmd+ctrl+n++) puts the current selection in its

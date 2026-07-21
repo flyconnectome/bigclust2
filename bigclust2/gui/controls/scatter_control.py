@@ -649,8 +649,9 @@ class _ScopeFilterRow(QtWidgets.QWidget):
     """A single scope filter: column picker plus a dtype-specific editor.
 
     Numeric columns get a range slider with editable min/max fields,
-    low-cardinality categorical columns get checkboxes and high-cardinality
-    ones a substring/regex filter field with a live match count.
+    low-cardinality categorical columns get checkboxes (plus an "(empty)" box
+    for missing/blank values) and high-cardinality ones a substring/regex
+    filter field with an any/empty/non-empty selector.
 
     Emits ``changed`` whenever the filter may produce a different mask and
     ``removed(self)`` when the user clicks the remove button.
@@ -673,6 +674,7 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._max_spin = None
         self._text_edit = None
         self._empty_check = None
+        self._empty_combo = None
 
         layout = QtWidgets.QVBoxLayout()
         layout.setContentsMargins(0, 0, 0, 0)
@@ -745,6 +747,15 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._max_spin = None
         self._text_edit = None
         self._empty_check = None
+        self._empty_combo = None
+
+    @staticmethod
+    def _empty_mask(series):
+        """Rows where the field is missing or blank (whitespace counts as blank)."""
+        return (
+            series.isna().to_numpy()
+            | (series.astype(str).str.strip() == "").to_numpy()
+        )
 
     def _on_column_changed(self):
         self._clear_editor()
@@ -757,9 +768,12 @@ class _ScopeFilterRow(QtWidgets.QWidget):
             if series.dtype.kind in "iuf":
                 self._build_numeric_editor(layout, series)
             else:
-                uniques = series.dropna().astype(str).unique()
+                # Empty/missing values get their own checkbox instead of
+                # counting towards the cardinality of the real values
+                empty = self._empty_mask(series)
+                uniques = series[~empty].astype(str).unique()
                 if len(uniques) <= self.MAX_CHECKBOX_VALUES:
-                    self._build_checkbox_editor(layout, uniques)
+                    self._build_checkbox_editor(layout, uniques, bool(empty.any()))
                 else:
                     self._build_text_editor(layout)
         self.changed.emit()
@@ -803,7 +817,7 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._min_spin.valueChanged.connect(self._on_spin_changed)
         self._max_spin.valueChanged.connect(self._on_spin_changed)
 
-    def _build_checkbox_editor(self, layout, uniques):
+    def _build_checkbox_editor(self, layout, uniques, has_empty=False):
         self._editor_kind = "checks"
         for value in sorted(uniques):
             check = QtWidgets.QCheckBox(value)
@@ -811,6 +825,19 @@ class _ScopeFilterRow(QtWidgets.QWidget):
             check.stateChanged.connect(lambda *_: self.changed.emit())
             layout.addWidget(check)
             self._value_checks[value] = check
+
+        if has_empty:
+            # Kept out of `_value_checks` so it can't clash with a literal
+            # "(empty)" value in the column
+            self._empty_check = QtWidgets.QCheckBox("(empty)")
+            self._empty_check.setChecked(True)
+            self._empty_check.setToolTip(
+                "Include rows where this field is missing or blank.\n"
+                "Uncheck everything else to see only those rows."
+            )
+            self._empty_check.setStyleSheet("font-style: italic;")
+            self._empty_check.stateChanged.connect(lambda *_: self.changed.emit())
+            layout.addWidget(self._empty_check)
 
     def _build_text_editor(self, layout):
         self._editor_kind = "text"
@@ -830,10 +857,14 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         self._text_edit.textChanged.connect(self._on_text_changed)
         row_layout.addWidget(self._text_edit)
 
-        self._empty_check = QtWidgets.QCheckBox("empty")
-        self._empty_check.setToolTip("Match only empty or missing values")
-        self._empty_check.stateChanged.connect(self._on_empty_toggled)
-        row_layout.addWidget(self._empty_check)
+        self._empty_combo = QtWidgets.QComboBox()
+        self._empty_combo.addItems(["any", "empty", "non-empty"])
+        self._empty_combo.setToolTip(
+            "Restrict to rows where this field is empty (missing or blank) "
+            "or non-empty"
+        )
+        self._empty_combo.currentIndexChanged.connect(self._on_empty_changed)
+        row_layout.addWidget(self._empty_combo)
 
         layout.addWidget(row)
 
@@ -869,9 +900,9 @@ class _ScopeFilterRow(QtWidgets.QWidget):
         )
         self.changed.emit()
 
-    def _on_empty_toggled(self):
-        # Disable the substring field while "empty" filtering is active
-        self._text_edit.setEnabled(not self._empty_check.isChecked())
+    def _on_empty_changed(self):
+        # A substring only makes sense for rows that have a value at all
+        self._text_edit.setEnabled(self._empty_combo.currentText() != "empty")
         self.changed.emit()
 
     def _text_pattern(self):
@@ -883,7 +914,9 @@ class _ScopeFilterRow(QtWidgets.QWidget):
 
     def _text_mask(self, series):
         pattern, is_regex = self._text_pattern()
-        return (
+        # `astype(str)` turns missing values into "nan"/"None", which would
+        # otherwise match patterns like "na" - exclude them explicitly
+        return ~self._empty_mask(series) & (
             series.astype(str)
             .str.contains(pattern, case=False, regex=is_regex, na=False)
             .to_numpy()
@@ -902,24 +935,25 @@ class _ScopeFilterRow(QtWidgets.QWidget):
             # NaN fails both comparisons and hence drops out
             return (vals >= self._min_spin.value()) & (vals <= self._max_spin.value())
         elif self._editor_kind == "checks":
-            checked = {v for v, c in self._value_checks.items() if c.isChecked()}
-            return (
-                df[col].notna().to_numpy()
-                & df[col].astype(str).isin(checked).to_numpy()
-            )
-        elif self._editor_kind == "text":
+            empty = self._empty_mask(df[col])
+            mask = ~empty & df[col].astype(str).isin(
+                {v for v, c in self._value_checks.items() if c.isChecked()}
+            ).to_numpy()
             if self._empty_check is not None and self._empty_check.isChecked():
-                s = df[col]
-                return (
-                    s.isna().to_numpy()
-                    | (s.astype(str).str.strip() == "").to_numpy()
-                )
-            if not self._text_edit.text():
-                return np.ones(len(df), dtype=bool)
-            try:
-                return self._text_mask(df[col])
-            except re.error:
-                return np.ones(len(df), dtype=bool)
+                mask |= empty
+            return mask
+        elif self._editor_kind == "text":
+            mode = self._empty_combo.currentText()
+            empty = self._empty_mask(df[col])
+            if mode == "empty":
+                return empty
+            mask = ~empty if mode == "non-empty" else np.ones(len(df), dtype=bool)
+            if self._text_edit.text():
+                try:
+                    mask = mask & self._text_mask(df[col])
+                except re.error:
+                    pass
+            return mask
         return np.ones(len(df), dtype=bool)
 
 

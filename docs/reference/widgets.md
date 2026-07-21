@@ -53,6 +53,7 @@ The sidebar on the left of the scatter pane. Toggle with ++c++ over the plot, or
 | **Point Size** | `Size by:` | Which meta column drives point size |
 | | range slider | Clamp the size range |
 | **Scope** | **+ Add filter** | Add a filter row hiding non-matching points. Rows combine with AND/OR; a live count shows how many match. |
+| | filter editor | Depends on the column: numeric gets a range slider, few distinct values get checkboxes (plus an *(empty)* box when some rows are missing or blank), many get a substring/regex field with an `any` / `empty` / `non-empty` selector. |
 | **Selection Behavior** | **Add as group** | Track each addition as a distinct group (on by default) |
 | | **Deselect on double-click** | Double-clicking empty space clears the selection |
 | | **Deselect on empty selection** | An empty box/lasso clears the selection |

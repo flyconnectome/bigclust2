@@ -418,7 +418,8 @@ class ClioBackend(AnnotationBackend):
 
     @property
     def available_fields(self):
-        return list(self.client.meta["bodyAnnotationSchema"]["collection"].keys())
+        return [f for f in self.client.fetch_fields() if not f.endswith("_time") and not f.endswith("_user")]
+
 
     def validate(self):
         # Getting the client will validate credentials and dataset access

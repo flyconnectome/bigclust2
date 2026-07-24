@@ -57,6 +57,7 @@ from .widgets.command_palette import (
 )
 from .widgets.connectivity import ConnectivityTable
 from .widgets.distances import DistancesTable
+from .widgets.find_nearest import FindNearestWidget
 from .widgets.features import FeatureComparisonWidget
 from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.meta_merge import MetaMergeDialog
@@ -318,6 +319,7 @@ class MainWidget(QWidget):
         # gets its own widget (showing that embedding's features).
         self._connectivity_widgets = {}
         self._feature_comparison_widgets = {}
+        self._find_nearest_widgets = {}
         self._annotation_dialog = None
         self._meta_explorer_dialog = None
         self._meta_sources_dialog = None
@@ -340,6 +342,7 @@ class MainWidget(QWidget):
         candidates = [
             *self._connectivity_widgets.values(),
             *self._feature_comparison_widgets.values(),
+            *self._find_nearest_widgets.values(),
             self._meta_explorer_dialog,
             self._meta_sources_dialog,
             *self._distance_widgets,
@@ -1439,6 +1442,7 @@ class MainWindow(QMainWindow):
         self.distances_table_action = None
         self.feature_comparison_action = None
         self.meta_explorer_action = None
+        self.find_nearest_action = None
         self.command_action = None
         self.sync_viewer_action = None
         self._hover_columns_menu = None
@@ -1917,6 +1921,15 @@ class MainWindow(QMainWindow):
         self._grow_shrink_menu = QMenu("Grow/Shrink Options", self)
         selection_menu.addMenu(self._grow_shrink_menu)
         self._grow_shrink_menu.aboutToShow.connect(self._refresh_grow_shrink_menu)
+
+        self.find_nearest_action = QAction("Find Nearest…", self)
+        self.find_nearest_action.setEnabled(False)
+        self.find_nearest_action.setToolTip(
+            "For each selected neuron, find its nearest neighbours from a "
+            "filtered pool (e.g. the other side of the brain)"
+        )
+        self.find_nearest_action.triggered.connect(self.show_find_nearest)
+        selection_menu.addAction(self.find_nearest_action)
 
         selection_menu.addSeparator()
         hide_selection_action = QAction("Hide Selection", self)
@@ -2967,12 +2980,35 @@ class MainWindow(QMainWindow):
 
         return not meta.empty
 
+    def _can_open_find_nearest(self):
+        """Whether the Find Nearest widget can be opened for the current project.
+
+        Needs a metadata table (to filter the pool by) and at least one
+        similarity source: the 2D embedding, a distance matrix, a feature table
+        or a KNN graph. The embedding is available whenever there are points, so
+        this is effectively "a project with coordinates is loaded".
+        """
+        if not hasattr(self, "_data") or not isinstance(self._data, dict):
+            return False
+
+        meta = self._data.get("meta")
+        if not isinstance(meta, pd.DataFrame) or meta.empty:
+            return False
+
+        if self._data.get("embeddings") is not None:
+            return True
+        return any(
+            self._data.get(k) is not None for k in ("distances", "features", "knn")
+        )
+
     def _update_view_actions(self):
         """Update View menu action states."""
         if self.connectivity_table_action is not None:
             self.connectivity_table_action.setEnabled(
                 self._can_open_connectivity_table()
             )
+        if self.find_nearest_action is not None:
+            self.find_nearest_action.setEnabled(self._can_open_find_nearest())
         if self.distances_table_action is not None:
             self.distances_table_action.setEnabled(self._can_open_distances_table())
         if self.feature_comparison_action is not None:
@@ -3054,6 +3090,50 @@ class MainWindow(QMainWindow):
         view._connectivity_widgets[key] = widget
         widget.destroyed.connect(
             lambda _obj=None, v=view, k=key: v._connectivity_widgets.pop(k, None)
+        )
+        widget.destroyed.connect(
+            lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
+        )
+
+    def show_find_nearest(self):
+        """Open the Find Nearest widget for the active embedding of the current view.
+
+        Cached per embedding, so switching embeddings and reopening gives each
+        embedding its own finder (using that embedding's similarity data).
+        """
+        if not self._can_open_find_nearest():
+            return
+
+        view = self.current_view()
+        if view is None:
+            return
+
+        key, emb_name = self._active_embedding_key(view)
+
+        existing = view._find_nearest_widgets.get(key)
+        if existing is not None:
+            try:
+                view.fig_scatter.sync_widget(existing)
+                self._present_aux_widget(existing)
+                return
+            except RuntimeError:
+                # Underlying Qt object was deleted elsewhere; rebuild on demand.
+                view._find_nearest_widgets.pop(key, None)
+
+        fig = view.fig_scatter
+
+        title = "Find Nearest"
+        if emb_name:
+            title = f"Find Nearest — {emb_name}"
+
+        widget = FindNearestWidget(fig, title=title, parent=self)
+        self._register_aux_widget(view, widget)
+        fig.sync_widget(widget)
+        widget.show()
+
+        view._find_nearest_widgets[key] = widget
+        widget.destroyed.connect(
+            lambda _obj=None, v=view, k=key: v._find_nearest_widgets.pop(k, None)
         )
         widget.destroyed.connect(
             lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
@@ -3308,6 +3388,7 @@ class MainWindow(QMainWindow):
             return
         self._dispose_connectivity_widget(view)
         self._dispose_feature_comparison_widget(view)
+        self._dispose_find_nearest_widget(view)
         self._dispose_annotation_dialog(view)
         self._dispose_meta_explorer_dialog(view)
         self._dispose_meta_sources_dialog(view)
@@ -3320,6 +3401,23 @@ class MainWindow(QMainWindow):
         view._connectivity_widgets = {}
         for widget in widgets:
             self._unsync_connectivity_widget(view, widget)
+            try:
+                widget.removeEventFilter(self)
+                widget.close()
+                widget.deleteLater()
+            except RuntimeError:
+                # Qt object may already be deleted.
+                pass
+
+    def _dispose_find_nearest_widget(self, view):
+        """Dispose all of a view's Find Nearest widgets."""
+        widgets = list(view._find_nearest_widgets.values())
+        view._find_nearest_widgets = {}
+        for widget in widgets:
+            try:
+                view.fig_scatter.unsync_widget(widget)
+            except RuntimeError:
+                pass
             try:
                 widget.removeEventFilter(self)
                 widget.close()
@@ -4198,6 +4296,7 @@ class MainWindow(QMainWindow):
 
         # --- Grow By (amount / mode) ---
         mode = getattr(fig, "_gs_mode", "count")
+        knn_k = int(getattr(fig, "_gs_knn_k", 1))
         menu.addSeparator()
         grow_by_menu = menu.addMenu("Grow By")
         grow_group = QActionGroup(self)
@@ -4223,6 +4322,37 @@ class MainWindow(QMainWindow):
         custom.triggered.connect(self._on_gs_set_step_custom)
         grow_group.addAction(custom)
         grow_by_menu.addAction(custom)
+
+        # Per-neuron nearest neighbours: each selected neuron pulls in its own
+        # k nearest, rather than the k closest to the selection as a whole.
+        grow_by_menu.addSeparator()
+        nn_header = QAction("— nearest neighbours per selected neuron —", self)
+        nn_header.setEnabled(False)
+        grow_by_menu.addAction(nn_header)
+        knn_presets = [1, 2, 3, 5, 10]
+        for kk in knn_presets:
+            label = (
+                "1 nearest neighbour each"
+                if kk == 1
+                else f"{kk} nearest neighbours each"
+            )
+            action = QAction(label, self)
+            action.setCheckable(True)
+            action.setChecked(mode == "per_neuron" and kk == knn_k)
+            action.triggered.connect(lambda checked, n=kk: self._on_gs_set_knn_k(n))
+            grow_group.addAction(action)
+            grow_by_menu.addAction(action)
+        knn_custom = QAction(
+            "Custom neighbours each…"
+            if (mode == "per_neuron" and knn_k in knn_presets)
+            else f"Custom neighbours each… ({knn_k})",
+            self,
+        )
+        knn_custom.setCheckable(True)
+        knn_custom.setChecked(mode == "per_neuron" and knn_k not in knn_presets)
+        knn_custom.triggered.connect(self._on_gs_set_knn_k_custom)
+        grow_group.addAction(knn_custom)
+        grow_by_menu.addAction(knn_custom)
 
         # Similarity-threshold mode (one-shot grow).
         grow_by_menu.addSeparator()
@@ -4310,6 +4440,30 @@ class MainWindow(QMainWindow):
                 fig._gs_mode = "count"
         except Exception as e:
             logger.debug(f"Set custom grow/shrink step failed: {e}")
+
+    def _on_gs_set_knn_k(self, k):
+        try:
+            fig = self.current_view().fig_scatter
+            fig._gs_knn_k = int(k)
+            fig._gs_mode = "per_neuron"
+        except Exception as e:
+            logger.debug(f"Set grow per-neuron neighbours failed: {e}")
+
+    def _on_gs_set_knn_k_custom(self):
+        from PySide6.QtWidgets import QInputDialog
+
+        try:
+            fig = self.current_view().fig_scatter
+            current = int(getattr(fig, "_gs_knn_k", 1))
+            value, ok = QInputDialog.getInt(
+                self, "Grow By", "Nearest neighbours per selected neuron:",
+                current, 1, 10000, 1
+            )
+            if ok:
+                fig._gs_knn_k = int(value)
+                fig._gs_mode = "per_neuron"
+        except Exception as e:
+            logger.debug(f"Set custom grow per-neuron neighbours failed: {e}")
 
     def _on_gs_set_threshold_mode(self):
         try:

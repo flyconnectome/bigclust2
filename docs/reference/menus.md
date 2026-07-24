@@ -53,6 +53,7 @@ apply to new tabs and windows.
 | **Grow Selection** | ++cmd+plus++ | Add nearest points |
 | **Shrink Selection** | ++cmd+minus++ | Undo the last grow |
 | **Grow/Shrink Options** ▸ | | Data source, feature metric, and how much to grow by |
+| **Find Nearest…** | | For each selected neuron, find its nearest neighbours from a filtered pool — see [Find Nearest](widgets.md#find-nearest) |
 | **Hide Selection** | ++h++ | |
 | **Show Hidden** | ++alt+h++ | |
 | **Remove from View** | ++backspace++ | Selection views only |
@@ -73,7 +74,7 @@ apply to new tabs and windows.
 |---|---|
 | *(data sources)* | Exclusive group — which source the neighbourhood comes from |
 | **Feature Metric** | Only when a feature source is active |
-| **Grow By** | `N points` presets plus a custom entry; **Within neighbour distance**; and, in distance mode, a **Distance ×** factor submenu |
+| **Grow By** | `N points` presets (points closest to the selection *as a whole*) plus a custom entry; `N nearest neighbours each` presets (each selected neuron pulls in its *own* nearest, so the two sides of the brain grow together) plus a custom entry; **Within neighbour distance**; and, in distance mode, a **Distance ×** factor submenu |
 
 ## Export
 

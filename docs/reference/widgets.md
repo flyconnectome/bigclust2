@@ -185,29 +185,66 @@ selection to the viewer. Untick it when working with very large selections — s
 ## Connectivity Table
 
 **View → Connectivity Table** (++shift+cmd+c++). Up- and downstream partners of
-the current selection, as a table or a graph.
+the current selection, shown three ways:
+
+- **Table** — the raw matrix, neurons as rows and partners as columns.
+- **Profile** — one line per neuron across its partners, for comparing
+  connectivity patterns at a glance.
+- **Network** — a node-link diagram of the selection and its partners.
+
+All three read from the same filtered view. The sidebar's **Data** tab shapes
+that view for every tab at once; the second sidebar tab holds display options
+and follows whichever tab is active.
+
+### Data controls
 
 <div class="bc-dense" markdown>
 
-| Tab / group | Control | Does |
+| Group | Control | Does |
 |---|---|---|
-| **Table Controls → Rows** | row-label dropdown | `ID` or any meta column |
-| | sort dropdown | `No sort`, `By label`, `By distance` |
-| | search field | Filter rows by name |
+| **Rows** | `Labels:` | `ID` or any meta column |
+| | `Sort:` | `No sort`, `By label`, `By distance` |
+| | `Filter:` | Filter rows by name (regex) |
 | | **Collapse rows by label** | Aggregate rows sharing a label |
-| **→ Columns** | **Upstream** / **Downstream** | Which directions to show |
-| | synapse threshold | Hide connections below N synapses |
-| | sort dropdown | `No sort`, `By synapse count`, `By label`, `By distance` |
-| | search field | Filter columns |
-| | **Copy table to clipboard** | |
-| **Display** | **Hide zero values** | |
-| | **Normalize** | Show fractions rather than raw counts |
-| | cell-size slider | Scale cells relative to content |
-| | **Always on top** | Keep the window above the main one |
-| **Graph** | `Color scheme:` | `Up/Downstream`, `ID`, or any meta column |
-| | `Line width:` / `Max partners:` / `Max rows:` | Graph density limits |
+| **Columns (partners)** | **Upstream** / **Downstream** | Which directions to show |
+| | `Threshold:` | Hide partners whose strongest connection is below N synapses |
+| | `Top N:` | Keep only the N strongest partners **per direction** (`All` = no limit) |
+| | `Sort:` | `No sort`, `By synapse count`, `By label`, `By distance` |
+| | `Filter:` | Filter columns by name (regex) |
+| | **Normalize** | Show each connection as a fraction of that neuron's total input/output rather than a raw count. Up- and downstream are normalised separately. |
 
 </div>
+
+**Always on top**, **Copy** and **Export CSV** sit below the sidebar tabs and
+apply whatever tab you are on. **Copy** refuses views over 200 rows — use
+**Export CSV** for those.
+
+### Display controls
+
+<div class="bc-dense" markdown>
+
+| Tab | Control | Does |
+|---|---|---|
+| **Table** | **Hide zero values** | Leave cells with no connection blank |
+| | **Color cells** | Shade cells by connection strength |
+| | `Scale:` | Scale cells relative to content (also ++cmd+plus++ / ++cmd+minus++) |
+| **Profile** | `Color by:` | `Up/Downstream`, `ID`, or any meta column |
+| | `Line width:` / `Max partners:` / `Max rows:` | Density limits |
+| **Network** | `Layout:` | `Layered` puts upstream partners left, the selection in the middle and downstream partners right, ordering each column to reduce edge crossings. `Spring` uses a force-directed layout. |
+| | `Color by:` | Colours the selected neurons — `ID` or any meta column. Partners are always coloured by direction. |
+| | `Max partners:` / `Max rows:` | Density limits |
+| | `Max edge width:` | Width of the strongest edge; thinner edges scale down from it |
+| | **Show node labels** | Skipped automatically above 120 nodes |
+
+</div>
+
+Node size tracks a neuron's total synapse count and edge width its connection
+strength. Very dense views are refused rather than drawn — lower the limits or
+raise the threshold when that happens.
+
+**Finding things in the scatter plot:** double-click a row or column header in
+the table, or click a node in the network (or a point in the profile), and the
+scatter plot jumps to it.
 
 ## Distance Heatmap
 
@@ -259,6 +296,80 @@ the full control reference including scoring.
 
 Click any table row for a per-feature detail dialog with its own distribution
 plot.
+
+## Find Nearest
+
+**Selection → Find Nearest…**. For each *query* neuron, finds its top-N most
+similar neurons drawn from a **candidate pool** you define. Built for "select a
+group on one side of the brain, find the closest matches on the other side": the
+pool is independent of the [Scope](#general), so it can deliberately *exclude*
+the query neurons — something Scope cannot do, because scoping to the other side
+would deselect them.
+
+The query set is **pinned** from the figure selection when the widget opens; it
+does not follow the selection afterwards unless you ask it to. Press **Find
+Nearest Neighbours** to fill the table — nothing is computed until you do, since
+the pool can be the whole dataset.
+
+<div class="bc-dense" markdown>
+
+| Group | Control | Does |
+|---|---|---|
+| **Query neurons** | count label | How many neurons are pinned as queries |
+| | **From Selection** | Recapture the current figure selection as the query set |
+| | **Sync to Selection** | Follow the figure selection live instead of staying pinned (off by default) |
+| **Similarity** | `Source:` | Which space to measure distance in — `Embedding (screen)`, `KNN graph`, `Distance matrix` or `Feature space`, whichever the active embedding provides (same set as [Grow/Shrink](menus.md#growshrink-options)) |
+| | `Metric:` | `euclidean`, `cosine`, `cityblock`, `correlation` — feature source only |
+| | `Neighbours:` | How many neighbours to find per query neuron |
+| | **Search through graph (approximate)** | KNN source only — see [below](#the-knn-source) |
+| **Candidate pool** | **+ Add filter** | Restrict the pool by metadata, using the same dtype-aware filter rows as the [Scope](#general) panel (checkboxes, range sliders, regex), combined with AND/OR. A live count shows how many neurons match. |
+| | **Exclude query neurons from pool** | On by default — keeps the query neurons out of the results. Off lets query neurons match each other (a neuron never matches itself either way). |
+| | **Find Nearest Neighbours** | Run it |
+| | `Table layout:` | `Wide` (neighbours across columns, one row per query) or `Long` (one row per query–neighbour match, with `Rank` and `Distance` columns) |
+
+</div>
+
+In **Wide** layout each neighbour cell shows the neighbour's id over its distance
+(label + full distance on hover); blank cells mean fewer than N in-pool
+neighbours were found (common with a KNN-graph source and a strict pool).
+Double-click a query or neighbour cell to jump to it in the scatter plot.
+
+The action buttons sit below the table:
+
+| Button | Does |
+|---|---|
+| **Add to Figure** | Add the de-duplicated union of all found neighbours to the current selection (the queries stay selected) |
+| **Open in New View** | Open that union in its own view |
+| **Copy** / **Export CSV** | The results as a flat table, matching the current layout. **Copy** refuses more than 500 rows. |
+
+**Always on top** is on the left of the same row. The widget follows the active
+embedding: it refreshes on show, so reopen it after switching embeddings to pick
+up that embedding's similarity data.
+
+### The KNN source
+
+A [KNN-graph](data-format.md#knn-graph) source stores only each neuron's top-*k*
+neighbours, so "nearest" is a lookup into that stored list, not a fresh search.
+A pool filter can only *narrow* the stored list — it can't reach a neuron that
+was never in the top-*k*. So with a strict pool you often get fewer than N
+results, or none. This matters most for **left → right matching**: a neuron's
+stored neighbours are usually same-side, so its contralateral match is rarely in
+the list. **Prefer the feature or distance-matrix source there** — those search
+the whole pool.
+
+**Search through graph (approximate)** makes the KNN source reach further by
+walking the graph outward (shortest path over the stored edges) until it finds N
+in-pool members. Use it when a KNN graph is your *only* similarity source. The
+reported distances then become **accumulated graph-path distances** — an
+approximation, not the true query-to-neighbour distance — so the results are
+ranked by reachability rather than by exact similarity, and the distance column
+is labelled *Graph distance* to make that explicit.
+
+!!! tip "Left → right in three steps"
+
+    Select the left-side neurons, open **Find Nearest**, add a pool filter
+    `somaSide` = `R`, set the neighbour count, **Find Nearest Neighbours**, then
+    **Add to Figure** to bring the matched right-side neurons into the selection.
 
 ## Meta Data Explorer
 

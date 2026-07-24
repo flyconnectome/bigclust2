@@ -953,9 +953,12 @@ class ScatterFigure(BaseFigure):
         :attr:`_gs_step`) points closest to the current selection. In "threshold"
         mode (:attr:`_gs_mode`) it instead adds, in a single pass, every point
         within an auto-derived similarity distance of the selection (see
-        :meth:`_grow_threshold`). Distance is measured in the configured source
-        (embedding by default). Each grow is pushed onto a history stack so it can
-        be reversed by :meth:`shrink_selection`.
+        :meth:`_grow_threshold`). In "per_neuron" mode it adds each selected
+        neuron's :attr:`_gs_knn_k` nearest unselected neighbours (so each neuron
+        pulls in its own matches, rather than the selection as a whole). Distance
+        is measured in the configured source (embedding by default). Each grow is
+        pushed onto a history stack so it can be reversed by
+        :meth:`shrink_selection`.
 
         Parameters
         ----------
@@ -996,6 +999,16 @@ class ScatterFigure(BaseFigure):
         try:
             if mode == "threshold":
                 added = self._grow_threshold(gs, source, metric)
+            elif mode == "per_neuron":
+                added = gs.grow_selection_per_neuron(
+                    self._selected,
+                    int(getattr(self, "_gs_knn_k", 1)),
+                    source=source,
+                    positions=self.positions,
+                    dists=self.dists,
+                    metric=metric,
+                    scope_mask=self._selection_scope_mask,
+                )
             else:
                 step = int(step) if step else default_step
                 added = gs.grow_selection(
@@ -1012,11 +1025,12 @@ class ScatterFigure(BaseFigure):
             return
 
         if not len(added):
-            msg = (
-                "No further similar points within distance"
-                if mode == "threshold"
-                else "All in-scope points already selected"
-            )
+            if mode == "threshold":
+                msg = "No further similar points within distance"
+            elif mode == "per_neuron":
+                msg = "No in-scope neighbours left to add"
+            else:
+                msg = "All in-scope points already selected"
             self.show_message(msg, duration=2)
             return
 
@@ -3224,7 +3238,8 @@ class ScatterFigure(BaseFigure):
         self._gs_source = None  # None => default to embedding at call time
         self._gs_metric = "euclidean"  # only used when source == "features"
         self._gs_step = 10  # points added per grow press (count mode)
-        self._gs_mode = "count"  # {"count", "threshold"}
+        self._gs_knn_k = 1  # neighbours per selected neuron (per_neuron mode)
+        self._gs_mode = "count"  # {"count", "threshold", "per_neuron"}
         self._gs_threshold_factor = 1.0  # multiplier for the similarity threshold
         self._gs_history = []  # stack of pre-grow selection snapshots
         self._gs_internal_update = False  # True while we drive the `selected` setter

@@ -429,6 +429,297 @@ def _nearest_euclidean_gemm(X, selected):
     return out
 
 
+def _n_rows(positions, dists):
+    """Total number of points, inferred from whichever data source is present."""
+    if positions is not None and len(positions):
+        return len(positions)
+    if dists:
+        if "distances" in dists:
+            return len(np.asarray(dists["distances"]))
+        if "features" in dists:
+            return len(np.asarray(dists["features"]))
+        if "knn" in dists:
+            return len(np.asarray(dists["knn"].indices))
+    return 0
+
+
+def per_query_neighbors(
+    query,
+    n,
+    *,
+    source,
+    positions,
+    dists,
+    metric="euclidean",
+    pool_mask=None,
+    exclude_query=True,
+    graph_expand=False,
+):
+    """Each query point's ``n`` nearest neighbours drawn from a candidate pool.
+
+    Unlike :func:`nearest_distance_to_selection` (single-linkage to the
+    selection *as a whole*), this ranks neighbours **per query row** — every
+    query neuron gets its own nearest matches. The candidate pool is the rows
+    picked out by ``pool_mask`` (all rows when it is ``None``); this is how the
+    caller restricts matches to e.g. the other side of the brain.
+
+    Parameters
+    ----------
+    query :     array of int
+                Row indices of the query points.
+    n :         int
+                Neighbours to return per query row.
+    source :    str
+                One of the ``SOURCE_*`` constants.
+    positions, dists, metric
+                As for :func:`nearest_distance_to_selection`.
+    pool_mask : (N,) bool array or None
+                Candidate pool; ``None`` means every row is a candidate.
+    exclude_query : bool
+                Drop a query row from its own neighbour list (a query that is
+                itself in the pool would otherwise match itself at distance 0).
+    graph_expand : bool
+                KNN source only. When ``False`` (default), only a query's stored
+                (one-hop) neighbours are considered, so a strict pool can leave
+                fewer than ``n`` results. When ``True``, walk the graph outward
+                (shortest path over the stored edges) to reach further in-pool
+                members — the returned distances are then **accumulated path
+                distances**, an approximation of the true metric distance, not
+                the real query→candidate distance. Ignored for other sources.
+
+    Returns
+    -------
+    (neigh, dist) : (m, n) int64, (m, n) float64
+        ``neigh`` holds candidate row indices, nearest first, right-padded with
+        ``-1``; ``dist`` the matching distances, padded with ``inf``. ``m`` is
+        ``len(query)``. Rows can be short (fewer than ``n`` real entries) when
+        the pool is small — most often on a sparse KNN graph, whose stored
+        neighbours may mostly fall outside the pool.
+    """
+    query = np.asarray(query, dtype=int)
+    n = int(n)
+    m = len(query)
+
+    if pool_mask is None:
+        pool_positions = np.arange(_n_rows(positions, dists), dtype=int)
+    else:
+        pool_positions = np.where(np.asarray(pool_mask, dtype=bool))[0]
+
+    if m == 0 or n <= 0 or len(pool_positions) == 0:
+        cols = max(n, 0)
+        return (
+            np.full((m, cols), -1, dtype=np.int64),
+            np.full((m, cols), np.inf, dtype=np.float64),
+        )
+
+    # Ask for one extra when we may have to drop a self-match, capped at the
+    # pool size (cKDTree / NearestNeighbors / argpartition all require k <= pool).
+    want = min(n + (1 if exclude_query else 0), len(pool_positions))
+
+    neigh, dist = _per_query_raw(
+        query,
+        want,
+        source=source,
+        positions=positions,
+        dists=dists,
+        metric=metric,
+        pool_positions=pool_positions,
+        graph_expand=graph_expand,
+    )
+    return _finalize_per_query(neigh, dist, query, n, exclude_query)
+
+
+def _per_query_raw(
+    query, want, *, source, positions, dists, metric, pool_positions, graph_expand=False
+):
+    """Per-query top-``want`` candidates as (m, w) global-index / distance arrays.
+
+    Nearest first; short rows (KNN) are ``-1`` / ``inf`` padded. Distances are
+    *not* yet trimmed to ``n`` or de-selfed — :func:`_finalize_per_query` does
+    that. Dispatch mirrors :func:`nearest_distance_to_selection`.
+    """
+    m = len(query)
+
+    if source == SOURCE_EMBEDDING:
+        if positions is None or not len(positions):
+            raise GrowShrinkUnavailable("No embedding positions available.")
+        from scipy.spatial import cKDTree
+
+        X = np.asarray(positions)
+        tree = cKDTree(X[pool_positions])
+        dd, ii = tree.query(X[query], k=want)
+        dd = np.asarray(dd, dtype=np.float64).reshape(m, want)
+        ii = np.asarray(ii, dtype=int).reshape(m, want)
+        return pool_positions[ii], dd
+
+    if source == SOURCE_FEATURES:
+        if not dists or "features" not in dists:
+            raise GrowShrinkUnavailable("No feature vectors available.")
+        from sklearn.neighbors import NearestNeighbors
+
+        X = np.asarray(dists["features"])
+        algorithm = "brute" if metric in ("cosine", "correlation") else "auto"
+        try:
+            nn = NearestNeighbors(
+                n_neighbors=want, metric=metric, algorithm=algorithm
+            ).fit(X[pool_positions])
+            dd, ii = nn.kneighbors(X[query])
+        except ValueError:
+            # sklearn refuses non-finite input with a generic message; replace
+            # it with one carrying row/column counts if that is the cause.
+            check_finite_features(X, "find nearest")
+            raise
+        return pool_positions[np.asarray(ii, dtype=int)], np.asarray(dd, dtype=np.float64)
+
+    if source == SOURCE_DISTANCES:
+        if not dists or "distances" not in dists:
+            raise GrowShrinkUnavailable("No distance matrix available.")
+        D = np.asarray(dists["distances"])
+        sub = D[np.ix_(query, pool_positions)].astype(np.float64)
+        # Top-`want` smallest per row (argpartition), then sort those by value.
+        part = np.argpartition(sub, want - 1, axis=1)[:, :want]
+        rows = np.arange(m)[:, None]
+        order = np.argsort(sub[rows, part], axis=1)
+        part = part[rows, order]
+        return pool_positions[part], sub[rows, part]
+
+    if source == SOURCE_KNN:
+        if not dists or "knn" not in dists:
+            raise GrowShrinkUnavailable("No KNN graph available.")
+        graph = dists["knn"]
+        gi = np.asarray(graph.indices)
+        gd = np.asarray(graph.dists, dtype=np.float64)
+        N = gi.shape[0]
+        in_pool = np.zeros(N, dtype=bool)
+        in_pool[pool_positions] = True
+
+        if graph_expand:
+            return _per_query_knn_graph(gi, gd, query, want, in_pool)
+
+        neigh = np.full((m, want), -1, dtype=np.int64)
+        dist = np.full((m, want), np.inf, dtype=np.float64)
+        for r, q in enumerate(query):
+            idx = gi[q]
+            keep = (idx >= 0) & in_pool[np.clip(idx, 0, N - 1)]
+            kidx = idx[keep][:want]
+            neigh[r, : len(kidx)] = kidx
+            dist[r, : len(kidx)] = gd[q][keep][:want]
+        return neigh, dist
+
+    raise GrowShrinkUnavailable(f"Unknown distance source: {source!r}")
+
+
+# Per-query cap on how many graph nodes the indirect KNN search may settle
+# before giving up. Bounds the cost when the pool is sparse relative to the
+# graph's connectivity (the case where the walk would otherwise wander far).
+_KNN_GRAPH_MAX_SETTLED = 4000
+
+
+def _per_query_knn_graph(gi, gd, query, want, in_pool, max_settled=_KNN_GRAPH_MAX_SETTLED):
+    """Per-query in-pool members by shortest path over the KNN graph (Dijkstra).
+
+    For each query, walk the graph's outgoing (stored-neighbour) edges outward,
+    collecting up to ``want`` in-pool nodes in order of accumulated edge weight.
+    Returns ``(neigh, dist)`` of shape ``(len(query), want)`` — global row
+    positions and *path* distances, ``-1`` / ``inf`` padded, per the
+    :func:`per_query_neighbors` contract. ``max_settled`` bounds the search per
+    query so a sparse pool cannot make it traverse the whole graph.
+
+    The distances are accumulated path lengths, so a query's own stored
+    neighbours come out at exactly their edge weight (matching the direct
+    one-hop mode), while further-out members carry the summed detour distance —
+    an approximation, not the true query→member distance.
+    """
+    import heapq
+
+    m = len(query)
+    neigh = np.full((m, want), -1, dtype=np.int64)
+    dist = np.full((m, want), np.inf, dtype=np.float64)
+
+    for r, q in enumerate(query):
+        q = int(q)
+        heap = [(0.0, q)]
+        best = {q: 0.0}
+        collected = 0
+        settled = 0
+        while heap and collected < want and settled < max_settled:
+            d, node = heapq.heappop(heap)
+            if d > best.get(node, np.inf):
+                continue  # stale heap entry, already settled at a shorter path
+            settled += 1
+            if node != q and in_pool[node]:
+                neigh[r, collected] = node
+                dist[r, collected] = d
+                collected += 1
+                if collected >= want:
+                    break
+            for t, w in zip(gi[node], gd[node]):
+                t = int(t)
+                if t < 0:
+                    continue
+                nd = d + w
+                if nd < best.get(t, np.inf):
+                    best[t] = nd
+                    heapq.heappush(heap, (nd, t))
+    return neigh, dist
+
+
+def _finalize_per_query(neigh, dist, query, n, exclude_query):
+    """Drop self-matches / padding, trim each row to ``n``, re-pad to (m, n)."""
+    m = len(query)
+    out_neigh = np.full((m, n), -1, dtype=np.int64)
+    out_dist = np.full((m, n), np.inf, dtype=np.float64)
+    for r in range(m):
+        row_n = neigh[r]
+        valid = row_n >= 0
+        if exclude_query:
+            valid &= row_n != query[r]
+        keep_n = row_n[valid][:n]
+        out_neigh[r, : len(keep_n)] = keep_n
+        out_dist[r, : len(keep_n)] = dist[r][valid][:n]
+    return out_neigh, out_dist
+
+
+def grow_selection_per_neuron(
+    selected, k, *, source, positions, dists, metric="euclidean", scope_mask=None
+):
+    """Row indices to ADD when each selected point pulls in its ``k`` nearest.
+
+    Distinct from :func:`grow_selection`: that adds the ``step`` points closest
+    to the selection *as a whole* (single-linkage), whereas this adds **each**
+    selected neuron's ``k`` nearest unselected, in-scope neighbours and unions
+    them — so an ``m``-neuron selection can add up to ``m * k`` points. Returns
+    an ascending, de-duplicated array (empty when nothing can be added).
+    """
+    selected = np.asarray(selected, dtype=int)
+    k = int(k)
+    if k <= 0 or len(selected) == 0:
+        return np.empty(0, dtype=int)
+
+    n = _n_rows(positions, dists)
+    if not n:
+        return np.empty(0, dtype=int)
+
+    # The pool is every unselected point (optionally restricted to the scope),
+    # exactly the candidate rule `grow_selection` applies to its aggregate score.
+    pool = np.ones(n, dtype=bool)
+    pool[selected] = False
+    if scope_mask is not None and len(scope_mask) == n:
+        pool &= np.asarray(scope_mask, dtype=bool)
+
+    neigh, _ = per_query_neighbors(
+        selected,
+        k,
+        source=source,
+        positions=positions,
+        dists=dists,
+        metric=metric,
+        pool_mask=pool,
+        exclude_query=True,
+    )
+    return np.unique(neigh[neigh >= 0])
+
+
 def _nearest_from_knn(graph, selected):
     """One-hop frontier distance on the KNN graph.
 

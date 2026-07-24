@@ -2918,7 +2918,9 @@ class ScatterFigure(BaseFigure):
 
         if verbose:
             self.show_message(
-                f"Found {len(ls)} occurrences of '{label}'", duration=3, color="g"
+                f"Found {len(ls)} occurrences of '{label}'",
+                duration=3,
+                color="g" if len(ls) else "r",
             )
 
         return ls
@@ -4054,10 +4056,12 @@ class LabelSearch:
         if len(self.indices) == 0:
             if isinstance(query, Number) or query.isdigit():
                 self.indices = self.search_ids(int(query))
-            elif "," in query and all([q.strip().isdigit() for q in query.split(",")]):
-                self.indices = self.search_ids(
-                    [int(q.strip()) for q in query.split(",")]
-                )
+            elif "," in query:
+                # Comma-separated list of IDs. Ignore empty parts so a trailing
+                # comma (e.g. "1, 2, 3,") still matches.
+                parts = [q.strip() for q in query.split(",") if q.strip()]
+                if parts and all(p.isdigit() for p in parts):
+                    self.indices = self.search_ids([int(p) for p in parts])
 
         # If still no labels found, return
         if len(self.indices) == 0:

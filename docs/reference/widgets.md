@@ -341,6 +341,33 @@ annotations](../how-to/push-annotations.md) — read it before using this.
 | | recent field plans | Re-apply one of your last five setups |
 | | **Submit** | Write. No further confirmation. |
 
+## Build Project
+
+**File → Build Project…** authors a new project directory from local tables,
+without hand-writing the `info` file. It is a form over the same engine as the
+[`ProjectBuilder`](../how-to/create-a-local-dataset.md#build-it-with-projectbuilder)
+Python API, so both produce identical projects.
+
+| Section | Does |
+|---|---|
+| **Project** | Name, description, dataset label and the output folder to write into |
+| **Meta table** | Pick a `.parquet` / `.feather` / `.csv` / `.tsv` table, then map which of its columns supply the required `id`, `label` and `dataset` fields (they need not be named that way). A column literally named `id`/`label`/`dataset` that you don't map is kept under a suffixed name rather than dropped. Choose optional **Color** and **Neuroglancer** columns |
+| **Embeddings** | Add one or more. Each takes its coordinates either from two meta columns or a 2-column file, with optional distances and features tables attached |
+| **3D viewer** | Optional neuroglancer source and neuropil mesh. Picking a **Neuroglancer** column above turns this on and fills in its source automatically |
+
+**Build project** stays disabled until an output folder, a meta table and at
+least one embedding are set. It then writes the files; validation errors (e.g. a
+non-square distance matrix) are surfaced before anything is written. Leave **Open
+the project after building** (on by default) ticked to load the new project
+straight into the current view.
+
+## Command
+
+**Help → Command** shows the command line that re-opens the current view — its
+source and filters — in both the `uvx bigclust2@latest …` and installed
+`bigclust2 …` forms, each with a copy button. Enabled once a project is loaded.
+See the [command-line reference](cli.md).
+
 ## Other dialogs
 
 | Dialog | Reached from | Does |

@@ -62,6 +62,8 @@ from .widgets.meta_explorer import MetaExplorerDialog
 from .widgets.meta_merge import MetaMergeDialog
 from .widgets.meta_sources import MetaSourcesDialog
 from .widgets.project_details import ProjectDetailsDialog
+from .widgets.command_dialog import CommandDialog
+from .widgets.project_builder_dialog import ProjectBuilderDialog
 from .widgets.annotations import AnnotationDialog, SelectionRecord
 from .widgets.credentials import (
     CredentialsDialog,
@@ -72,7 +74,7 @@ from .update_check import UpdateCheckRunnable, is_outdated
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer, resolve_local_source
 from ..embeddings import KNNGraph
-from ..utils import is_url
+from ..utils import is_url, build_launch_command
 from ..__version__ import __version__
 
 
@@ -1437,6 +1439,7 @@ class MainWindow(QMainWindow):
         self.distances_table_action = None
         self.feature_comparison_action = None
         self.meta_explorer_action = None
+        self.command_action = None
         self.sync_viewer_action = None
         self._hover_columns_menu = None
         self._adopt_view = adopt_view
@@ -1625,6 +1628,13 @@ class MainWindow(QMainWindow):
         open_project_action.setShortcut("Ctrl+O")
         open_project_action.triggered.connect(self.show_open_project_dialog)
         file_menu.addAction(open_project_action)
+
+        build_project_action = QAction("Build Project…", self)
+        build_project_action.setToolTip(
+            "Author a new BigClust project from local tables."
+        )
+        build_project_action.triggered.connect(self.show_build_project_dialog)
+        file_menu.addAction(build_project_action)
 
         new_tab_action = QAction("New View", self)
         new_tab_action.setShortcut(QKeySequence("Ctrl+T"))
@@ -2065,6 +2075,20 @@ class MainWindow(QMainWindow):
 
         # Help menu
         help_menu = menu_bar.addMenu("Help")
+
+        # Reproduce-this-view: builds the `bigclust2 --from ... --filters ...`
+        # command for the currently loaded project. Disabled until a project is
+        # loaded (toggled in `_update_view_actions`).
+        self.command_action = QAction("Command…", self)
+        self.command_action.setMenuRole(QAction.MenuRole.NoRole)
+        self.command_action.setEnabled(False)
+        self.command_action.setToolTip(
+            "Show the command line that re-opens the current view."
+        )
+        self.command_action.triggered.connect(self.show_command_dialog)
+        help_menu.addAction(self.command_action)
+
+        help_menu.addSeparator()
 
         # Documentation lives on the web, not in the app. These entries deep-link
         # straight to the relevant page so the in-app help stays a table of
@@ -2955,6 +2979,10 @@ class MainWindow(QMainWindow):
             self.feature_comparison_action.setEnabled(self._can_open_feature_comparison())
         if self.meta_explorer_action is not None:
             self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
+        if self.command_action is not None:
+            self.command_action.setEnabled(
+                self._current_project_loader is not None
+            )
 
     def _active_embedding_key(self, view):
         """Return ``(key, name)`` identifying the active embedding for a view.
@@ -3540,6 +3568,36 @@ class MainWindow(QMainWindow):
         except Exception:
             info = None
         ProjectDetailsDialog(self, summary=summary, info=info).exec()
+
+    def show_command_dialog(self):
+        """Show the command line(s) that re-open the current view.
+
+        Reads the loaded project's source (``loader.path``) and filter
+        (``loader.filter_expr``) plus the load-time embedding mode stashed on the
+        view, and renders both an ``uvx`` and an installed-console-script form,
+        each with a copy button (see :func:`bigclust2.utils.build_launch_command`).
+        """
+        loader = self._current_project_loader
+        if loader is None:
+            fig = self.current_view().fig_scatter if self.current_view() else None
+            if fig is not None:
+                fig.show_message("No project loaded", color="red", duration=3)
+            return
+
+        view = self.current_view()
+        commands = build_launch_command(
+            source=getattr(loader, "path", ""),
+            filter_expr=getattr(loader, "filter_expr", None),
+            embedding_mode=getattr(view, "_load_embedding_mode", ""),
+        )
+        CommandDialog(
+            self,
+            commands=[
+                ("Run without installing (uvx):", commands["uvx"]),
+                ("If bigclust2 is installed:", commands["installed"]),
+            ],
+            intro="Use this command line to re-open the current view (source and filters):",
+        ).exec()
 
     @property
     def annotation_log(self):
@@ -4978,6 +5036,26 @@ class MainWindow(QMainWindow):
 
         self._load_project_from_dialog(dialog)
 
+    def show_build_project_dialog(self):
+        """Author a new project from local tables; open it when the user asked to."""
+        dialog = ProjectBuilderDialog(self)
+        if dialog.exec() != QDialog.Accepted or dialog.built_path is None:
+            return
+
+        # The dialog carries the user's "open after building" choice.
+        if not dialog.open_after_build.isChecked():
+            return
+        try:
+            project = parse_directory(str(dialog.built_path))
+            if not isinstance(project, SingleProjectLoader):
+                projects = [p for p in project if p is not None]
+                project = projects[0] if projects else None
+            if project is not None:
+                self._load_project(project)
+        except Exception as e:
+            logger.error(f"Failed to open newly built project: {e}")
+            QMessageBox.critical(self, "Open failed", str(e))
+
     def _load_project_from_dialog(self, dialog):
         """Load a project from a configured dialog instance."""
         state = dialog.current_state()
@@ -5164,6 +5242,10 @@ class MainWindow(QMainWindow):
                     ngl_viewer.set_neuropil_mesh(neuropil_mesh)
 
             self._current_project_loader = project
+            # Remember the load-time embedding mode so Help -> Command can
+            # reproduce a recomputed view (empty string == "use precomputed").
+            if view is not None:
+                view._load_embedding_mode = embedding_mode
             self._update_view_actions()
             self.set_view_title(
                 self.current_view(),
@@ -5253,7 +5335,7 @@ class MainWindow(QMainWindow):
             self.settings.setValue("updateCheck/skippedVersion", latest)
 
 
-def main(dataset=None):
+def main(dataset=None, filters=None, embedding=None):
     """Main application entry point."""
     app = QApplication(sys.argv)
     # Push stored tokens into the environment before any backend is built.
@@ -5263,12 +5345,19 @@ def main(dataset=None):
     # Check PyPI for updates once the window has had a chance to paint.
     QTimer.singleShot(2000, window._start_update_check)
     if dataset is not None:
-        QTimer.singleShot(0, lambda: _load_dataset_from_arg(window, dataset))
+        QTimer.singleShot(
+            0, lambda: _load_dataset_from_arg(window, dataset, filters, embedding)
+        )
     sys.exit(app.exec())
 
 
-def _load_dataset_from_arg(window, dataset):
-    """Load a dataset specified via the --from command-line argument."""
+def _load_dataset_from_arg(window, dataset, filters=None, embedding=None):
+    """Load a dataset specified via the --from command-line argument.
+
+    ``filters`` and ``embedding`` mirror the Open Project dialog's filter
+    expression and embedding-mode selection, so a command produced by
+    Help -> Command reproduces the same view (see ``build_launch_command``).
+    """
     try:
         parsed = parse_directory(dataset)
         if isinstance(parsed, SingleProjectLoader):
@@ -5296,7 +5385,13 @@ def _load_dataset_from_arg(window, dataset):
                 if not ok:
                     return
                 project = projects[names.index(name)]
-        window._load_project(project)
+
+        # Apply the filter through the same attribute the Open dialog sets
+        # (loaders.SingleProjectLoader.filter_expr); compile() consumes it.
+        if filters and str(filters).strip():
+            project.filter_expr = str(filters).strip()
+
+        window._load_project(project, embedding_mode=(embedding or ""))
     except Exception as e:
         logger.error(f"Failed to load dataset '{dataset}': {e}")
         QMessageBox.critical(window, "Load Error", f"Could not load dataset:\n{e}")

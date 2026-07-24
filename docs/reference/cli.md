@@ -1,11 +1,17 @@
 # Command line
 
 ```
-bigclust2 [--version] [--debug] [--from DATASET]
+bigclust2 [--version] [--debug] [--from DATASET] [--filters EXPR] [--embedding MODE]
 ```
 
 BigClust is a GUI application; the command line exists to launch it, optionally
-with a project already open. There are three flags.
+with a project already open.
+
+!!! tip "Let the app write the command for you"
+
+    With a project open, **Help → Command** shows the exact `bigclust2 --from …
+    --filters …` line that re-opens the current view, with copy buttons for both
+    the `uvx` and installed forms. Copy it to bookmark or share a view.
 
 ## `--from DATASET`
 
@@ -28,6 +34,29 @@ Project** picker before the main window appears. If it cannot be loaded you get 
 
     A project directory can hold several datasets, so `--from` names the *source*
     rather than one dataset within it.
+
+## `--filters EXPR`
+
+Apply a filter expression on start-up — the same expression the **Open Project**
+dialog's filter field accepts. Requires `--from`.
+
+```bash
+bigclust2 --from /path/to/my_clustering --filters 'dataset == "hemibrain"'
+```
+
+Quote the expression so your shell passes it through intact. See [filtering on
+load](../how-to/load-a-remote-dataset.md) for the expression syntax.
+
+## `--embedding MODE`
+
+Recompute the embedding on load instead of using the precomputed one. Requires
+`--from`. Accepts `calculate from distances` or `calculate from features`.
+
+```bash
+bigclust2 --from /path/to/my_clustering --embedding 'calculate from distances'
+```
+
+Omit it (the default) to use the project's precomputed embedding.
 
 ## `--debug`
 
@@ -73,8 +102,8 @@ uv run run.py --debug
 !!! warning "`run.py` only understands `--debug`"
 
     `run.py` is the development entry point and does not use the argument parser —
-    it looks for `--debug` in `sys.argv` and ignores everything else. `--from` and
-    `--version` do nothing there.
+    it looks for `--debug` in `sys.argv` and ignores everything else. `--from`,
+    `--filters`, `--embedding` and `--version` do nothing there.
 
     Use the real entry point if you need them:
 

@@ -24,6 +24,26 @@ def main() -> None:
         default=None,
         help="Path or URL of a dataset to load on startup",
     )
+    parser.add_argument(
+        "--filters",
+        dest="filters",
+        metavar="EXPR",
+        default=None,
+        help=(
+            "Filter expression applied to the dataset on startup "
+            "(e.g. 'dataset == \"hemibrain\"'). Requires --from."
+        ),
+    )
+    parser.add_argument(
+        "--embedding",
+        dest="embedding",
+        metavar="MODE",
+        default=None,
+        help=(
+            "Load-time embedding mode, e.g. 'calculate from distances' or "
+            "'calculate from features'. Requires --from."
+        ),
+    )
     args = parser.parse_args()
 
     if args.version:
@@ -36,4 +56,4 @@ def main() -> None:
 
     from bigclust2.gui import main as run_gui
 
-    run_gui(dataset=args.dataset)
+    run_gui(dataset=args.dataset, filters=args.filters, embedding=args.embedding)

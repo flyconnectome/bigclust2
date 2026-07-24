@@ -1,4 +1,5 @@
 import re
+import shlex
 import colorsys
 import warnings
 
@@ -57,6 +58,40 @@ def is_list_of_ids(string: str) -> bool:
         if not part.isdigit():
             return False
     return True
+
+
+def build_launch_command(source, filter_expr=None, embedding_mode=None):
+    """Build the command line(s) that re-open a given view.
+
+    Produces the two equivalent invocations that reproduce a project view from
+    the command line: one via ``uvx`` (runs without installing anything) and one
+    via the installed ``bigclust2`` console script. Every token is quoted with
+    :func:`shlex.quote` so the strings are safe to paste into a POSIX shell.
+
+    Args:
+        source:         Path or URL of the dataset (``--from``). Required.
+        filter_expr:    Filter expression string (``--filters``). Optional.
+        embedding_mode: Load-time embedding mode (``--embedding``). Optional and
+                        omitted for the default "use precomputed".
+
+    Returns:
+        dict with keys ``"uvx"`` and ``"installed"`` mapping to the two command
+        strings.
+    """
+    args = ["--from", str(source)]
+
+    if filter_expr and str(filter_expr).strip():
+        args += ["--filters", str(filter_expr).strip()]
+
+    mode = (str(embedding_mode).strip() if embedding_mode else "")
+    if mode and mode.lower() != "use precomputed":
+        args += ["--embedding", mode]
+
+    tail = " ".join(shlex.quote(a) for a in args)
+    return {
+        "uvx": f"uvx bigclust2@latest {tail}",
+        "installed": f"bigclust2 {tail}",
+    }
 
 
 def string_to_polars_filter(filter_expr: str) -> pl.Expr:

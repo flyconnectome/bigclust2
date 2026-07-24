@@ -259,6 +259,48 @@ At this point you have a working project:
 uvx bigclust2@latest --from hemibrain_nblast
 ```
 
+## Build it with `ProjectBuilder`
+
+Steps 7 and 8 wrote the parquet files and the `info` JSON by hand so you can see
+exactly what a project is. Once you have the pieces in memory, `ProjectBuilder`
+does that bookkeeping for you — file naming, the `info` schema, and writing a
+shared distance matrix only once when several embeddings reference it:
+
+```python
+from bigclust2 import ProjectBuilder
+
+project = ProjectBuilder(
+    "hemibrain_nblast",
+    name="hemibrain PN NBLAST",
+    dataset="hemibrain:v1.2.1",
+    description="All-by-all NBLAST of olfactory projection neurons.",
+)
+project.set_meta(meta, color_column="color")     # needs id, label, dataset
+project.add_embedding(
+    emb_df,                                       # a 2-column x/y DataFrame
+    name="morphology (NBLAST)",
+    distances=dist,                               # square, IDs on the index
+    distances_type="morphology",
+    distances_metric="nblast",
+)
+project.set_neuroglancer(
+    source="precomputed://gs://neuroglancer-janelia-flyem-hemibrain/v1.2/segmentation",
+    neuropil_mesh="hemibrain_neuropil.ply",       # see step 9
+)
+project.save()
+```
+
+That single call replaces steps 7–9. `add_embedding` can be called more than once
+for a [multiple-embeddings project](../reference/data-format.md#multiple-embeddings);
+`project.register_embeddings()` will landmark-align the extra ones onto the first.
+The class is Qt-free, so it also runs in headless data-prep scripts.
+
+!!! tip "Prefer clicking to scripting?"
+
+    **File → Build Project** in the app is a form over this same class — point it
+    at your tables and it writes the project for you. See
+    [Build Project](../reference/widgets.md#build-project).
+
 ## 9. Wire up the 3D viewer
 
 Selecting points now works, but the 3D viewer is empty — nothing has told

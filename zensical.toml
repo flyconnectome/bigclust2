@@ -65,6 +65,7 @@ nav = [
     { "Command line" = "reference/cli.md" },
     { "Annotation backends" = "reference/backends.md" },
     { "Troubleshooting" = "reference/troubleshooting.md" },
+    { "Changelog" = "reference/changelog.md" },
   ] },
 ]
 

@@ -64,6 +64,14 @@ Error messages and what they mean.
 
 </div>
 
+<div class="bc-card" markdown>
+
+### :material-history: [Changelog](changelog.md)
+
+What changed in each release, newest first.
+
+</div>
+
 </div>
 
 ## Conventions in this documentation

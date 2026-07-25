@@ -96,7 +96,7 @@ uvx bigclust2@latest --version
 ```
 
 ```
-bigclust2 0.1.1
+bigclust2 0.2.0
 ```
 
 That is the fastest confirmation that the install resolved, since it exits before

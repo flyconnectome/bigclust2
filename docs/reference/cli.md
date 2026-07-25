@@ -79,7 +79,7 @@ bigclust2 --version
 ```
 
 ```
-bigclust2 0.1.1
+bigclust2 0.2.0
 ```
 
 Prints and exits before any GUI or GPU code runs, which makes it the fastest way

@@ -3527,7 +3527,7 @@ class MainWindow(QMainWindow):
 
         view._data["meta"] = updated_meta
 
-        self._stamp_meta_sources_updated(info, report)
+        stamp_meta_updated(info, report)
 
         # Meta was just refreshed: re-evaluate the out-of-date banner.
         self._update_meta_staleness_banner()
@@ -3544,23 +3544,6 @@ class MainWindow(QMainWindow):
                 pass
 
         view.fig_scatter.show_message(report.summary(), color="green", duration=4)
-
-    def _stamp_meta_sources_updated(self, info, report):
-        """Record today's date as last_updated on meta + the updated sources."""
-        if not isinstance(info, dict):
-            return
-        today = datetime.now().strftime("%Y-%m-%d")
-        meta = ensure_meta_dict(info)
-        meta["last_updated"] = today
-        sources = meta.get("sources")
-        if isinstance(sources, dict):
-            updated = {d.dataset for d in report.datasets if not d.error}
-            for key, entry in sources.items():
-                if not isinstance(entry, dict):
-                    continue
-                # A single entry can cover several datasets (comma-separated key).
-                if updated.intersection(source_entry_datasets(key, entry)):
-                    entry["last_updated"] = today
 
     def _sync_connectivity_widget(self, view, widget):
         """Sync a connectivity widget to figure selection (idempotent)."""

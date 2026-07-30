@@ -16,10 +16,7 @@ from pathlib import Path
 from abc import ABC, abstractmethod
 from dataclasses import MISSING, dataclass, field, fields as dataclass_fields
 
-try:
-    from ...credentials import raise_for_auth_error
-except ImportError:  # pragma: no cover - script execution fallback
-    from bigclust2.credentials import raise_for_auth_error
+from .credentials import raise_for_auth_error
 
 
 @dataclass(frozen=True)

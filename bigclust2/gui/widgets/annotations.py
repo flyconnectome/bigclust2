@@ -14,12 +14,12 @@ from functools import partial
 from PySide6 import QtCore, QtWidgets
 
 try:
-    from .annotation_backends import BACKEND_REGISTRY
     from .credentials import CredentialsManager
 except ImportError:
     # For testing we need absolute imports
-    from annotation_backends import BACKEND_REGISTRY
     from credentials import CredentialsManager
+
+from ...annotation_backends import BACKEND_REGISTRY
 
 try:
     from ...credentials import MissingCredentialsError, service_key_for_backend

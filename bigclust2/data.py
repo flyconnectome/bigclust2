@@ -342,6 +342,14 @@ class SingleProjectLoader(BaseProjectLoader):
         return self._meta
 
     @property
+    def meta_file(self):
+        """The meta table's file, as declared in ``info`` (relative path or URL).
+
+        Pass it through :meth:`resolve_path` to get something openable.
+        """
+        return self._get_file_spec("meta")
+
+    @property
     def meta_lazy(self):
         """Metadata as a Polars LazyFrame."""
         if not hasattr(self, "_meta_lazy"):

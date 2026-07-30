@@ -46,7 +46,7 @@ from .loaders import OpenProjectDialog
 from .project import Project
 from .tabs import ViewTabWidget
 from ..data import parse_directory, SingleProjectLoader, apply_meta_color
-from ..meta_sources import ensure_meta_dict, source_entry_datasets, parse_meta_sources
+from ..meta_sources import parse_meta_sources, stamp_meta_updated
 from .controls import ScatterControls
 from .widgets.command_palette import (
     COMMAND_PALETTE_ACTION_NAME,

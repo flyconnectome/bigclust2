@@ -43,7 +43,8 @@ The menu bar, item by item, with shortcuts.
 
 ### :material-console: [Command line](cli.md)
 
-`bigclust2` flags and what they do.
+`bigclust2` flags and what they do, plus the `update` command for refreshing a
+project's meta data without opening the app.
 
 </div>
 

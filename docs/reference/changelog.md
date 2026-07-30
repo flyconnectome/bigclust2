@@ -7,6 +7,37 @@ Notable changes to BigClust, newest first. Versions follow
 For the complete commit-level history, see the
 [releases on GitHub](https://github.com/flyconnectome/bigclust2/releases).
 
+## Unreleased
+
+### Fixed
+
+- Meta refresh counts are now reported as **values** (row/column intersections)
+  alongside the number of rows they sit in — "cells" read as the neurons
+  themselves. The share that merely populated a newly added column is called out
+  separately, since that fills every matched row at once and can dwarf the real
+  edits.
+- A value whose source representation differs but which converts back to what is
+  already stored (a source sending `"111"` for an integer column) is no longer
+  counted as a change. It never reached the table, but it was reported on every
+  single run.
+
+### Changed
+
+- `import bigclust2` no longer loads the GUI stack. Qt, pygfx and wgpu are
+  imported the first time the app itself is started, so the Python helpers
+  (`ProjectBuilder`, `update_project_meta`) and `bigclust2 update` now work — and
+  start noticeably faster — on machines with no display or GPU.
+
+### Added
+
+- **Headless meta-data refresh** — `bigclust2 update /path/to/project` pulls
+  current annotations from the project's declared sources and writes them into
+  the project, no window required. `--auto-map` matches columns by name,
+  `--dry-run` shows what would change. Also available as
+  `bigclust2.update_project_meta()` from Python. See [the command line
+  reference](cli.md#update-project) and [refreshing meta
+  data](../how-to/update-meta-data.md#route-3-from-the-command-line).
+
 ## [0.2.0](https://github.com/flyconnectome/bigclust2/compare/v0.1.1...v0.2.0) — 2026-07-25
 
 A large feature release centred on new interactive widgets, a from-scratch

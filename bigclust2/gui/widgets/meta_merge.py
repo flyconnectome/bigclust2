@@ -533,7 +533,7 @@ class MetaMergeDialog(QtWidgets.QDialog):
             lines.append(f"Columns skipped: {', '.join(report.columns_skipped)}")
         if report.columns_failed:
             lines.append(f"Columns failed: {', '.join(report.columns_failed)}")
-        lines.append(f"Cells that would change: {report.cells_changed:,}")
+        lines.append(f"Values that would change: {report.cells_changed:,}")
         if report.cells_skipped_nan:
             lines.append(
                 f"Empty file cells skipped (existing values kept): "

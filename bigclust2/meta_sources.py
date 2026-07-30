@@ -13,14 +13,16 @@ without a GUI.
 from __future__ import annotations
 
 import logging
+import os
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 
-from .gui.widgets.annotation_backends import build_backend
+from .annotation_backends import build_backend
 
 
 logger = logging.getLogger(__name__)
@@ -35,6 +37,11 @@ def _is_reserved(column):
     """Whether a project column must never be a meta-source target."""
     text = str(column)
     return text in RESERVED_COLUMNS or text.startswith("_")
+
+
+def _error_detail(exc):
+    """The message to show for a caught exception, never empty."""
+    return str(exc).strip() or exc.__class__.__name__
 
 
 @dataclass(frozen=True)
@@ -216,6 +223,94 @@ def write_meta_sources(info, specs):
     return info
 
 
+def update_source_columns(info, columns_by_dataset):
+    """Merge fresh column mappings into ``info['meta']['sources']`` (in place).
+
+    Unlike :func:`write_meta_sources`, which rewrites the whole ``sources``
+    block from a list of specs, this only touches the ``columns`` of entries
+    that already exist -- so backends, configs, unknown extra keys and entries
+    for datasets not mentioned here survive verbatim. Existing mappings win over
+    the new ones, which makes it safe to feed auto-matched suggestions in.
+
+    Parameters
+    ----------
+    info :  dict
+            The project's info dict.
+    columns_by_dataset : dict
+            ``{dataset: {project_col: source_col}}``.
+
+    Returns
+    -------
+    list
+        The datasets whose stored mapping actually changed.
+    """
+    if not isinstance(info, dict):
+        return []
+    sources = meta_sources_mapping(info.get("meta"))
+    if not sources:
+        return []
+
+    changed = []
+    for key, entry in sources.items():
+        if not isinstance(entry, dict):
+            continue
+        # One entry can cover several datasets (comma-separated key); they share
+        # the one mapping, so merge every covered dataset's suggestions into it.
+        datasets = [
+            ds for ds in source_entry_datasets(key, entry) if ds in columns_by_dataset
+        ]
+        if not datasets:
+            continue
+
+        stored = entry.get("columns")
+        merged = (
+            {str(k): str(v) for k, v in stored.items()}
+            if isinstance(stored, dict)
+            else {}
+        )
+        added = False
+        for dataset in datasets:
+            for proj, src in (columns_by_dataset.get(dataset) or {}).items():
+                if _is_reserved(proj) or str(proj) in merged or not str(src).strip():
+                    continue
+                merged[str(proj)] = str(src)
+                added = True
+
+        if added:
+            entry["columns"] = merged
+            changed.extend(datasets)
+
+    return changed
+
+
+def stamp_meta_updated(info, report, date=None):
+    """Record ``date`` (default today) as ``last_updated`` on meta + its sources.
+
+    Only the sources whose dataset updated without error are stamped, so a
+    failed pull does not make the snapshot look fresh.
+
+    Returns the date string used, or None if ``info`` is not a dict.
+    """
+    if not isinstance(info, dict):
+        return None
+
+    day = date or datetime.now().strftime("%Y-%m-%d")
+    meta = ensure_meta_dict(info)
+    meta["last_updated"] = day
+
+    sources = meta.get("sources")
+    if isinstance(sources, dict):
+        updated = {d.dataset for d in getattr(report, "datasets", []) if not d.error}
+        for key, entry in sources.items():
+            if not isinstance(entry, dict):
+                continue
+            # A single entry can cover several datasets (comma-separated key).
+            if updated.intersection(source_entry_datasets(key, entry)):
+                entry["last_updated"] = day
+
+    return day
+
+
 def normalize_colname(name):
     """Collapse a column name to a comparable key.
 
@@ -254,6 +349,28 @@ def auto_match_columns(project_cols, source_cols):
     return mapping
 
 
+def discover_source_columns(backend, sample_ids=None):
+    """Return a source's column names, preferring cheap schema accessors.
+
+    Falls back to reading a small sample of ids when the backend cannot report
+    its columns without fetching data.
+    """
+    # Check the class so we don't trigger the property getter just to probe.
+    for attr in ("data_columns", "available_fields"):
+        if hasattr(type(backend), attr):
+            try:
+                cols = list(getattr(backend, attr))
+                if cols:
+                    return cols
+            except Exception:  # noqa: BLE001 - fall back to sampled read
+                pass
+
+    src = backend.read_annotations(ids=sample_ids)
+    if src is None:
+        return []
+    return list(src.columns)
+
+
 @dataclass
 class DatasetUpdateReport:
     """Per-dataset outcome of a meta update."""
@@ -266,8 +383,23 @@ class DatasetUpdateReport:
     columns_added: list = field(default_factory=list)
     columns_skipped: list = field(default_factory=list)
     columns_failed: list = field(default_factory=list)
+    #: The ``{project_col: source_col}`` mapping actually used, which with
+    #: ``auto_map`` includes the matches made against the fetched source.
+    columns_resolved: dict = field(default_factory=dict)
+    #: Individual values changed, i.e. row/column intersections summed over the
+    #: mapped columns - so one row can contribute more than one.
     cells_changed: int = 0
+    #: The part of `cells_changed` that populated a column the table did not
+    #: have before. A new column fills for every matched row at once, which can
+    #: dwarf the edits to existing columns.
+    cells_filled: int = 0
+    #: Rows with at least one changed value.
+    rows_changed: int = 0
     error: str | None = None
+
+    def columns_touched(self):
+        """Sorted set of project columns this dataset updated or added."""
+        return sorted(set(self.columns_updated) | set(self.columns_added))
 
 
 @dataclass
@@ -279,6 +411,22 @@ class UpdateReport:
     @property
     def cells_changed(self):
         return sum(d.cells_changed for d in self.datasets)
+
+    @property
+    def rows_changed(self):
+        # Rows are partitioned by dataset, so per-dataset counts never overlap.
+        return sum(d.rows_changed for d in self.datasets)
+
+    @property
+    def cells_filled(self):
+        return sum(d.cells_filled for d in self.datasets)
+
+    @property
+    def columns_added(self):
+        cols = set()
+        for d in self.datasets:
+            cols.update(d.columns_added)
+        return sorted(cols)
 
     @property
     def ids_missing(self):
@@ -299,17 +447,32 @@ class UpdateReport:
         """Sorted set of project columns updated or added across all datasets."""
         cols = set()
         for d in self.datasets:
-            cols.update(d.columns_updated)
-            cols.update(d.columns_added)
+            cols.update(d.columns_touched())
         return sorted(cols)
 
     def summary(self):
-        """Human-readable one-paragraph summary."""
+        """Human-readable one-paragraph summary.
+
+        Counts are of *values* (one row/column intersection each) and of the
+        rows they sit in — deliberately not called "cells", which in a
+        connectomics table reads as the neurons themselves.
+        """
         n_ds = len([d for d in self.datasets if not d.error])
         parts = [
-            f"Updated {self.cells_changed:,} cells across {n_ds} "
-            f"dataset{'s' if n_ds != 1 else ''}."
+            f"Updated {self.cells_changed:,} values in {self.rows_changed:,} "
+            f"rows across {n_ds} dataset{'s' if n_ds != 1 else ''}."
         ]
+        # A new column fills every matched row at once, so it can account for
+        # most of the count while nothing existing actually changed.
+        if self.cells_filled:
+            added = self.columns_added
+            names = ", ".join(added[:5])
+            if len(added) > 5:
+                names += f" and {len(added) - 5} more"
+            parts.append(
+                f"{self.cells_filled:,} of those populated the new "
+                f"column{'s' if len(added) != 1 else ''} {names}."
+            )
         if self.ids_missing:
             parts.append(f"{self.ids_missing:,} ids not found in their source.")
         failed_cols = self.columns_failed
@@ -346,26 +509,36 @@ def _values_equal(a, b):
     return bool(res)
 
 
-def _count_changed(old, new):
-    """NaN-aware count of differing values (``new`` is assumed all non-null).
+def _changed_mask(old, new):
+    """NaN-aware boolean Series marking where ``old`` and ``new`` differ.
 
-    Falls back to an element-wise comparison when cells hold non-scalar values
-    (e.g. arrays/lists, which some backends return), since the vectorized object
-    comparison raises an ambiguous-truth-value error on those.
+    Symmetric in its arguments: two nulls count as equal, one null as a
+    difference. Falls back to an element-wise comparison when cells hold
+    non-scalar values (e.g. arrays/lists, which some backends return), since the
+    vectorized object comparison raises an ambiguous-truth-value error on those.
     """
     try:
         old_obj = old.astype(object).where(old.notna(), other=pd.NA)
-        new_obj = new.astype(object)
-        changed = old_obj.isna() | (old_obj != new_obj)
-        return int(changed.sum())
+        new_obj = new.astype(object).where(new.notna(), other=pd.NA)
+        old_na, new_na = old_obj.isna(), new_obj.isna()
+        differs = old_obj.ne(new_obj).fillna(True).astype(bool)
+        return ~(old_na & new_na) & (old_na | new_na | differs)
     except (ValueError, TypeError):
-        count = 0
+        flags = []
         for o, n in zip(old.tolist(), new.tolist()):
-            if _isna_scalar(o) and _isna_scalar(n):
-                continue
-            if not _values_equal(o, n):
-                count += 1
-        return count
+            o_na, n_na = _isna_scalar(o), _isna_scalar(n)
+            if o_na or n_na:
+                # Never compare a null against an array: `pd.NA == array` yields
+                # an array of NA, whose truth value raises.
+                flags.append(o_na != n_na)
+            else:
+                flags.append(not _values_equal(o, n))
+        return pd.Series(flags, index=old.index, dtype=bool)
+
+
+def _count_changed(old, new):
+    """NaN-aware count of differing values (see :func:`_changed_mask`)."""
+    return int(_changed_mask(old, new).sum())
 
 
 def _assign_column(out, project_col, target_index, new_vals):
@@ -382,31 +555,51 @@ def _assign_column(out, project_col, target_index, new_vals):
         out.loc[target_index, project_col] = new_vals.astype(object)
 
 
-def _update_one_column(out, ds_report, ids_str, src, project_col, source_col):
-    """Merge one source column into ``out`` for the current dataset's rows."""
+def _update_one_column(
+    out, ds_report, ids_str, src, project_col, source_col, original_columns
+):
+    """Merge one source column into ``out`` for the current dataset's rows.
+
+    ``original_columns`` are the table's columns before any dataset was merged,
+    so a column stays "added" for every dataset that populates it rather than
+    only for whichever one happened to create it first.
+
+    Returns the index labels of the rows whose value actually changed.
+    """
     # Source values aligned to this dataset's masked rows; ids that are absent
     # (or whose source value is null) become NaN and are skipped.
     mapped = ids_str.map(src[source_col])
     found = mapped.notna()
     if not found.any():
-        return
+        return []
 
     target_index = mapped.index[found]
     new_vals = mapped[found]
 
+    is_new_column = project_col not in original_columns
     if project_col not in out.columns:
         out[project_col] = pd.NA
+    if is_new_column:
         ds_report.columns_added.append(project_col)
-        ds_report.cells_changed += int(len(new_vals))
-        _assign_column(out, project_col, target_index, new_vals)
     else:
-        old_vals = out.loc[target_index, project_col]
-        ds_report.cells_changed += _count_changed(old_vals, new_vals)
-        _assign_column(out, project_col, target_index, new_vals)
         ds_report.columns_updated.append(project_col)
 
+    # Compare what lands in the table, not what the source sent: the assignment
+    # coerces to the column's dtype, so a source reporting "111" for a column
+    # holding the integer 111 changes nothing and must not be counted (it would
+    # otherwise report the same change on every single run).
+    old_vals = out.loc[target_index, project_col].copy()
+    _assign_column(out, project_col, target_index, new_vals)
+    changed = _changed_mask(old_vals, out.loc[target_index, project_col])
 
-def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
+    n_changed = int(changed.sum())
+    ds_report.cells_changed += n_changed
+    if is_new_column:
+        ds_report.cells_filled += n_changed
+    return changed.index[changed]
+
+
+def update_meta(meta_df, specs, *, auto_map=False, backends=None, progress_callback=None):
     """Pull fresh annotations and merge them into a copy of ``meta_df``.
 
     The returned DataFrame has the same length, row order and index as
@@ -420,6 +613,11 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
         Project meta data; must have ``id`` and ``dataset`` columns.
     specs : list[MetaSourceSpec]
         One source definition per dataset to refresh.
+    auto_map : bool
+        Also update project columns a spec does not map, where the source has a
+        column of a matching name (see :func:`auto_match_columns`). A spec's own
+        mapping always wins. Each dataset's resolved mapping is reported as
+        ``DatasetUpdateReport.columns_resolved``.
     backends : dict, optional
         Pre-built ``{dataset: AnnotationBackend}`` instances (e.g. already
         validated by the UI). Missing datasets are built via ``build_backend``.
@@ -436,6 +634,12 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
     backends = backends or {}
     total = len(specs)
 
+    # Loop-invariant: the partition key and the mappable columns never change
+    # (only cell values and, at most, appended columns do).
+    datasets = out["dataset"].astype(str)
+    original_columns = set(out.columns)
+    project_cols = [c for c in out.columns if not _is_reserved(c)]
+
     for i, spec in enumerate(specs):
         if progress_callback is not None:
             progress_callback(i, total, spec.dataset)
@@ -443,11 +647,11 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
         ds_report = DatasetUpdateReport(dataset=spec.dataset)
         report.datasets.append(ds_report)
 
-        mask = out["dataset"].astype(str) == str(spec.dataset)
+        mask = datasets == str(spec.dataset)
         ds_report.rows = int(mask.sum())
         if ds_report.rows == 0:
             continue
-        if not spec.columns:
+        if not spec.columns and not auto_map:
             continue
 
         try:
@@ -462,22 +666,32 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
             else:
                 src = _normalize_source_frame(src)
         except Exception as exc:  # noqa: BLE001 - surfaced in the report
-            detail = str(exc).strip() or exc.__class__.__name__
-            ds_report.error = detail
+            ds_report.error = _error_detail(exc)
             logger.warning(
                 "Meta update failed for %s: %s",
                 spec.dataset,
-                detail,
+                ds_report.error,
                 exc_info=True,
             )
             continue
+
+        # The columns we just fetched are also what auto-mapping matches against,
+        # so filling the gaps here costs no extra read of the source.
+        columns = dict(spec.columns)
+        if auto_map:
+            for proj, source_col in auto_match_columns(project_cols, src.columns).items():
+                columns.setdefault(proj, source_col)
+        ds_report.columns_resolved = columns
 
         ids_str = out.loc[mask, "id"].astype(str)
         in_source = ids_str.isin(src.index)
         ds_report.ids_found = int(in_source.sum())
         ds_report.ids_missing = int((~in_source).sum())
 
-        for project_col, source_col in spec.columns.items():
+        # Row labels are collected across columns so a row that changed in
+        # several of them still only counts once.
+        changed_rows = set()
+        for project_col, source_col in columns.items():
             if _is_reserved(project_col):
                 continue
             if source_col not in src.columns:
@@ -487,17 +701,27 @@ def update_meta(meta_df, specs, *, backends=None, progress_callback=None):
             # A single bad column (e.g. odd dtypes) must not abort the rest of
             # the dataset's update.
             try:
-                _update_one_column(out, ds_report, ids_str, src, project_col, source_col)
+                changed_rows.update(
+                    _update_one_column(
+                        out,
+                        ds_report,
+                        ids_str,
+                        src,
+                        project_col,
+                        source_col,
+                        original_columns,
+                    )
+                )
             except Exception as exc:  # noqa: BLE001 - surfaced in the report
-                detail = str(exc).strip() or exc.__class__.__name__
                 ds_report.columns_failed.append(project_col)
                 logger.warning(
                     "Meta update: column '%s' failed for %s: %s",
                     project_col,
                     spec.dataset,
-                    detail,
+                    _error_detail(exc),
                     exc_info=True,
                 )
+        ds_report.rows_changed = len(changed_rows)
 
     if progress_callback is not None:
         progress_callback(total, total, "")
@@ -524,6 +748,37 @@ def read_table(path):
     if path.suffix == ".tsv":
         return pd.read_csv(path, sep="\t")
     return pd.read_csv(path)
+
+
+def write_table(df, path):
+    """Write a DataFrame to `path` in the format its suffix implies, atomically.
+
+    The write twin of :func:`read_table`: the same suffixes round-trip, so a
+    project whose meta table BigClust can open is also one it can save. The data
+    goes to a sibling temp file that is renamed over the target, so a failing or
+    interrupted write cannot leave a half-written table behind.
+    """
+    path = Path(path)
+    writers = {
+        ".parquet": lambda p: df.to_parquet(p),
+        ".feather": lambda p: df.to_feather(p),
+        ".tsv": lambda p: df.to_csv(p, sep="\t", index=False),
+        ".csv": lambda p: df.to_csv(p, index=False),
+    }
+    write = writers.get(path.suffix.lower())
+    if write is None:
+        raise ValueError(
+            f"Don't know how to write a '{path.suffix or path.name}' table: "
+            f"{path}. Supported: {', '.join(writers)}."
+        )
+
+    tmp = path.with_name(f".{path.name}.bigclust2-tmp")
+    try:
+        write(tmp)
+        os.replace(tmp, path)
+    finally:
+        tmp.unlink(missing_ok=True)
+    return path
 
 
 def _norm_key_col(series):
@@ -596,7 +851,7 @@ class LocalMergeReport:
         """Human-readable one-paragraph summary."""
         cols = sorted(set(self.columns_updated) | set(self.columns_added))
         head = (
-            f"Updated {self.cells_changed:,} cells in {self.rows_matched:,} "
+            f"Updated {self.cells_changed:,} values in {self.rows_matched:,} "
             f"matched rows"
         )
         parts = [head + (f" ({', '.join(cols)})." if cols else ".")]

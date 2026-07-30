@@ -117,6 +117,8 @@ annotations](../how-to/push-annotations.md), which is a separate flow with its o
 guard rails — and it writes to the *backend*, never to the project directory.
 
 The project directory is a published artefact. It describes what was true when it
-was built, and BigClust never modifies it in place.
+was built, and the app never modifies it in place — the one thing that does is
+[`bigclust2 update`](../reference/cli.md#update-project), a deliberate,
+explicitly-invoked refresh of the snapshot from those same sources.
 
 Next: [how selection works](selection.md).

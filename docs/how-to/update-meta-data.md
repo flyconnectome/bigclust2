@@ -2,7 +2,8 @@
 
 The `meta` table your project shipped with is a snapshot, taken whenever the
 project was built. Annotations upstream keep moving. This page pulls current
-values in — from a live backend, or from a file someone sent you.
+values in — from a live backend, from a file someone sent you, or [from a
+terminal](#route-3-from-the-command-line) with no window open at all.
 
 **Both routes are read-only with respect to the backend.** Nothing here writes
 anything anywhere. Writing is [pushing annotations](push-annotations.md), which is
@@ -87,12 +88,48 @@ nothing are reported and ignored — and that report is the most useful thing in
 the preview. A join that matches 12 of 4,000 file rows means you picked the wrong
 join column.
 
+## Route 3: from the command line
+
+Use this when the refresh should happen without you watching — on a schedule, in
+a data-prep script, or over a project you keep for other people. It reads the
+same sources as route 1 and writes the result straight into the project
+directory:
+
+```bash
+bigclust2 update /path/to/my_clustering
+```
+
+The sources must already be configured — the command reads the `sources` block
+from the project's [`info` file](../reference/data-format.md#meta-sources), which
+is what **Save sources** in route 1 writes. Add `--auto-map` and it fills in any
+column mapping the project is missing, then stores what it matched.
+
+```bash
+bigclust2 update /path/to/my_clustering --auto-map --dry-run   # look first
+bigclust2 update /path/to/my_clustering --auto-map             # then commit
+```
+
+Same in Python, for a data-prep script:
+
+```python
+import bigclust2
+
+result = bigclust2.update_project_meta("/path/to/my_clustering", auto_map_columns=True)
+print(result.summary())
+```
+
+Unlike the two routes above, this one **does** write to your project: the meta
+table and the `info` file, atomically, keeping the row count and order intact.
+Everything else — the backends, your other files — is left alone. The full flag
+list is in the [command line reference](../reference/cli.md#update-project).
+
 ## Persisting a refresh
 
 !!! warning "Refreshed values live in the session only"
 
-    Neither route writes to your project directory. Close BigClust and the
-    refreshed values are gone; the next run reads the same old `meta` file.
+    Neither route *inside the app* writes to your project directory. Close
+    BigClust and the refreshed values are gone; the next run reads the same old
+    `meta` file.
 
     To keep them, run **Export → Project**. That writes a full snapshot —
     including the updated meta table, the refreshed `last_updated` stamps and any
@@ -100,6 +137,9 @@ join column.
     then on.
 
     See [exporting](export.md#a-full-project-snapshot).
+
+    The exception is [route 3](#route-3-from-the-command-line): `bigclust2
+    update` saves into the project directly, which is the point of it.
 
 ## Checking what changed
 

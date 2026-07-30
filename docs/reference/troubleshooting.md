@@ -74,12 +74,24 @@ See [the id-column trap](data-format.md#distances).
 
 | Symptom | Explanation |
 |---|---|
-| Refreshed meta data is gone after restart | Refreshes live in memory. **Export → Project** to persist. See [persisting a refresh](../how-to/update-meta-data.md#persisting-a-refresh). |
+| Refreshed meta data is gone after restart | Refreshes made *in the app* live in memory. **Export → Project** to persist, or refresh the project on disk with [`bigclust2 update`](cli.md#update-project). See [persisting a refresh](../how-to/update-meta-data.md#persisting-a-refresh). |
 | A clustering is gone after restart | Session state. Cluster tab → **Export**, and load it back with the folder button. |
 | A recomputed embedding is gone after restart | Session state, and it is not included in a project snapshot. Note your parameters and the `Random seed:` to reproduce it. |
 
-None of these are bugs — BigClust never modifies your project directory in place.
-[Why](../concepts/data-sources.md#live-data-stays-live).
+None of these are bugs — nothing in the app modifies your project directory in
+place. [Why](../concepts/data-sources.md#live-data-stays-live). The exception is
+the [`bigclust2 update`](cli.md#update-project) command, which you have to run
+yourself.
+
+## Refreshing meta data from the command line
+
+| Message | Cause and fix |
+|---|---|
+| `Project '…' declares no meta sources` | The project's `info` has no [`sources` block](data-format.md#meta-sources). Configure the sources once in the app (**Meta Data Explorer → Update → From Remote…** → **Save sources**), or write the block by hand. |
+| `No columns mapped for: …` | The source is configured but says nothing about which column feeds which. Re-run with `--auto-map`, or map them in the app. |
+| `Cannot update a remote project in place` | The project is a URL. Snapshot it locally (**Export → Project**) and update the copy. |
+| `… holds N projects, not one` | You pointed at a [collection](data-format.md#multiple-projects). Point at one of the project directories inside it. |
+| `No … credentials found` for one dataset | That backend's token is not set. Export it, or store it in the app under **Window → Credentials** — the command reads those too. The other datasets still update. |
 
 ## Reporting a problem
 

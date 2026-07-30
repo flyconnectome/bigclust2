@@ -186,8 +186,10 @@ explicit `datasets` list in the value:
 Each listed dataset is still matched by its own IDs. Saving from the dialog
 regroups identical setups back into one comma-keyed entry.
 
-Refreshed values live in the session. Use **Export → Project** to persist them.
-See [refreshing meta data](../how-to/update-meta-data.md).
+Refreshed values live in the session. Use **Export → Project** to persist them,
+or refresh the project on disk in the first place with [`bigclust2
+update`](cli.md#update-project). See [refreshing meta
+data](../how-to/update-meta-data.md).
 
 ## `embeddings`
 

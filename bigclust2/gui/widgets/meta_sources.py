@@ -18,17 +18,17 @@ import pandas as pd
 from PySide6 import QtCore, QtWidgets
 
 try:
-    from .annotation_backends import BACKEND_REGISTRY, build_backend
     from .credentials import CredentialsManager
 except ImportError:  # pragma: no cover - script execution fallback
-    from annotation_backends import BACKEND_REGISTRY, build_backend
     from credentials import CredentialsManager
 
+from ...annotation_backends import BACKEND_REGISTRY, build_backend
 from ...credentials import service_key_for_backend
 
 from ...meta_sources import (
     MetaSourceSpec,
     auto_match_columns,
+    discover_source_columns,
     parse_meta_sources,
     update_meta,
     write_meta_sources,
@@ -552,19 +552,7 @@ class MetaSourcesDialog(QtWidgets.QDialog):
 
     def _discover_columns(self, backend, sample_ids):
         """Return a source's column names, preferring cheap schema accessors."""
-        # Check the class so we don't trigger the property getter just to probe.
-        for attr in ("data_columns", "available_fields"):
-            if hasattr(type(backend), attr):
-                try:
-                    cols = list(getattr(backend, attr))
-                    if cols:
-                        return cols
-                except Exception:  # noqa: BLE001 - fall back to sampled read
-                    pass
-        src = backend.read_annotations(ids=sample_ids)
-        if src is None:
-            return []
-        return list(src.columns)
+        return discover_source_columns(backend, sample_ids)
 
     def _on_fetch_finished(self, dataset, columns, error):
         if error is not None:

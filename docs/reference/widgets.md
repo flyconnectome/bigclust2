@@ -182,6 +182,21 @@ for its legend, and use its own sidebar toggle for viewer settings.
 selection to the viewer. Untick it when working with very large selections — see
 [the cost of a big selection](../concepts/selection.md#the-cost-of-a-big-selection).
 
+## Opening the data widgets
+
+The Connectivity Table, Distance Heatmap and Feature Comparison read an
+embedding's features or distances, so what can be opened depends on the
+embedding rather than on the project. In a project with [several
+embeddings](data-format.md#multiple-embeddings) the View entries are therefore
+submenus — **View → Feature Comparison → connectivity (UMAP)** — listing
+embeddings without the data as disabled. See [the View
+menu](menus.md#widget-entries-with-several-embeddings).
+
+A widget opened that way belongs to the embedding you picked: its title carries
+the embedding's name, each embedding gets its own instance, and the active
+embedding is left as it was. The keyboard shortcuts below always open the widget
+for the **active** embedding.
+
 ## Connectivity Table
 
 **View → Connectivity Table** (++shift+cmd+c++). Up- and downstream partners of

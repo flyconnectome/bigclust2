@@ -10,7 +10,9 @@ It needs a `features` matrix. With only distances there is nothing to rank.
 ## Steps
 
 1. Select the first group of neurons in the scatter plot.
-2. **View → Feature Comparison** (++shift+cmd+f++).
+2. **View → Feature Comparison** (++shift+cmd+f++). In a project with [several
+   embeddings](../reference/data-format.md#multiple-embeddings) this is a
+   submenu — pick the embedding whose features you want to compare.
 3. In the **Groups** box, under **Group A**, press **Copy Selection**.
 4. Go back to the scatter plot and select the second group.
 5. Under **Group B**, press **Copy Selection**.

@@ -47,6 +47,7 @@ See [the id-column trap](data-format.md#distances).
 | MDS / PaCMAP / k-means / agglomerative are greyed out | Your project supplies a [KNN graph](data-format.md#knn-graph) rather than a full distance matrix. Those methods need all pairwise distances. |
 | The Embeddings tab has no data source | The project ships only `embeddings` — there is nothing to recompute *from*. See [the data model](../concepts/data-model.md#why-this-decides-what-the-app-can-do). |
 | The Distance Heatmap is disabled | Same reason — KNN-graph projects cannot show a full heatmap. |
+| A widget is disabled although the project has the data | The data belongs to another embedding. With [several embeddings](data-format.md#multiple-embeddings) the View entry is a submenu — pick the embedding there; the entry is greyed out only when no embedding has what the widget needs. |
 | Feature Subset shows no checkboxes | Your `features` file does not use MultiIndex columns. See [features](data-format.md#features). |
 | Ward linkage raises an error | Ward is only defined for Euclidean distances. Use `average` with a precomputed matrix. [Details](../how-to/recluster.md#agglomerative). |
 | Everything is noise (`-1`) after clustering | Either `Min cluster size` is too large, or you are hitting the [singleton rule](../how-to/recluster.md#singletons-become-noise). |

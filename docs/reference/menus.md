@@ -42,6 +42,28 @@ The four widget entries are disabled until a project is loaded. The **Labels**
 settings (except **Show Labels** itself) are remembered across sessions and
 apply to new tabs and windows.
 
+### Widget entries with several embeddings
+
+Whether a widget can be opened depends on the data behind an embedding — a
+connectivity embedding may have features while a morphology one only has
+distances. So in a project with [multiple
+embeddings](data-format.md#multiple-embeddings), the first three entries become
+submenus and you pick the embedding to open the widget for:
+
+```
+View ▸ Feature Comparison ▸ connectivity (UMAP)
+                            morphology (NBLAST) (no features)
+```
+
+Embeddings that lack the data are listed but disabled, saying what they lack;
+the entry itself is disabled only when *none* of them has it. Opening a widget
+this way does not switch the active embedding — the widget is titled with the
+embedding it belongs to, and each embedding gets its own. The keyboard
+shortcuts always open the widget for the **active** embedding.
+
+**Meta Data Explorer** stays a single entry: meta data is shared by all
+embeddings of a project.
+
 ## Selection
 
 | Item | Shortcut | Does |

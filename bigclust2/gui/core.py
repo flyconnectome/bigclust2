@@ -45,7 +45,12 @@ from .docs import DOCS_URL, docs_url, open_docs
 from .loaders import OpenProjectDialog
 from .project import Project
 from .tabs import ViewTabWidget
-from ..data import parse_directory, SingleProjectLoader, apply_meta_color
+from ..data import (
+    parse_directory,
+    SingleProjectLoader,
+    apply_meta_color,
+    embedding_entry_data,
+)
 from ..meta_sources import parse_meta_sources, stamp_meta_updated
 from .controls import ScatterControls
 from .widgets.command_palette import (
@@ -87,6 +92,133 @@ def _is_square_matrix(arr):
         and len(arr.shape) == 2
         and arr.shape[0] == arr.shape[1]
     )
+
+
+def can_open_connectivity_table(data):
+    """Whether the connectivity table can be opened for a `data` dict."""
+    if not isinstance(data, dict):
+        return False
+
+    features = data.get("features")
+    if features is None or not hasattr(features, "shape") or len(features.shape) != 2:
+        return False
+
+    return features.shape[0] > 0 and features.shape[1] > 0
+
+
+def can_open_distances_table(data):
+    """Whether the distance heatmap can be opened for a `data` dict.
+
+    Needs either a square precomputed distance matrix, or a non-empty feature
+    table with at least one numeric column (the heatmap is then computed
+    on-the-fly from the features).
+    """
+    if not isinstance(data, dict):
+        return False
+
+    if _is_square_matrix(data.get("distances")):
+        return True
+
+    features = data.get("features")
+    if isinstance(features, pd.DataFrame) and not features.empty:
+        # Stops at the first numeric column; `select_dtypes` would build a
+        # whole filtered frame, and this runs once per embedding per refresh.
+        return any(pd.api.types.is_numeric_dtype(dt) for dt in features.dtypes)
+
+    return False
+
+
+def can_open_feature_comparison(data):
+    """Whether the feature comparison can be opened for a `data` dict."""
+    if not isinstance(data, dict):
+        return False
+
+    features = data.get("features")
+    meta = data.get("meta")
+    if not isinstance(features, pd.DataFrame) or not isinstance(meta, pd.DataFrame):
+        return False
+
+    return (not features.empty) and (not meta.empty)
+
+
+def can_open_meta_explorer(data):
+    """Whether the meta data explorer can be opened for a `data` dict."""
+    if not isinstance(data, dict):
+        return False
+
+    meta = data.get("meta")
+    return isinstance(meta, pd.DataFrame) and not meta.empty
+
+
+def can_open_find_nearest(data):
+    """Whether the Find Nearest widget can be opened for a `data` dict.
+
+    Needs a metadata table (to filter the pool by) and at least one similarity
+    source: the 2D embedding, a distance matrix, a feature table or a KNN
+    graph. The embedding is available whenever there are points, so this is
+    effectively "a project with coordinates is loaded".
+    """
+    if not isinstance(data, dict):
+        return False
+
+    meta = data.get("meta")
+    if not isinstance(meta, pd.DataFrame) or meta.empty:
+        return False
+
+    if data.get("embeddings") is not None:
+        return True
+    return any(data.get(k) is not None for k in ("distances", "features", "knn"))
+
+
+#: The data-dependent entries in the View menu, in menu order. Everything about
+#: them comes from here: `MainWindow.init_ui` builds the actions, and
+#: `_refresh_view_widget_entries` lays them out and gates them. Whether one can
+#: be opened is decided by `predicate` against a single embedding's data (see
+#: `MainWindow._embedding_data`). Entries with `per_embedding` become a submenu
+#: of embeddings when a view has more than one - the data they need belongs to
+#: an embedding, not to the project, so requiring the user to first switch to
+#: the right embedding just hides the widget from them. Those entries also carry
+#: `missing`: what an embedding lacks, appended to its name when it is disabled.
+VIEW_WIDGET_SPECS = (
+    {
+        "action": "connectivity_table_action",
+        "title": "Connectivity Table",
+        "shortcut": "Shift+Meta+C",
+        "opener": "show_connectivity_table",
+        "predicate": can_open_connectivity_table,
+        "per_embedding": True,
+        "missing": "no features",
+    },
+    {
+        "action": "distances_table_action",
+        "title": "Distance Heatmap",
+        "shortcut": "Shift+Meta+D",
+        "opener": "show_distances_table",
+        "predicate": can_open_distances_table,
+        "per_embedding": True,
+        # A KNN graph is not enough to fill a heatmap, hence "matrix".
+        "missing": "no distance matrix or features",
+    },
+    {
+        "action": "feature_comparison_action",
+        "title": "Feature Comparison",
+        "shortcut": "Shift+Meta+F",
+        "opener": "show_feature_comparison",
+        "predicate": can_open_feature_comparison,
+        "per_embedding": True,
+        "missing": "no features",
+    },
+    {
+        # Meta data is shared by all embeddings of a view, so this one stays a
+        # plain entry no matter how many embeddings there are.
+        "action": "meta_explorer_action",
+        "title": "Meta Data Explorer",
+        "shortcut": "Shift+Meta+M",
+        "opener": "show_meta_explorer",
+        "predicate": can_open_meta_explorer,
+        "per_embedding": False,
+    },
+)
 
 
 __all__ = ["MainWindow", "MainWidget", "main"]
@@ -1446,6 +1578,14 @@ class MainWindow(QMainWindow):
         self.command_action = None
         self.sync_viewer_action = None
         self._hover_columns_menu = None
+        # View menu section holding the data-dependent widget entries: the menu
+        # itself, the action they are inserted before, the per-embedding
+        # submenus currently installed (kept alive by this reference, see the
+        # QMenu note in `init_ui`) and the embedding names they were built for.
+        self._view_widget_menu = None
+        self._view_widget_anchor = None
+        self._view_widget_submenus = {}
+        self._view_widget_signature = None
         self._adopt_view = adopt_view
         self._active_selection_counter = None
         # Signal holder of an in-flight PyPI update check (also the guard
@@ -1691,31 +1831,25 @@ class MainWindow(QMainWindow):
 
         view_menu.addSeparator()
 
-        self.connectivity_table_action = QAction("Connectivity Table", self)
-        self.connectivity_table_action.setShortcut(QKeySequence("Shift+Meta+C"))
-        self.connectivity_table_action.setEnabled(False)
-        self.connectivity_table_action.triggered.connect(self.show_connectivity_table)
-        view_menu.addAction(self.connectivity_table_action)
+        # The data-dependent widget entries (see `VIEW_WIDGET_SPECS`). These
+        # actions are the "open for the active embedding" ones the keyboard
+        # shortcuts fire; `_refresh_view_widget_entries` puts them into the
+        # menu, or replaces them with a per-embedding submenu when the view has
+        # more than one embedding. They are added to the window as well so
+        # their shortcuts keep working while they sit outside the menu.
+        for spec in VIEW_WIDGET_SPECS:
+            action = QAction(spec["title"], self)
+            action.setShortcut(QKeySequence(spec["shortcut"]))
+            action.setEnabled(False)
+            opener = getattr(self, spec["opener"])
+            action.triggered.connect(lambda _checked=False, open_=opener: open_())
+            setattr(self, spec["action"], action)
+            self.addAction(action)
 
-        self.distances_table_action = QAction("Distance Heatmap", self)
-        self.distances_table_action.setShortcut(QKeySequence("Shift+Meta+D"))
-        self.distances_table_action.setEnabled(False)
-        self.distances_table_action.triggered.connect(self.show_distances_table)
-        view_menu.addAction(self.distances_table_action)
-
-        self.feature_comparison_action = QAction("Feature Comparison", self)
-        self.feature_comparison_action.setShortcut(QKeySequence("Shift+Meta+F"))
-        self.feature_comparison_action.setEnabled(False)
-        self.feature_comparison_action.triggered.connect(self.show_feature_comparison)
-        view_menu.addAction(self.feature_comparison_action)
-
-        self.meta_explorer_action = QAction("Meta Data Explorer", self)
-        self.meta_explorer_action.setShortcut(QKeySequence("Shift+Meta+M"))
-        self.meta_explorer_action.setEnabled(False)
-        self.meta_explorer_action.triggered.connect(self.show_meta_explorer)
-        view_menu.addAction(self.meta_explorer_action)
-
-        view_menu.addSeparator()
+        # The widget entries are (re)inserted before this separator.
+        self._view_widget_menu = view_menu
+        self._view_widget_anchor = view_menu.addSeparator()
+        self._refresh_view_widget_entries()
 
         center_menu = view_menu.addMenu("Center")
 
@@ -2638,12 +2772,10 @@ class MainWindow(QMainWindow):
         if button is None:
             return
         view = self.current_view()
-        fig = getattr(view, "fig_scatter", None) if view is not None else None
-        entries = getattr(fig, "embedding_entries", None) or []
-        active = getattr(fig, "active_embedding", None)
-        if len(entries) > 1 and active is not None and 0 <= active < len(entries):
-            name = entries[active].get("name", f"#{active + 1}")
-            button.setText(f"Embedding: {name} ▴")
+        names = self._embedding_names(view)
+        active = self._resolve_embedding(view)
+        if len(names) > 1 and active is not None:
+            button.setText(f"Embedding: {names[active]} ▴")
             button.show()
         else:
             button.setText("")
@@ -2660,13 +2792,11 @@ class MainWindow(QMainWindow):
         menu.clear()
         view = self.current_view()
         fig = getattr(view, "fig_scatter", None) if view is not None else None
-        entries = getattr(fig, "embedding_entries", None) or []
-        active = getattr(fig, "active_embedding", None)
+        active = self._resolve_embedding(view)
         group = QActionGroup(menu)
         group.setExclusive(True)
-        for idx, entry in enumerate(entries):
-            name = entry.get("name", f"#{idx + 1}")
-            act = menu.addAction(str(name))
+        for idx, name in enumerate(self._embedding_names(view)):
+            act = menu.addAction(name)
             act.setCheckable(True)
             act.setChecked(idx == active)
             group.addAction(act)
@@ -2924,133 +3054,199 @@ class MainWindow(QMainWindow):
         parent.activateWindow()
         self.close()
 
-    def _can_open_connectivity_table(self):
-        """Whether the connectivity table can be opened for the current project."""
-        if not hasattr(self, "_data") or not isinstance(self._data, dict):
-            return False
+    def _embedding_entries(self, view):
+        """The embedding entries of a view's figure (empty list if there are none)."""
+        fig = getattr(view, "fig_scatter", None) if view is not None else None
+        return (getattr(fig, "embedding_entries", None) or []) if fig is not None else []
 
-        features = self._data.get("features")
-        if (
-            features is None
-            or not hasattr(features, "shape")
-            or len(features.shape) != 2
-        ):
-            return False
+    def _embedding_names(self, view):
+        """Display names of a view's embeddings, in menu/switcher order."""
+        return [
+            str(entry.get("name", f"#{i + 1}"))
+            for i, entry in enumerate(self._embedding_entries(view))
+        ]
 
-        return features.shape[0] > 0 and features.shape[1] > 0
+    def _resolve_embedding(self, view, embedding=None):
+        """Resolve `embedding` to a valid index into a view's entries, or None.
 
-    def _can_open_distances_table(self):
-        """Whether the distance heatmap can be opened for the current project.
-
-        Enabled when the active embedding has a square precomputed distance
-        matrix, or a non-empty feature table with at least one numeric column
-        (the heatmap is then computed on-the-fly from the features).
+        None (or an index out of range) means the active embedding; None comes
+        back when the view has no embeddings to speak of. The single place the
+        "which embedding is meant" rule lives, so the data and the widget-cache
+        key derived from it can never disagree.
         """
-        if not hasattr(self, "_data") or not isinstance(self._data, dict):
-            return False
+        entries = self._embedding_entries(view)
+        if embedding is None or not (0 <= embedding < len(entries)):
+            fig = getattr(view, "fig_scatter", None) if view is not None else None
+            embedding = getattr(fig, "active_embedding", None) if fig is not None else None
+        if embedding is None or not (0 <= embedding < len(entries)):
+            return None
+        return embedding
 
-        if _is_square_matrix(self._data.get("distances")):
-            return True
+    def _embedding_data(self, view, embedding=None):
+        """Data of one of a view's embeddings, shaped like ``view._data``.
 
-        features = self._data.get("features")
-        if isinstance(features, pd.DataFrame) and not features.empty:
-            return features.select_dtypes(include="number").shape[1] > 0
-
-        return False
-
-    def _can_open_feature_comparison(self):
-        """Whether the feature comparison can be opened for the current project."""
-        if not hasattr(self, "_data") or not isinstance(self._data, dict):
-            return False
-
-        features = self._data.get("features")
-        meta = self._data.get("meta")
-        if not isinstance(features, pd.DataFrame) or not isinstance(meta, pd.DataFrame):
-            return False
-
-        return (not features.empty) and (not meta.empty)
-
-    def _can_open_meta_explorer(self):
-        if not hasattr(self, "_data") or not isinstance(self._data, dict):
-            return False
-
-        meta = self._data.get("meta")
-        if not isinstance(meta, pd.DataFrame):
-            return False
-
-        return not meta.empty
-
-    def _can_open_find_nearest(self):
-        """Whether the Find Nearest widget can be opened for the current project.
-
-        Needs a metadata table (to filter the pool by) and at least one
-        similarity source: the 2D embedding, a distance matrix, a feature table
-        or a KNN graph. The embedding is available whenever there are points, so
-        this is effectively "a project with coordinates is loaded".
+        Meta data is view-level; the artifacts come from the embedding's entry.
+        This is what lets the `can_open_*` predicates be asked about *any*
+        embedding rather than only the active one. Falls back to the view's own
+        data when there are no entries (projects without embeddings).
         """
-        if not hasattr(self, "_data") or not isinstance(self._data, dict):
-            return False
+        if view is None:
+            return {}
 
-        meta = self._data.get("meta")
-        if not isinstance(meta, pd.DataFrame) or meta.empty:
-            return False
-
-        if self._data.get("embeddings") is not None:
-            return True
-        return any(
-            self._data.get(k) is not None for k in ("distances", "features", "knn")
-        )
+        data = view._data if isinstance(getattr(view, "_data", None), dict) else {}
+        idx = self._resolve_embedding(view, embedding)
+        if idx is None:
+            return data
+        return {**data, **embedding_entry_data(self._embedding_entries(view)[idx], idx)}
 
     def _update_view_actions(self):
         """Update View menu action states."""
-        if self.connectivity_table_action is not None:
-            self.connectivity_table_action.setEnabled(
-                self._can_open_connectivity_table()
-            )
+        view = self.current_view()
+        active_data = self._embedding_data(view)
+        self._refresh_view_widget_entries(view, active_data)
         if self.find_nearest_action is not None:
-            self.find_nearest_action.setEnabled(self._can_open_find_nearest())
-        if self.distances_table_action is not None:
-            self.distances_table_action.setEnabled(self._can_open_distances_table())
-        if self.feature_comparison_action is not None:
-            self.feature_comparison_action.setEnabled(self._can_open_feature_comparison())
-        if self.meta_explorer_action is not None:
-            self.meta_explorer_action.setEnabled(self._can_open_meta_explorer())
+            self.find_nearest_action.setEnabled(can_open_find_nearest(active_data))
         if self.command_action is not None:
             self.command_action.setEnabled(
                 self._current_project_loader is not None
             )
 
-    def _active_embedding_key(self, view):
-        """Return ``(key, name)`` identifying the active embedding for a view.
+    def _refresh_view_widget_entries(self, view=None, active_data=None):
+        """(Re)build the data-dependent section of the View menu.
 
-        `key` keys the per-embedding widget caches (the active embedding index,
-        or a sentinel when there are no entries). `name` is the embedding's
-        display name, used in widget titles - only set when more than one
-        embedding exists, so single-embedding projects keep plain titles.
+        With at most one embedding the entries are plain actions. With several,
+        each per-embedding widget becomes a submenu of embeddings, so opening
+        it for an embedding no longer requires switching to that embedding
+        first. Embeddings lacking the required data are still listed, disabled
+        and annotated with what they lack; when none of them has it the entry
+        as a whole is disabled, as before.
+
+        `view` and `active_data` are what `_update_view_actions` already has in
+        hand; both are looked up when omitted.
         """
-        fig = getattr(view, "fig_scatter", None)
-        idx = getattr(fig, "active_embedding", None) if fig is not None else None
-        entries = (getattr(fig, "embedding_entries", None) or []) if fig is not None else []
+        menu = self._view_widget_menu
+        if menu is None:
+            return
+
+        if view is None:
+            view = self.current_view()
+        if active_data is None:
+            active_data = self._embedding_data(view)
+        names = self._embedding_names(view)
+
+        # Restructuring is only needed when the embeddings themselves change;
+        # the data behind them can change on its own (a meta merge, pruning a
+        # view), which only moves enabled states.
+        signature = tuple(names)
+        if signature != self._view_widget_signature:
+            self._rebuild_view_widget_entries(names)
+            self._view_widget_signature = signature
+
+        # One data dict per embedding, shared by every entry that asks about it.
+        per_embedding_data = (
+            [self._embedding_data(view, idx) for idx in range(len(names))]
+            if self._view_widget_submenus
+            else []
+        )
+
+        for spec in VIEW_WIDGET_SPECS:
+            action = getattr(self, spec["action"], None)
+            if action is None:
+                continue
+
+            # The action itself always targets the active embedding - that is
+            # what its keyboard shortcut does, whether or not it is in the menu.
+            predicate = spec["predicate"]
+            action.setEnabled(predicate(active_data))
+
+            submenu, items = self._view_widget_submenus.get(
+                spec["action"], (None, [])
+            )
+            if submenu is None:
+                continue
+
+            available = False
+            for idx, item in enumerate(items):
+                ok = predicate(per_embedding_data[idx])
+                item.setEnabled(ok)
+                item.setText(names[idx] if ok else f"{names[idx]} ({spec['missing']})")
+                available = available or ok
+            submenu.menuAction().setEnabled(available)
+
+    def _rebuild_view_widget_entries(self, names):
+        """Lay out the View menu's widget entries for `names` embeddings."""
+        menu = self._view_widget_menu
+        anchor = self._view_widget_anchor
+
+        # `removeAction` is a no-op for an action the menu does not hold, so
+        # this clears whichever of the two layouts is currently installed.
+        for submenu, _items in self._view_widget_submenus.values():
+            menu.removeAction(submenu.menuAction())
+            submenu.deleteLater()
+        self._view_widget_submenus = {}
+
+        per_embedding = len(names) > 1
+        for spec in VIEW_WIDGET_SPECS:
+            action = getattr(self, spec["action"], None)
+            if action is None:
+                continue
+            menu.removeAction(action)
+
+            if not (per_embedding and spec["per_embedding"]):
+                menu.insertAction(anchor, action)
+                continue
+
+            # Parented to the window rather than created by `addMenu` for the
+            # gc reason described in `init_ui`; the items are parented to the
+            # submenu so they go away with it.
+            submenu = QMenu(action.text(), self)
+            opener = getattr(self, spec["opener"])
+            items = []
+            for idx, name in enumerate(names):
+                item = QAction(name, submenu)
+                item.triggered.connect(
+                    lambda _checked=False, i=idx, open_=opener: open_(embedding=i)
+                )
+                submenu.addAction(item)
+                items.append(item)
+            menu.insertMenu(anchor, submenu)
+            self._view_widget_submenus[spec["action"]] = (submenu, items)
+
+    def _embedding_key(self, view, embedding=None):
+        """Return ``(key, name)`` identifying one of a view's embeddings.
+
+        `key` keys the per-embedding widget caches (the embedding index, or a
+        sentinel when there are no entries). `name` is the embedding's display
+        name, used in widget titles - only set when more than one embedding
+        exists, so single-embedding projects keep plain titles. `embedding` is
+        resolved as in `_embedding_data`, so key and data always describe the
+        same embedding.
+        """
+        entries = self._embedding_entries(view)
+        idx = self._resolve_embedding(view, embedding)
+
         name = None
-        if idx is not None and 0 <= idx < len(entries) and len(entries) > 1:
+        if idx is not None and len(entries) > 1:
             name = str(entries[idx].get("name", ""))
         key = idx if idx is not None else "__default__"
         return key, name
 
-    def show_connectivity_table(self):
-        """Open the connectivity table for the active embedding of the current view.
+    def show_connectivity_table(self, embedding=None):
+        """Open the connectivity table for an embedding of the current view.
 
-        Widgets are cached per embedding, so switching embeddings and reopening
-        gives each embedding its own table (showing that embedding's features).
+        `embedding` is an index into the view's embeddings; None means the
+        active one. Widgets are cached per embedding, so each embedding gets
+        its own table (showing that embedding's features).
         """
-        if not self._can_open_connectivity_table():
-            return
-
         view = self.current_view()
         if view is None:
             return
 
-        key, emb_name = self._active_embedding_key(view)
+        data = self._embedding_data(view, embedding)
+        if not can_open_connectivity_table(data):
+            return
+
+        key, emb_name = self._embedding_key(view, embedding)
 
         existing = view._connectivity_widgets.get(key)
         if existing is not None:
@@ -3063,7 +3259,6 @@ class MainWindow(QMainWindow):
                 # Underlying Qt object was deleted elsewhere; rebuild on demand.
                 view._connectivity_widgets.pop(key, None)
 
-        data = view._data if isinstance(view._data, dict) else {}
         features = data.get("features")
         meta_data = data.get("meta")
         fig = view.fig_scatter
@@ -3101,14 +3296,14 @@ class MainWindow(QMainWindow):
         Cached per embedding, so switching embeddings and reopening gives each
         embedding its own finder (using that embedding's similarity data).
         """
-        if not self._can_open_find_nearest():
-            return
-
         view = self.current_view()
         if view is None:
             return
 
-        key, emb_name = self._active_embedding_key(view)
+        if not can_open_find_nearest(self._embedding_data(view)):
+            return
+
+        key, emb_name = self._embedding_key(view)
 
         existing = view._find_nearest_widgets.get(key)
         if existing is not None:
@@ -3139,20 +3334,22 @@ class MainWindow(QMainWindow):
             lambda _obj=None, w=widget, f=fig: f.unsync_widget(w)
         )
 
-    def show_feature_comparison(self):
-        """Open the Feature Comparison for the active embedding of the current view.
+    def show_feature_comparison(self, embedding=None):
+        """Open the Feature Comparison for an embedding of the current view.
 
-        Cached per embedding so each embedding gets its own widget (showing
-        that embedding's features).
+        `embedding` is an index into the view's embeddings; None means the
+        active one. Cached per embedding so each embedding gets its own widget
+        (showing that embedding's features).
         """
-        if not self._can_open_feature_comparison():
-            return
-
         view = self.current_view()
         if view is None:
             return
 
-        key, emb_name = self._active_embedding_key(view)
+        data = self._embedding_data(view, embedding)
+        if not can_open_feature_comparison(data):
+            return
+
+        key, emb_name = self._embedding_key(view, embedding)
 
         existing = view._feature_comparison_widgets.get(key)
         if existing is not None:
@@ -3162,7 +3359,6 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 view._feature_comparison_widgets.pop(key, None)
 
-        data = view._data if isinstance(view._data, dict) else {}
         features = data.get("features")
         meta_data = data.get("meta")
         if features is None or meta_data is None:
@@ -3191,11 +3387,12 @@ class MainWindow(QMainWindow):
 
     def show_meta_explorer(self):
         """Open the meta data explorer dialog for the current view's project."""
-        if not self._can_open_meta_explorer():
-            return
-
         view = self.current_view()
         if view is None:
+            return
+
+        data = self._embedding_data(view)
+        if not can_open_meta_explorer(data):
             return
 
         existing = view._meta_explorer_dialog
@@ -3206,7 +3403,6 @@ class MainWindow(QMainWindow):
             except RuntimeError:
                 view._meta_explorer_dialog = None
 
-        data = view._data if isinstance(view._data, dict) else {}
         meta_data = data.get("meta")
         if meta_data is None:
             return
@@ -3716,16 +3912,20 @@ class MainWindow(QMainWindow):
             # Qt object may already be deleted.
             pass
 
-    def show_distances_table(self):
-        """Open the pairwise distance heatmap widget for the current view's project."""
-        if not self._can_open_distances_table():
-            return
+    def show_distances_table(self, embedding=None):
+        """Open the pairwise distance heatmap for an embedding of the current view.
 
+        `embedding` is an index into the view's embeddings; None means the
+        active one.
+        """
         view = self.current_view()
         if view is None:
             return
 
-        data = view._data if isinstance(view._data, dict) else {}
+        data = self._embedding_data(view, embedding)
+        if not can_open_distances_table(data):
+            return
+
         distances = data.get("distances")
         features = data.get("features")
         meta_data = data.get("meta")
@@ -3742,7 +3942,7 @@ class MainWindow(QMainWindow):
         if not has_matrix and not use_features:
             return
 
-        _key, emb_name = self._active_embedding_key(view)
+        _key, emb_name = self._embedding_key(view, embedding)
         title = "Distance heatmap"
         if emb_name:
             title = f"Distance heatmap — {emb_name}"

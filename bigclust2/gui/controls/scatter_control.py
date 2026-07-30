@@ -20,6 +20,7 @@ from ...embeddings import (
     sanitize_embedding,
 )
 from ...clusters import evaluate_clustering_sample
+from ...data import embedding_entry_data
 from ...utils import labels_to_colors, is_color_column
 from .toggle_dialog import TabToggleDialog
 from .filters import (
@@ -3227,12 +3228,7 @@ class ScatterControls(QtWidgets.QWidget):
         if active is None or not (0 <= active < len(entries)):
             return
 
-        entry = entries[active]
-        owner._data["embeddings"] = entry["embedding"]
-        owner._data["features"] = entry["features"]
-        owner._data["distances"] = entry["distances"]
-        owner._data["knn"] = entry.get("knn")
-        owner._data["active_embedding"] = active
+        owner._data.update(embedding_entry_data(entries[active], active))
 
         # Menu enablement reflects the active tab only.
         window = owner.window()

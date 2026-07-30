@@ -23,6 +23,15 @@ For the complete commit-level history, see the
 
 ### Changed
 
+- **Widgets are opened per embedding.** In a project with several embeddings,
+  **View → Connectivity Table / Distance Heatmap / Feature Comparison** are now
+  submenus listing the embeddings, so a widget no longer has to be reached by
+  first switching to the embedding that happens to hold its data. Embeddings
+  without the required data are listed but disabled, saying what they lack; the
+  entry itself is greyed out only when no embedding has it. Projects with a
+  single embedding are unchanged, and the keyboard shortcuts still open the
+  widget for the active embedding. See [the View
+  menu](menus.md#widget-entries-with-several-embeddings).
 - `import bigclust2` no longer loads the GUI stack. Qt, pygfx and wgpu are
   imported the first time the app itself is started, so the Python helpers
   (`ProjectBuilder`, `update_project_meta`) and `bigclust2 update` now work — and

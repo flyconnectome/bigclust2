@@ -18,6 +18,23 @@ from .utils import is_url, string_to_polars_filter, Url, check_finite_features
 logger = logging.getLogger(__name__)
 
 
+def embedding_entry_data(entry, index):
+    """The dataset keys an embedding entry supplies, as a dict.
+
+    Datasets mirror one embedding's artifacts into their top-level keys (the
+    "active" embedding). This is the single definition of that mapping: the
+    loader uses it for the initially active entry, the GUI when the user
+    switches embedding or asks a widget about a specific one.
+    """
+    return {
+        "embeddings": entry.get("embedding"),
+        "features": entry.get("features"),
+        "distances": entry.get("distances"),
+        "knn": entry.get("knn"),
+        "active_embedding": index,
+    }
+
+
 def parse_directory(path):
     """Parse a BigClust dataset directory.
 
@@ -1076,11 +1093,7 @@ class SingleProjectLoader(BaseProjectLoader):
             # The first embedding is the active one; mirror its artifacts into the
             # top-level keys for backward compatibility.
             data["embedding_entries"] = entries
-            data["active_embedding"] = 0
-            data["embeddings"] = entries[0]["embedding"]
-            data["features"] = entries[0]["features"]
-            data["distances"] = entries[0]["distances"]
-            data["knn"] = entries[0]["knn"]
+            data.update(embedding_entry_data(entries[0], 0))
 
         apply_meta_color(data["meta"], self.info)
 

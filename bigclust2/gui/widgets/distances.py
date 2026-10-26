@@ -9,12 +9,15 @@ from PySide6.QtCore import Qt
 from scipy.cluster.hierarchy import linkage, leaves_list
 from scipy.spatial.distance import squareform
 
+from ...embeddings import HEATMAP_LIMIT, heatmap_too_big
+
 from bigclust2.embeddings import distance_matrix_from_features
 
 # Feature mode computes distances for the current selection only. Beyond this
 # many neurons both the O(k^2) compute and the QTableView render are too heavy,
-# so we show a hint instead of computing.
-MAX_HEATMAP_SELECTION = 5000
+# so we show a hint instead of computing. The limit lives with the other
+# size limits so that one place describes what a large project cannot do.
+MAX_HEATMAP_SELECTION = HEATMAP_LIMIT.max_points
 
 logger = logging.getLogger(__name__)
 
@@ -576,7 +579,7 @@ class DistancesTable(QtWidgets.QWidget):
             self._table.show()
             return
         self._oversize_label.setText(
-            f"Selection too large ({n:,} neurons).\n"
+            f"{heatmap_too_big(n)}\n"
             f"Select ≤ {MAX_HEATMAP_SELECTION:,} to view the distance heatmap."
         )
         self._table.hide()

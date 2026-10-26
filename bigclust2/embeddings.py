@@ -6,7 +6,7 @@ import numpy as np
 
 from sklearn.neighbors import NearestNeighbors
 
-from .utils import check_finite_features
+from .utils import MethodLimit, check_finite_features
 
 
 @dataclass
@@ -551,6 +551,55 @@ def _knn_from_features(data, k, metric, algorithm="auto"):
         out[i] = row[:k]
 
     return out
+
+
+#: Point count past which walking every point's neighbourhood stops being
+#: something you wait for. Measured on an M3 Max with 10-D features: 20k in
+#: 1.2s, 100k in 9s - roughly linear, so this is patience rather than memory,
+#: and 250k already means a ~20s freeze.
+FIDELITY_LIMIT = MethodLimit(
+    250_000,
+    "it compares every point's neighbours before and after embedding, twice",
+)
+
+#: KNN edges run the same neighbour search and then build one line segment per
+#: edge on top of it, so they cap where fidelity does.
+KNN_EDGE_LIMIT = MethodLimit(
+    FIDELITY_LIMIT.max_points,
+    "it searches every point's neighbours and then draws a line per edge",
+)
+
+#: A heatmap is a square of cells, so it is bounded by what can be read as
+#: much as by what can be computed.
+HEATMAP_LIMIT = MethodLimit(
+    5_000, "a heatmap holds a cell for every pair of points"
+)
+
+#: Comparing feature distributions between two groups keeps a row index per
+#: point in Python, which outgrows the statistics long before they do.
+FEATURE_COMPARISON_LIMIT = MethodLimit(
+    1_000_000, "it keeps a row index per point to build the two groups"
+)
+
+
+def fidelity_too_big(n):
+    """Whether fidelity can be scored for `n` points. `TooBig` if not."""
+    return FIDELITY_LIMIT.check("Scoring neighbourhood fidelity", n)
+
+
+def knn_edges_too_big(n):
+    """Whether KNN edges can be drawn for all of `n` points."""
+    return KNN_EDGE_LIMIT.check("Drawing KNN edges for every point", n)
+
+
+def heatmap_too_big(n):
+    """Whether a distance heatmap can be shown for `n` selected points."""
+    return HEATMAP_LIMIT.check("The distance heatmap", n)
+
+
+def feature_comparison_too_big(n):
+    """Whether feature comparison can run over a project of `n` points."""
+    return FEATURE_COMPARISON_LIMIT.check("Feature comparison", n)
 
 
 def neighborhood_fidelity(

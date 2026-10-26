@@ -11,9 +11,67 @@ import scipy.cluster.hierarchy as sch
 
 from scipy.spatial.distance import squareform, pdist
 
-from .utils import check_finite_features
+from .utils import MethodLimit, check_finite_features
 
 logger = logging.getLogger(__name__)
+
+
+#: Measured on 2-D input on an M3 Max. The caps sit where a method still
+#: returns in a handful of seconds and a few GB, not at the last point it
+#: technically completes - a method that takes two minutes and 11GB has
+#: stopped being something you try out. Note the measurements are 2-D:
+#: clustering feature vectors of higher dimension costs more at the same
+#: point count, so these are upper bounds.
+CLUSTERING_LIMITS = {
+    # 20k in 3.8GB, 40k in 11GB. This one does not get slow, it takes the
+    # machine down, which is why it is the only blocking cap.
+    "Agglomerative": MethodLimit(
+        25_000,
+        "it builds every pairwise distance, so its memory grows with the "
+        "square of the point count",
+        blocking=True,
+    ),
+    # 50k in 4.5s, 200k in 89s.
+    "HDBSCAN": MethodLimit(100_000, "its cost grows faster than the point count"),
+    # 20k in 2.2s.
+    "Spectral": MethodLimit(50_000, "its cost grows faster than the point count"),
+    # 1M in 1.7s, 5M in 7.3s - linear, so no cap is worth setting.
+    "K-Means": MethodLimit(None, "it scales with the point count"),
+}
+
+#: Per scoring method, because they do not cost the same thing: silhouette
+#: compares every pair (20k in 1.5s, 40k in 5.7s) while neighbour consistency
+#: is a k-nearest-neighbour search, which is the same shape as fidelity.
+LABEL_EVALUATION_LIMITS = {
+    "silhouette": MethodLimit(50_000, "scoring compares every pair of points"),
+    "neighbor_consistency": MethodLimit(
+        250_000, "it searches every point's neighbours"
+    ),
+}
+
+
+def clustering_limit(method):
+    """Largest input `method` can cluster, or None if it has no practical cap.
+
+    Unknown methods are uncapped - a new one should be measured and added to
+    `CLUSTERING_LIMITS` rather than silently inheriting someone else's ceiling.
+    Also the accessor `tests/test_clustering_limits.py` checks the documented
+    limits against.
+    """
+    spec = CLUSTERING_LIMITS.get(method)
+    return None if spec is None else spec.max_points
+
+
+def clustering_too_big(method, n):
+    """Whether `method` can cluster `n` points. `TooBig` if not, else None."""
+    spec = CLUSTERING_LIMITS.get(method)
+    return None if spec is None else spec.check(f"{method} clustering", n)
+
+
+def label_evaluation_too_big(method, n):
+    """Whether cluster labels can be scored for `n` points with `method`."""
+    spec = LABEL_EVALUATION_LIMITS.get(method)
+    return None if spec is None else spec.check("Evaluating cluster labels", n)
 
 
 def run_clustering(

@@ -1,5 +1,6 @@
 import re
 import logging
+from dataclasses import replace
 import warnings
 import pyperclip
 
@@ -12,6 +13,8 @@ from concurrent.futures import ThreadPoolExecutor
 
 from ...embeddings import (
     estimate_embedding_input_bytes,
+    fidelity_too_big,
+    knn_edges_too_big,
     is_knn_graph,
     is_precomputed_distance_matrix,
     make_embedding_estimator,
@@ -19,7 +22,11 @@ from ...embeddings import (
     prepare_embedding_input,
     sanitize_embedding,
 )
-from ...clusters import evaluate_clustering_sample
+from ...clusters import (
+    clustering_too_big,
+    evaluate_clustering_sample,
+    label_evaluation_too_big,
+)
 from ...data import embedding_entry_data
 from ...utils import labels_to_colors, is_color_column, sorted_unique
 from .toggle_dialog import TabToggleDialog
@@ -1934,23 +1941,94 @@ class ScatterControls(QtWidgets.QWidget):
         # so re-sync which method-specific settings are shown + input controls.
         self._update_cluster_method_settings()
 
-    def _populate_cluster_methods(self, is_knn=False):
-        """Populate the clustering method combo, limited to HDBSCAN/Spectral for KNN."""
-        combo = self.cluster_method_combo_box
-        methods = (
-            ["HDBSCAN", "Spectral"]
-            if is_knn
-            else ["HDBSCAN", "Agglomerative", "K-Means", "Spectral"]
+    #: Clustering methods offered, and the subset a KNN graph supports. Named
+    #: here rather than inline so the limits in `clusters.CLUSTERING_LIMITS`
+    #: can be checked against what is actually offered.
+    _CLUSTER_METHODS = ("HDBSCAN", "Agglomerative", "K-Means", "Spectral")
+    _CLUSTER_METHODS_KNN = ("HDBSCAN", "Spectral")
+
+    def _allow_clustering(self, method=None, note=""):
+        """Gate a clustering run against the current input size.
+
+        `note` is appended when the caller costs more than a single run -
+        searching k, for instance, runs the method once per candidate, so the
+        cap it is measured against understates what is about to happen.
+        """
+        too_big = clustering_too_big(
+            method or self._current_cluster_method(), self._clustering_input_size()
         )
-        current = combo.currentText()
+        if too_big is not None and note:
+            too_big = replace(too_big, reason=f"{too_big.reason}, and {note}")
+        return self._allow_expensive(too_big)
+
+    @staticmethod
+    def _untick(check):
+        """Clear a checkbox without re-entering its own handler."""
+        check.blockSignals(True)
+        check.setChecked(False)
+        check.blockSignals(False)
+
+    def _current_cluster_method(self):
+        """The clustering method the combo has selected.
+
+        Not `currentText()`: a method that cannot run at this size shows its
+        limit in the label, so the name is kept in the item data.
+        """
+        combo = self.cluster_method_combo_box
+        method = combo.currentData()
+        return combo.currentText() if method is None else method
+
+    def _clustering_input_size(self):
+        """How many points the clustering would run over."""
+        n, _ = estimate_embedding_input_bytes(self._selected_clustering_data())
+        return n
+
+    def _populate_cluster_methods(self, is_knn=False):
+        """Populate the clustering method combo, limited to HDBSCAN/Spectral for KNN.
+
+        Methods that cannot handle the current point count are listed but
+        disabled, with the reason in the tooltip - the same treatment the View
+        menu gives a widget whose data is missing. Leaving them selectable
+        would mean a project large enough to need the limit is also one where
+        picking the wrong method exhausts the machine.
+        """
+        combo = self.cluster_method_combo_box
+        methods = list(self._CLUSTER_METHODS_KNN if is_knn else self._CLUSTER_METHODS)
+        n = self._clustering_input_size()
+        # The method name, not the label: a barred method shows its limit in
+        # the text, so `currentText()` would not round-trip through `usable`.
+        current = self._current_cluster_method()
+        usable = []
         combo.blockSignals(True)
         combo.clear()
-        combo.addItems(methods)
+        for method in methods:
+            # Only a blocking limit takes a method away. One that is merely
+            # slow stays pickable and asks before it runs.
+            too_big = clustering_too_big(method, n)
+            barred = too_big is not None and too_big.blocking
+            # The limit goes in the item text, not only the tooltip: a
+            # disabled item's tooltip is not reachable in every Qt style, and
+            # the View menu already spells its reasons out the same way. The
+            # name then lives in the item data, since the text is no longer it.
+            combo.addItem(
+                f"{method} (max {too_big.limit:,})" if barred else method, method
+            )
+            if barred:
+                # Qt has no per-item "disabled" flag on a combo, so clear the
+                # enabled bit on the item itself.
+                item = combo.model().item(combo.count() - 1)
+                item.setEnabled(False)
+                item.setToolTip(str(too_big))
+            else:
+                usable.append(method)
         combo.blockSignals(False)
-        if current in methods:
-            combo.setCurrentText(current)
-        elif methods:
-            combo.setCurrentIndex(0)
+
+        # `usable` is only empty if every method were barred, which cannot
+        # happen while one of them is uncapped - fall back rather than raise.
+        usable = usable or list(methods)
+        combo.setCurrentIndex(
+            combo.findData(current if current in usable else usable[0])
+        )
 
     def _update_homogeneous_label_options(self):
         """Populate homogeneous-composition label source choices."""
@@ -2015,19 +2093,19 @@ class ScatterControls(QtWidgets.QWidget):
         if hasattr(self, "cluster_kmeans_choose_k_button"):
             self.cluster_kmeans_choose_k_button.setEnabled(
                 not is_precomputed and not is_knn
-                and self.cluster_method_combo_box.currentText() == "K-Means"
+                and self._current_cluster_method() == "K-Means"
             )
         if hasattr(self, "cluster_spectral_choose_k_button"):
             # "Find k" needs a full distance matrix (silhouette/precomputed),
             # which a KNN graph cannot provide.
             self.cluster_spectral_choose_k_button.setEnabled(
                 not is_knn
-                and self.cluster_method_combo_box.currentText() == "Spectral"
+                and self._current_cluster_method() == "Spectral"
             )
 
     def _update_cluster_method_settings(self):
         """Show/hide method-specific settings widgets."""
-        method = self.cluster_method_combo_box.currentText()
+        method = self._current_cluster_method()
         self.cluster_hdbscan_widget.setVisible(method == "HDBSCAN")
         self.cluster_agg_widget.setVisible(method == "Agglomerative")
         self.cluster_kmeans_widget.setVisible(method == "K-Means")
@@ -2078,7 +2156,7 @@ class ScatterControls(QtWidgets.QWidget):
 
     def _choose_k_for_kmeans(self, score_method=None):
         """Automatically choose k for K-Means using the current data and score method."""
-        if self.cluster_method_combo_box.currentText() != "K-Means":
+        if self._current_cluster_method() != "K-Means":
             self.figure.show_message(
                 "Choose K is only available for K-Means.", color="orange", duration=3
             )
@@ -2101,6 +2179,11 @@ class ScatterControls(QtWidgets.QWidget):
             return
 
         from ...clusters import find_k
+
+        if not self._allow_clustering(
+            "K-Means", note="searching k runs it once per candidate"
+        ):
+            return
 
         if score_method is None:
             checked_action = self.cluster_kmeans_score_group.checkedAction()
@@ -2142,7 +2225,7 @@ class ScatterControls(QtWidgets.QWidget):
 
     def _choose_k_for_spectral(self, score_method=None):
         """Automatically choose k for Spectral clustering using the current data and score method."""
-        if self.cluster_method_combo_box.currentText() != "Spectral":
+        if self._current_cluster_method() != "Spectral":
             self.figure.show_message(
                 "Choose K is only available for Spectral.", color="orange", duration=3
             )
@@ -2157,6 +2240,11 @@ class ScatterControls(QtWidgets.QWidget):
 
         arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
         from ...clusters import find_k
+
+        if not self._allow_clustering(
+            "Spectral", note="searching k runs it once per candidate"
+        ):
+            return
 
         if score_method is None:
             checked_action = self.cluster_spectral_score_group.checkedAction()
@@ -2209,6 +2297,13 @@ class ScatterControls(QtWidgets.QWidget):
             )
             return
 
+        # The combo bars what cannot run at all; the slow ones are still
+        # pickable and ask here. Belt and braces for the barred ones - Qt will
+        # not let a disabled item be chosen, but the data can change without
+        # the combo being repopulated.
+        if not self._allow_clustering():
+            return
+
         # KNN graph: cluster the sparse graph directly (HDBSCAN/Spectral only).
         if is_knn_graph(arr):
             self._run_clustering_from_knn(arr)
@@ -2217,7 +2312,7 @@ class ScatterControls(QtWidgets.QWidget):
         arr_np = arr.values if hasattr(arr, "values") else np.asarray(arr)
         is_precomputed = is_precomputed_distance_matrix(arr_np)
         metric = self.cluster_metric_combo_box.currentText()
-        method = self.cluster_method_combo_box.currentText()
+        method = self._current_cluster_method()
 
         if (
             method == "Agglomerative"
@@ -2317,7 +2412,7 @@ class ScatterControls(QtWidgets.QWidget):
         """Cluster a precomputed KNN graph (HDBSCAN/Spectral only)."""
         from ...clusters import run_clustering
 
-        method = self.cluster_method_combo_box.currentText()
+        method = self._current_cluster_method()
         try:
             labels = run_clustering(
                 None,
@@ -3235,6 +3330,11 @@ class ScatterControls(QtWidgets.QWidget):
                     target = np.asarray(entries[active]["embedding"])
                 if self._compute_fidelity_column(positions=target):
                     self._on_size_column_changed()
+                else:
+                    # Could not (or would not) rescore for the new embedding:
+                    # sizing off the previous one's fidelity would be silently
+                    # wrong, so drop back to the default.
+                    self.size_combo_box.setCurrentText("Default")
 
         self._sync_window_data_active()
         self._sync_window_embedding_status()
@@ -3877,6 +3977,9 @@ class ScatterControls(QtWidgets.QWidget):
             )
             return False
 
+        if not self._allow_expensive(fidelity_too_big(len(self.figure))):
+            return False
+
         try:
             scores = self.figure.calculate_embedding_fidelity(
                 k=self.fidelity_k_slider.value(),
@@ -3924,9 +4027,29 @@ class ScatterControls(QtWidgets.QWidget):
         if mode == "Off":
             self.figure.show_knn_edges = False
         else:
+            all_points = mode != "Selected only"
+            # "Selected only" is bounded by the selection; "All" is not. Ask
+            # when switching *into* it rather than on every call: this also
+            # runs from the k spinbox's `valueChanged`, which fires per
+            # keystroke, and a modal per digit is unusable.
+            current = self.figure.show_knn_edges
+            already_all = isinstance(current, dict) and current.get("mode") == "all"
+            if (
+                all_points
+                and not already_all
+                and not self._allow_expensive(knn_edges_too_big(len(self.figure)))
+            ):
+                # Back to what was showing, not off: declining a new setting
+                # should not throw away the edges already on screen.
+                self.fidelity_knn_combo_box.blockSignals(True)
+                self.fidelity_knn_combo_box.setCurrentText(
+                    "Selected only" if isinstance(current, dict) else "Off"
+                )
+                self.fidelity_knn_combo_box.blockSignals(False)
+                return
             metric = self._fidelity_metric()
             self.figure.show_knn_edges = {
-                "mode": "selected" if mode == "Selected only" else "all",
+                "mode": "all" if all_points else "selected",
                 "k": self.fidelity_knn_k_slider.value(),
                 "metric": metric,
                 "distance": metric,
@@ -4062,6 +4185,11 @@ class ScatterControls(QtWidgets.QWidget):
         ):
             if self._evaluate_labels():
                 self._apply_evaluate_label_color()
+            else:
+                # Scoring was refused or failed; the colouring on screen is
+                # from the previous labels, so put the old settings back
+                # rather than leave it looking current.
+                self._restore_previous_color_settings()
 
     def _evaluate_labels(self):
         """Compute per-sample evaluation scores and store them in metadata."""
@@ -4107,6 +4235,15 @@ class ScatterControls(QtWidgets.QWidget):
 
         method_text = self.evaluate_labels_method_combo_box.currentText()
         method_key = method_text.lower().replace(" ", "_")
+        # After the method is known: the two differ by more than a constant -
+        # silhouette compares every pair, neighbour consistency is a k-nearest
+        # search - so a single cap would be wrong about whichever it was not
+        # measured on.
+        if not self._allow_expensive(
+            label_evaluation_too_big(method_key, len(self.figure))
+        ):
+            self._untick(self.evaluate_labels_show_check)
+            return
         if method_key not in ("silhouette", "neighbor_consistency"):
             self.figure.show_message(
                 f"Unknown evaluation method '{method_text}'.",
@@ -4289,25 +4426,26 @@ class ScatterControls(QtWidgets.QWidget):
             "Link copied to clipboard", color="lightgreen", duration=2
         )
 
-    def _confirm_large_embedding(self, data):
-        """Confirm before re-embedding when the input data is large enough to
-        risk exhausting memory / hanging the machine. Returns True to proceed."""
-        n, est_bytes = estimate_embedding_input_bytes(data)
-        if est_bytes <= EMBEDDING_INPUT_WARN_BYTES:
-            return True
+    #: Appended to every "too big" message. The way out is the same in each
+    #: case, and it is a property of the app rather than of the algorithm,
+    #: which is why it lives here and not with the limits.
+    TOO_BIG_ADVICE = (
+        "Filter the dataset or open a view of a subset to work on fewer points."
+    )
 
-        gib = est_bytes / 1024**3
+    def _confirm_expensive(self, title, html):
+        """Ask before an operation that will cost a lot. True to proceed.
+
+        Cancel is the default button: the question is only asked when the
+        answer might well be no.
+        """
         dialog = QtWidgets.QDialog(self)
-        dialog.setWindowTitle("Confirm re-embedding")
+        dialog.setWindowTitle(title)
         dialog.setModal(True)
         layout = QtWidgets.QVBoxLayout(dialog)
         layout.setContentsMargins(20, 18, 20, 14)
         layout.setSpacing(14)
-        msg = QtWidgets.QLabel(
-            f"Re-computing the embedding for <b>{n:,}</b> neurons will process "
-            f"roughly <b>{gib:.1f} GB</b> of data and may use a large amount of "
-            f"memory and time.<br><br>Continue?"
-        )
+        msg = QtWidgets.QLabel(html)
         msg.setWordWrap(True)
         layout.addWidget(msg)
         buttons = QtWidgets.QDialogButtonBox()
@@ -4319,6 +4457,41 @@ class ScatterControls(QtWidgets.QWidget):
         layout.addWidget(buttons)
         dialog.setMinimumWidth(340)
         return dialog.exec() == QtWidgets.QDialog.Accepted
+
+    def _allow_expensive(self, too_big):
+        """Gate an operation against a `TooBig`. True to go ahead.
+
+        A blocking limit is refused outright - offering to continue into a
+        memory exhaustion is not a choice, the machine goes down either way.
+        Anything else is slow rather than impossible, so it is the user's call
+        and gets asked, with cancel as the default.
+        """
+        if too_big is None:
+            return True
+
+        message = f"{too_big} {self.TOO_BIG_ADVICE}"
+        if too_big.blocking:
+            self.figure.show_message(message, color="red", duration=6)
+            return False
+        return self._confirm_expensive(
+            "This will take a while",
+            f"{too_big}<br><br>{self.TOO_BIG_ADVICE}<br><br>Continue anyway?",
+        )
+
+    def _confirm_large_embedding(self, data):
+        """Confirm before re-embedding when the input data is large enough to
+        risk exhausting memory / hanging the machine. Returns True to proceed."""
+        n, est_bytes = estimate_embedding_input_bytes(data)
+        if est_bytes <= EMBEDDING_INPUT_WARN_BYTES:
+            return True
+
+        gib = est_bytes / 1024**3
+        return self._confirm_expensive(
+            "Confirm re-embedding",
+            f"Re-computing the embedding for <b>{n:,}</b> neurons will process "
+            f"roughly <b>{gib:.1f} GB</b> of data and may use a large amount of "
+            f"memory and time.<br><br>Continue?",
+        )
 
     def calculate_embeddings(self):
         """Re-calculate embeddings and move points to their new positions."""
@@ -4475,6 +4648,10 @@ class ScatterControls(QtWidgets.QWidget):
         if self.size_combo_box.currentText() == FIDELITY_DATA_COLUMN:
             if self._compute_fidelity_column(positions=xy):
                 self._on_size_column_changed()
+            else:
+                # Sizing off the old layout's fidelity would be silently
+                # wrong, so drop back to the default (same as on a switch).
+                self.size_combo_box.setCurrentText("Default")
 
         # Keep the owning window's project data pointing at the new positions.
         self._sync_window_data_active()

@@ -79,7 +79,11 @@ from .widgets.credentials import (
 from .update_check import UpdateCheckRunnable, is_outdated
 from ..scatter import ScatterFigure
 from ..neuroglancer import NglViewer, resolve_local_source
-from ..embeddings import KNNGraph
+from ..embeddings import (
+    FEATURE_COMPARISON_LIMIT,
+    KNNGraph,
+    feature_comparison_too_big,
+)
 from ..utils import is_url, build_launch_command
 from ..__version__ import __version__
 
@@ -129,7 +133,12 @@ def can_open_distances_table(data):
 
 
 def can_open_feature_comparison(data):
-    """Whether the feature comparison can be opened for a `data` dict."""
+    """Whether the feature comparison can be opened for a `data` dict.
+
+    Also a size gate, unlike its siblings: the other widgets are lazy table
+    models, but this one keeps a Python row index per point to build its two
+    groups, which outgrows the statistics long before they do.
+    """
     if not isinstance(data, dict):
         return False
 
@@ -138,7 +147,18 @@ def can_open_feature_comparison(data):
     if not isinstance(features, pd.DataFrame) or not isinstance(meta, pd.DataFrame):
         return False
 
+    if feature_comparison_too_big(len(meta)) is not None:
+        return False
+
     return (not features.empty) and (not meta.empty)
+
+
+def feature_comparison_missing(data):
+    """What an embedding lacks for the feature comparison, for the menu text."""
+    meta = data.get("meta") if isinstance(data, dict) else None
+    if meta is not None and feature_comparison_too_big(len(meta)) is not None:
+        return f"over {FEATURE_COMPARISON_LIMIT.max_points:,} points"
+    return "no features"
 
 
 def can_open_meta_explorer(data):
@@ -206,7 +226,7 @@ VIEW_WIDGET_SPECS = (
         "opener": "show_feature_comparison",
         "predicate": can_open_feature_comparison,
         "per_embedding": True,
-        "missing": "no features",
+        "missing": feature_comparison_missing,
     },
     {
         # Meta data is shared by all embeddings of a view, so this one stays a
@@ -3169,7 +3189,13 @@ class MainWindow(QMainWindow):
             for idx, item in enumerate(items):
                 ok = predicate(per_embedding_data[idx])
                 item.setEnabled(ok)
-                item.setText(names[idx] if ok else f"{names[idx]} ({spec['missing']})")
+                missing = spec["missing"]
+                if callable(missing):
+                    # Some entries have more than one way to be unavailable,
+                    # and "no features" is a lie about a project that has them
+                    # and simply holds too many points.
+                    missing = missing(per_embedding_data[idx])
+                item.setText(names[idx] if ok else f"{names[idx]} ({missing})")
                 available = available or ok
             submenu.menuAction().setEnabled(available)
 

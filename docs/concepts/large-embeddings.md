@@ -132,6 +132,54 @@ with the budget: every point stays resident on the GPU, and only the number
 *drawn* changes. A project of tens of millions of points needs several GB of RAM
 on top of whatever its metadata occupies.
 
+## What a very large project cannot do
+
+Drawing scales. Analysis does not, and no amount of sampling helps: these tools
+read your data, not the screen, so they have to touch every point.
+
+Where that bites, the tool says so rather than appearing to work and then
+freezing. Most of these are a question of patience, so you are *asked*, with
+the cost stated and "no" as the default — if you are willing to wait ninety
+seconds, that is your call to make. One is not a question of patience, and is
+refused outright: there is no useful way to agree to running out of memory.
+
+| Tool | Limit | Why |
+|---|---|---|
+| **Clustering — Agglomerative** | 25,000 points **(refused)** | Builds a table of every pair of distances, so memory grows with the *square* of the point count. Past the limit it does not get slow, it runs the machine out of memory — so it is greyed out rather than offered. |
+| **Clustering — Spectral** | 50,000 points | Cost grows faster than the point count. |
+| **Clustering — HDBSCAN** | 100,000 points | Same, less steeply: 50,000 points take seconds, 200,000 take a minute and a half. |
+| **Clustering — K-Means** | none | Scales with the point count, so it stays usable: five million points cluster in a few seconds. |
+| **Choose K** | as the method above | Runs the method once per candidate k, so it costs several times a single run. |
+| **Evaluating cluster labels — Silhouette** | 50,000 points | Scoring compares every pair of points. |
+| **Evaluating cluster labels — Neighbor consistency** | 250,000 points | Searches each point's neighbours, which is far cheaper than every pair. |
+| **Fidelity scores** | 250,000 points | Compares every point's neighbours before and after embedding, twice. |
+| **KNN edges, *All*** | 250,000 points | Searches every point's neighbours and then draws a line per edge. *Selected only* is bounded by your selection and is never limited. |
+| **Distance heatmap** | 5,000 selected | A heatmap holds a cell for every pair, and more rows than that is unreadable regardless. |
+| **Feature comparison** | 1,000,000 points | Keeps a row index per point to build its two groups. Above this the **View → Feature Comparison** entry is greyed out. |
+
+A clustering method that cannot run at all is greyed out with its limit shown
+beside the name, so you can see what you would have to do rather than guessing.
+
+The point counts above were measured on two-dimensional input. Clustering
+feature vectors of higher dimension costs more at the same number of points,
+so treat them as upper bounds.
+
+### Working on part of a project
+
+The way round all of these is to make the project smaller rather than to wait:
+
+- **[Filter the dataset](../how-to/filter-a-dataset.md)** to the neurons you
+  care about. A filtered project holds fewer points, so everything above
+  applies to the smaller number.
+- **[Open a view](../how-to/work-in-several-views.md)** of a subset and work
+  there, leaving the full embedding open alongside it.
+- For the **distance heatmap**, select the points you want to compare — it
+  works from the selection, not the whole project.
+
+Re-computing an embedding is not capped, because how long it takes depends on
+the input rather than only on the point count. It warns you with an estimate
+first, and defaults to cancelling.
+
 ## If it still feels slow
 
 - Lower `Max points drawn`.

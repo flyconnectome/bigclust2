@@ -28,6 +28,19 @@ For the complete commit-level history, see the
   which dominated load time on big projects; selecting, recolouring and hovering
   are no longer proportional to the total number of points. A project of tens of
   millions of points now opens in seconds rather than minutes.
+- **Analysis tools that cannot handle a very large project now say so.**
+  Clustering, fidelity scores and the distance heatmap read every point rather
+  than what is on screen, so unlike drawing they do not get cheaper as a
+  project grows. Clustering methods that cannot run at the current size are
+  greyed out with the point count they top out at — Agglomerative in particular
+  grew its memory with the *square* of the point count, so choosing it on a
+  large embedding could take the machine down rather than merely take a while.
+  K-Means scales and stays available. Everything else that is simply slow —
+  **Choose K**, **Evaluate labels**, fidelity scores and **KNN edges: All** —
+  now tells you what it will cost and lets you decide, defaulting to not
+  running. See
+  [large embeddings](../concepts/large-embeddings.md) for the limits and for
+  how to work on a subset instead.
 - **Selection highlights no longer outweigh the scatter.** Zoomed in on a very
   large selection, the rings were all still drawn while the points underneath
   them were not — more work for the highlight than for the plot. A selection

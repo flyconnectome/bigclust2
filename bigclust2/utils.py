@@ -1,4 +1,5 @@
 import re
+from dataclasses import dataclass
 import shlex
 import colorsys
 import warnings
@@ -506,6 +507,63 @@ def as_xyz(xy, z=0.0, order=None):
             xy = xy.astype(np.float32)
         np.take(xy, order, axis=0, out=xyz[:, :2])
     return xyz
+
+
+@dataclass(frozen=True)
+class TooBig:
+    """An operation whose input is larger than it can handle.
+
+    Carries the facts, not the sentence the user sees: these live in modules
+    that import without Qt, while what to *do* about it (filter, open a view)
+    is a property of the application.
+
+    `blocking` separates the two kinds. An operation that would exhaust memory
+    cannot be offered at all - there is no informed consent to give when the
+    machine goes down either way. One that is merely slow is the user's call,
+    so it is offered with the cost stated and cancel as the default.
+    """
+
+    operation: str
+    n: int
+    limit: int
+    reason: str
+    blocking: bool = False
+
+    def __str__(self):
+        return (
+            f"{self.operation} is limited to {self.limit:,} points "
+            f"({self.n:,} here) because {self.reason}."
+        )
+
+
+@dataclass(frozen=True)
+class MethodLimit:
+    """How large an input something can take, and why.
+
+    The table form of :class:`TooBig`: constants declare the limit and the
+    reason once, next to the measurements that justify them, and `check`
+    turns one into a `TooBig` when an input exceeds it.
+    """
+
+    #: Largest input this can handle, or None when it has no practical cap.
+    max_points: int | None
+    #: Why, as a clause - "because {reason}". Describes the algorithm, not
+    #: what the user should do about it, which belongs to the application.
+    reason: str
+    #: True when going past it exhausts memory rather than merely taking time.
+    blocking: bool = False
+
+    def check(self, operation, n):
+        """`TooBig` if `operation` cannot handle `n` points, else None."""
+        if self.max_points is None or n <= self.max_points:
+            return None
+        return TooBig(
+            operation=operation,
+            n=n,
+            limit=self.max_points,
+            reason=self.reason,
+            blocking=self.blocking,
+        )
 
 
 def points_in_rect(xy, rect):

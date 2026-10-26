@@ -471,6 +471,43 @@ def rgb_from_segment_id(color_seed, segment_id):
     return tuple([v * 255 for v in colorsys.hsv_to_rgb(h, s, v)])
 
 
+def take(arr, ix):
+    """``arr[ix]``, or ``arr`` itself when ``ix`` is None ("everything, in order")."""
+    return arr if ix is None else arr[ix]
+
+
+def as_xyz(xy, z=0.0, order=None):
+    """Promote (N, 2) points to a C-contiguous (N, 3) float32 array at height `z`.
+
+    Parameters
+    ----------
+    xy :    (N, 2) array
+    z :     float
+            Value for the third column.
+    order : (M,) int array, optional
+            Gather rows in this order straight into the output, instead of
+            building a reordered (M, 2) copy first. Writing through the strided
+            destination measures faster than gather-then-copy.
+
+    Returns
+    -------
+    xyz :   (N or M, 3) float32 array
+    """
+    xy = np.asarray(xy)
+    n = len(xy) if order is None else len(order)
+    xyz = np.empty((n, 3), dtype=np.float32)
+    xyz[:, 2] = z
+    if order is None:
+        xyz[:, :2] = xy
+    else:
+        # `np.take`'s `out=` enforces safe casting, so an integer input would
+        # raise where plain assignment converts; convert up front instead.
+        if xy.dtype != np.float32:
+            xy = xy.astype(np.float32)
+        np.take(xy, order, axis=0, out=xyz[:, :2])
+    return xyz
+
+
 def sorted_unique(values):
     """Return the sorted unique entries of ``values``.
 

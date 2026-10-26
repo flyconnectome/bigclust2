@@ -138,7 +138,15 @@ def test_highlight_points_accepts_scalars_and_lists(make_scatter):
 
 
 def _buffer_colors(fig):
-    return fig.point_visuals[0].geometry.colors.data
+    """The uploaded colours, reassembled into figure-row order.
+
+    The points may be spread over many chunk visuals, so this gathers what was
+    actually uploaded rather than reading one visual's buffer.
+    """
+    out = np.zeros((len(fig), 4), dtype=np.float32)
+    for vis in fig.point_visuals:
+        out[vis._point_ix] = vis.geometry.colors.data
+    return out
 
 
 def test_colors_are_normalized_to_rgba_at_the_boundary(make_scatter):
@@ -208,44 +216,23 @@ def test_update_point_position_keeps_indices_aligned(make_scatter):
 # --------------------------------------------------------------------------- #
 
 
-def _hover_at(fig, x, y):
-    """Send a pointer_move through the real event pipeline and flush it."""
-    fig.canvas.submit_event(
-        {
-            "event_type": "pointer_move",
-            "x": x,
-            "y": y,
-            "button": 0,
-            "buttons": [],
-            "modifiers": [],
-            "ntouches": 0,
-            "touches": {},
-            "pointer_id": 1,
-        }
-    )
-    fig.canvas._events.flush()
-    fig.renderer.render(fig.scene, fig.camera)
-    fig.canvas.draw()
-
-
-def test_hover_resolves_the_point_under_the_cursor(make_scatter):
+def test_hover_resolves_the_point_under_the_cursor(make_scatter, hover_at, hover_probe):
     fig, _, points = make_scatter(n=200)
     fig.point_scale = 0.02
     fig.renderer.render(fig.scene, fig.camera)
     fig.canvas.draw()
 
-    seen = {}
-    fig._update_hover_widget = lambda text, *_: seen.update(text=text)
+    seen = hover_probe(fig)
 
     target = 42
     screen = fig.world_to_screen((float(points[target, 0]), float(points[target, 1]), 0.0))
-    _hover_at(fig, *screen)
+    hover_at(fig, *screen)
 
     assert seen.get("text") == f"label: point-{target}"
     assert fig.hover_widget.visible
 
 
-def test_moving_off_a_point_hides_the_widget(make_scatter):
+def test_moving_off_a_point_hides_the_widget(make_scatter, hover_at):
     """The widget is hidden by the `pointer_leave` the renderer sends."""
     fig, _, points = make_scatter(n=200)
     fig.point_scale = 0.02
@@ -255,25 +242,24 @@ def test_moving_off_a_point_hides_the_widget(make_scatter):
     fig._update_hover_widget = lambda text, *_: None
 
     screen = fig.world_to_screen((float(points[0, 0]), float(points[0, 1]), 0.0))
-    _hover_at(fig, *screen)
+    hover_at(fig, *screen)
     assert fig.hover_widget.visible
 
-    _hover_at(fig, 2, 2)  # top-left corner, outside the point cloud
+    hover_at(fig, 2, 2)  # top-left corner, outside the point cloud
     assert not fig.hover_widget.visible
 
 
-def test_hover_is_suppressed_while_hidden(make_scatter):
+def test_hover_is_suppressed_while_hidden(make_scatter, hover_at, hover_probe):
     fig, _, points = make_scatter(n=200)
     fig.point_scale = 0.02
     fig.renderer.render(fig.scene, fig.camera)
     fig.canvas.draw()
 
     fig._hide_hover = True
-    seen = {}
-    fig._update_hover_widget = lambda text, *_: seen.update(text=text)
+    seen = hover_probe(fig)
 
     screen = fig.world_to_screen((float(points[0, 0]), float(points[0, 1]), 0.0))
-    _hover_at(fig, *screen)
+    hover_at(fig, *screen)
 
     assert "text" not in seen
 

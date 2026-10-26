@@ -7,6 +7,8 @@ import pygfx as gfx
 
 from octarine.shaders import FlexPointsMaterial
 
+from .utils import as_xyz
+
 
 def text2gfx(
     text,
@@ -252,16 +254,16 @@ def lines2gfx(lines, color, linewidth=1, linewidth_space="screen", dash_pattern=
         assert len(lines) > 1
 
         if lines.shape[1] == 2:
-            lines = np.column_stack([lines, np.zeros(len(lines))])
+            lines = as_xyz(lines)
     elif isinstance(lines, list):
         assert all([isinstance(l, np.ndarray) for l in lines])
         assert all([l.ndim == 2 for l in lines])
         assert all([l.shape[1] in (2, 3) for l in lines])
         assert all([len(l) > 1 for l in lines])
 
-        for i, l in enumerate(lines):
-            if l.shape[1] == 2:
-                lines[i] = np.column_stack([l, np.zeros(len(l))])
+        for i, line in enumerate(lines):
+            if line.shape[1] == 2:
+                lines[i] = as_xyz(line)
 
         # Convert to the (N, 3) format
         if len(lines) == 1:

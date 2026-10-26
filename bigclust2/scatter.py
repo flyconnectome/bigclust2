@@ -23,8 +23,15 @@ from .label_placement import (
     solve_label_placement,
     spatial_components,
 )
+from .chunking import (
+    ChunkLayout,
+    chunk_bounds,
+    group_chunk_target,
+    spatial_chunks,
+)
 from .selection import LassoGizmo, SelectionGizmo
-from .utils import check_finite_features, colors_to_rgba
+from .utils import as_xyz as _as_xyz
+from .utils import check_finite_features, colors_to_rgba, take as _take
 from .visuals import points2gfx, text2gfx, lines2gfx
 
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
@@ -151,6 +158,14 @@ class ScatterFigure(BaseFigure):
     selection_color = "y"
     distance_edges_threshold_default = 0.5
 
+    # Points are split into spatially coherent chunks so that the renderer can
+    # cull and decimate them per chunk. Each chunk costs ~8us/frame of pygfx
+    # per-object work, so the total is capped rather than scaled freely with N,
+    # and scatters small enough to draw whole are left unchunked. Provisional
+    # values - the right trade-off depends on the draw budget built on top.
+    chunk_target = 1000
+    chunk_min_size = 100_000
+
     def __init__(self, selection_counter=None, debug=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -161,6 +176,8 @@ class ScatterFigure(BaseFigure):
         self.label_visuals = None
         self._label_colors = None
         self.point_visuals = None
+        self._chunks = None
+        self._chunks_stale = False
         self._marker_codes = None
         self._marker_names = None
         self.hover_info_org = None  # hover format/column, set by `set_points`
@@ -556,20 +573,21 @@ class ScatterFigure(BaseFigure):
         else:
             self._point_size = np.array(size, dtype=np.float32)
 
-            for vis in self.point_visuals:
+            # One gather in draw order; each chunk then slices a view.
+            scaled = self._point_size[self._chunks.order] * self._point_scale
+            for i, vis in enumerate(self.point_visuals):
                 if not isinstance(vis, gfx.Points):
                     continue
 
-                # Point sizes for this visual (in case we have multiple visuals for different markers)
-                this_point_size = self._point_size[vis._point_ix]
+                this_point_size = scaled[self._chunks.slice_for(i)]
 
                 # Check if we have a size buffer
                 if not hasattr(vis.geometry, "sizes"):
                     vis.geometry.sizes = gfx.resources._buffer.Buffer(
-                        this_point_size * self._point_scale
+                        this_point_size
                     )
                 else:
-                    vis.geometry.sizes.set_data(this_point_size * self._point_scale)
+                    vis.geometry.sizes.set_data(this_point_size)
 
                 vis.material.size_mode = "vertex"
 
@@ -1210,7 +1228,7 @@ class ScatterFigure(BaseFigure):
 
         # Create the new selection visuals
         if len(self.selected) > 0:
-            self.highlight_visuals = self.make_points(ix=points)
+            self.highlight_visuals, _ = self.make_points(ix=points, chunk=False)
             for vis in self.highlight_visuals:
                 vis.material.edge_color = color
                 vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
@@ -1234,7 +1252,7 @@ class ScatterFigure(BaseFigure):
         self.scatter_group._object_id = "scatter"
         self.scene.add(self.scatter_group)
 
-        self.point_visuals = self.make_points()
+        self.point_visuals, self._chunks = self.make_points()
         for p in self.point_visuals:
             self.scatter_group.add(p)
             if self._hover_enabled:
@@ -1260,25 +1278,47 @@ class ScatterFigure(BaseFigure):
             return np.full(len(np.asarray(indices)), names[0], dtype=object)
         return np.asarray(names, dtype=object)[codes[indices]]
 
-    def make_points(self, ix=None):
+    def make_points(self, ix=None, chunk=True):
         """Create the visuals for the points.
+
+        Builds one ``gfx.Points`` per (marker, spatial chunk). Each marker
+        group's attributes are gathered once into a single backing array and
+        every chunk is handed a contiguous *view* into it, so N points still
+        cost one array per attribute rather than one per chunk.
 
         Parameters
         ----------
         ix :    (M,) int array, optional
-                Restrict the visuals to these point indices (used for the
-                selection overlay, see `highlight_points`). `None` means all
-                points, in order - the common case, where the per-group
-                gathers below (a full copy of positions, colors and sizes
-                each) can be skipped entirely.
+                Restrict the visuals to these point indices. `None` means all
+                points, in order.
+        chunk : bool
+                Whether to split into spatial chunks. Chunking exists so the
+                renderer can cull and decimate per chunk; the selection overlay
+                is neither, so it passes False and skips the ordering work.
+
+        Returns
+        -------
+        visuals : list of gfx.Points
+        layout :  ChunkLayout | None
+                  How those visuals map onto point indices. `None` when
+                  `chunk` is False, since an unchunked overlay has no layout
+                  for the renderer to work from.
         """
         codes, symbols = self._marker_codes, self._marker_names
         if symbols is None:
-            return []
+            symbols = ()  # fall through; the tail yields the empty layout
+        elif len(symbols) == 1:
+            # A single distinct marker needs no grouping, and `None` is what
+            # selects the cheap "everything, in order" path below.
+            codes = None
         if ix is not None:
             ix = np.asarray(ix)
 
+        total = len(self) if ix is None else len(ix)
         visuals = []
+        group_rows = []  # one row-index array per marker group
+        group_bounds = []
+        chunk_sizes = []
         for code, marker in enumerate(symbols):
             # `group_ix is None` means "every point, in order".
             if codes is None:
@@ -1289,42 +1329,96 @@ class ScatterFigure(BaseFigure):
                 # Only scan the requested points, not all N.
                 group_ix = ix[codes[ix] == code]
 
-            if group_ix is None:
-                n_pts = len(self)
-                positions, colors, sizes = self.positions, self.colors, self.point_size
-            else:
-                n_pts = len(group_ix)
-                positions = self.positions[group_ix]
-                colors = None if self.colors is None else self.colors[group_ix]
-                sizes = (
-                    self.point_size
-                    if isinstance(self.point_size, (int, float))
-                    else self.point_size[group_ix]
-                )
-            if not n_pts:
+            n_group = len(self) if group_ix is None else len(group_ix)
+            if not n_group:
                 continue
 
-            # Points are stored as (N, 2); the visuals want (N, 3) at z=0.
-            xyz = np.empty((n_pts, 3), dtype=np.float32)
-            xyz[:, :2] = positions
-            xyz[:, 2] = 0.0
+            group_xy = _take(self.positions, group_ix)
 
-            vis = points2gfx(
-                xyz,
-                color="w" if colors is None else colors,
-                size=sizes * self.point_scale,
-                marker=marker,
-                size_space="world",
-                pick_write=self._hover_enabled,
-            )
-            vis._point_ix = np.arange(n_pts) if group_ix is None else group_ix
-            # Record what we uploaded so the colour refresh does not have to
-            # read it back off the renderer.
-            if colors is not None:
-                vis._base_colors = colors
-            visuals.append(vis)
+            if chunk:
+                order, starts = spatial_chunks(
+                    group_xy,
+                    target=group_chunk_target(self.chunk_target, n_group, total),
+                    min_size=self.chunk_min_size,
+                )
+            else:
+                order, starts = None, np.array([0, n_group], dtype=np.intp)
 
-        return visuals
+            # One (n, 3) buffer for the whole group, gathered straight into its
+            # first two columns - the chunks slice it, so positions share a
+            # backing array just as the colours do, and the reordered (n, 2)
+            # copy never has to exist.
+            group_xyz = _as_xyz(group_xy, order=order)
+
+            # Reorder once per group; chunks are then contiguous slices.
+            if order is not None:
+                group_ix = order if group_ix is None else group_ix[order]
+            elif group_ix is None:
+                group_ix = np.arange(n_group)
+
+            group_colors = None if self.colors is None else self.colors[group_ix]
+            # Scale once per group: the per-chunk slice is then a view.
+            group_sizes = self.point_size
+            per_point_size = not isinstance(group_sizes, (int, float))
+            if per_point_size:
+                group_sizes = group_sizes[group_ix]
+            group_sizes = group_sizes * self.point_scale
+
+            group_bounds.append(chunk_bounds(group_xyz[:, :2], starts))
+            group_rows.append(group_ix)
+
+            for i in range(len(starts) - 1):
+                sl = slice(starts[i], starts[i + 1])
+                colors = None if group_colors is None else group_colors[sl]
+
+                vis = points2gfx(
+                    group_xyz[sl],
+                    color="w" if colors is None else colors,
+                    size=group_sizes[sl] if per_point_size else group_sizes,
+                    marker=marker,
+                    size_space="world",
+                    pick_write=self._hover_enabled,
+                )
+                # Record what we uploaded so the colour refresh does not have to
+                # read it back off the renderer.
+                if colors is not None:
+                    vis._base_colors = colors
+                visuals.append(vis)
+                chunk_sizes.append(sl.stop - sl.start)
+
+        # One index array for the whole figure; each visual's `_point_ix` is a
+        # view into it, so the per-group arrays are not retained alongside it.
+        if len(group_rows) == 1:
+            order = group_rows[0]
+        elif group_rows:
+            order = np.concatenate(group_rows)
+        else:
+            order = np.empty(0, dtype=np.intp)
+        starts = np.cumsum([0, *chunk_sizes], dtype=np.intp)
+        bounds = np.vstack(group_bounds) if group_bounds else np.empty((0, 4))
+
+        layout = ChunkLayout(order=order, starts=starts, bounds=bounds)
+        for i, vis in enumerate(visuals):
+            vis._point_ix = order[layout.slice_for(i)]
+
+        return visuals, (layout if chunk else None)
+
+    def rechunk(self):
+        """Rebuild the chunk layout for the current point positions.
+
+        Chunks group points by locality, so once the points have moved the
+        grouping no longer reflects the scene and each chunk's box can span
+        most of it - which would leave per-chunk culling with nothing to cull.
+        Rebuilding is as expensive as the initial build, so it is deliberately
+        not done per frame: `process_moves` calls this when an animation ends.
+        """
+        if self.point_visuals is None or not self._chunks_stale:
+            return
+        self.make_visuals()
+        self._refresh_point_colors()
+        self._chunks_stale = False
+        # The visuals are new, so anything hanging off the old ones is stale.
+        self.highlight_points(self._selected, color=self.selection_color)
 
     def _on_hover(self, event):
         """Show/hide the hover widget for the point under the cursor."""
@@ -1576,12 +1670,9 @@ class ScatterFigure(BaseFigure):
         if bg_color is not None:
             delaunay = Delaunay(positions[:, :2])
             vertices, faces = delaunay.points, delaunay.simplices
-            vertices = np.append(
-                vertices, np.zeros((vertices.shape[0], 1), dtype=np.float32), axis=1
-            )
             patch = gfx.Mesh(
                 gfx.Geometry(
-                    positions=vertices.astype(np.float32),
+                    positions=_as_xyz(vertices),
                     indices=faces.astype(np.int32),
                 ),
                 gfx.MeshBasicMaterial(color=bg_color, alpha_mode="blend"),
@@ -1631,17 +1722,11 @@ class ScatterFigure(BaseFigure):
         vertices = np.concatenate(vertices, axis=0)
         faces = np.concatenate(faces, axis=0)
 
-        # Add a third coordinate to the vertices
-        vertices = np.append(
-            vertices, np.zeros((vertices.shape[0], 1), dtype=np.float32), axis=1
-        )
-        # Make sure vertices are in the back
-        vertices[:, 2] = -1
+        # Add a third coordinate, putting the vertices in the back
+        vertices = _as_xyz(vertices, z=-1.0)
 
         vis = gfx.Mesh(
-            gfx.Geometry(
-                indices=faces.astype(np.int32), positions=vertices.astype(np.float32)
-            ),
+            gfx.Geometry(indices=faces.astype(np.int32), positions=vertices),
             gfx.MeshBasicMaterial(color=(1, 1, 1, 0.1), alpha_mode="add"),
         )
 
@@ -3091,6 +3176,51 @@ class ScatterFigure(BaseFigure):
             visual.material._original_color = visual.material.color
             visual.material.color = color
 
+    def _world_xy(self):
+        """Point positions in world space, for hit-testing.
+
+        Reads `self.positions` rather than the visuals' geometry: the visuals
+        hold only what is currently drawn (chunked, and decimated once the draw
+        budget is in play), while selection must consider every point.
+        """
+        if self.positions is None or not len(self.positions):
+            return None
+
+        # Only pay for the transform if the group actually carries one.
+        matrix = self.scatter_group.world.matrix
+        if np.allclose(matrix, np.eye(4)):
+            return self.positions
+        return la.vec_transform(_as_xyz(self.positions), matrix)[:, :2]
+
+    def _select_where(self, predicate, additive=False):
+        """Select the points a predicate accepts.
+
+        Owns the parts every selection tool shares: world-space coordinates,
+        the empty-selection policy, the additive union and the assignment. A
+        tool only has to say which points it wants.
+
+        Parameters
+        ----------
+        predicate : callable
+            Takes the (N, 2) world-space coordinates and returns a boolean
+            mask of the same length.
+        additive : bool
+            Whether to add to the existing selection.
+        """
+        xy = self._world_xy()
+        if xy is None:
+            return
+
+        selected = np.where(predicate(xy))[0]
+
+        if not len(selected) and not self.deselect_on_empty:
+            return
+
+        if additive and self.selected is not None:
+            selected = np.unique(np.concatenate((self.selected, selected)))
+
+        self.selected = selected
+
     @update_figure
     def select_points(self, bounds, additive=False):
         """Select all selectable objects in the region.
@@ -3103,33 +3233,15 @@ class ScatterFigure(BaseFigure):
             Whether to add to the existing selection.
 
         """
-        # Get the positions and original indices of the leaf nodes
-        positions_abs = []
-        indices = []
-        for l in self.point_visuals:
-            positions_abs.append(
-                la.vec_transform(l.geometry.positions.data, l.world.matrix)
-            )
-            indices.append(l._point_ix)
-        positions_abs = np.vstack(positions_abs)
-        indices = np.concatenate(indices)
-
-        # Check if any of the points are within the selection region
-        selected = (
-            (positions_abs[:, 0] >= bounds[0, 0])
-            & (positions_abs[:, 0] <= bounds[1, 0])
-            & (positions_abs[:, 1] >= bounds[0, 1])
-            & (positions_abs[:, 1] <= bounds[1, 1])
+        self._select_where(
+            lambda xy: (
+                (xy[:, 0] >= bounds[0, 0])
+                & (xy[:, 0] <= bounds[1, 0])
+                & (xy[:, 1] >= bounds[0, 1])
+                & (xy[:, 1] <= bounds[1, 1])
+            ),
+            additive=additive,
         )
-        selected = indices[selected]
-
-        if not len(selected) and not self.deselect_on_empty:
-            return
-
-        if additive and self.selected is not None:
-            selected = np.unique(np.concatenate((self.selected, selected)))
-
-        self.selected = selected
 
     @update_figure
     def select_points_lasso(self, polygon, additive=False):
@@ -3145,25 +3257,9 @@ class ScatterFigure(BaseFigure):
         if polygon is None:
             return
 
-        positions_abs = []
-        indices = []
-        for l in self.point_visuals:
-            positions_abs.append(
-                la.vec_transform(l.geometry.positions.data, l.world.matrix)
-            )
-            indices.append(l._point_ix)
-        positions_abs = np.vstack(positions_abs)
-        indices = np.concatenate(indices)
-
-        selected = indices[_pts_in_polygon(positions_abs[:, :2], polygon)]
-
-        if not len(selected) and not self.deselect_on_empty:
-            return
-
-        if additive and self.selected is not None:
-            selected = np.unique(np.concatenate((self.selected, selected)))
-
-        self.selected = selected
+        self._select_where(
+            lambda xy: _pts_in_polygon(xy, polygon), additive=additive
+        )
 
     @update_figure
     def set_points(
@@ -3524,9 +3620,7 @@ class ScatterFigure(BaseFigure):
             raise ValueError(f"Expected {len(self)} colors, got {len(colors)}.")
 
         self.colors = colors_to_rgba(colors)
-
-        for vis in self.point_visuals:
-            vis._base_colors = self.colors[vis._point_ix]
+        self._refresh_base_colors()
         self._refresh_point_colors()
 
         if sync_to_viewer and hasattr(self, "ngl_viewer"):
@@ -3560,11 +3654,24 @@ class ScatterFigure(BaseFigure):
 
         self._refresh_point_colors()
 
+    def _refresh_base_colors(self):
+        """Re-slice `self.colors` into the chunks' unfaded base colours.
+
+        Gathers once in draw order and hands each chunk a view, the same shape
+        as the position buffer - rather than a fancy-index per chunk, which
+        would also replace the shared backing array `make_points` set up.
+        """
+        if not self.point_visuals or self.colors is None:
+            return
+        base = self.colors[self._chunks.order]
+        for i, vis in enumerate(self.point_visuals):
+            vis._base_colors = base[self._chunks.slice_for(i)]
+
     def _refresh_point_colors(self):
         """Push the base point colors to the GPU, with scope fading applied.
 
         This is the single upload path for point colors: `set_colors` updates
-        `vis._base_colors` and relies on this to push them, and `set_scope`
+        the base colours and relies on this to push them, and `set_scope`
         calls it to (un)fade points outside the scope.
         """
         mask = self._selection_scope_mask
@@ -3574,16 +3681,23 @@ class ScatterFigure(BaseFigure):
         if self.point_visuals is None:
             return
 
-        for vis in self.point_visuals:
+        # One gather in draw order, then a view per chunk.
+        in_scope = None if mask is None else mask[self._chunks.order]
+
+        for i, vis in enumerate(self.point_visuals):
             base = getattr(vis, "_base_colors", None)
             if base is None:
                 # Lazily capture the unfaded colors created by make_points()
                 base = vis._base_colors = vis.geometry.colors.data.copy()
-            if mask is None:
-                colors = base  # no fading -> upload the base colors as they are
+            chunk_scope = None if in_scope is None else in_scope[
+                self._chunks.slice_for(i)
+            ]
+            if chunk_scope is None or chunk_scope.all():
+                # Nothing to fade in this chunk - upload the base as it is.
+                colors = base
             else:
                 colors = base.copy()  # fading mutates alpha, so work on a copy
-                colors[~mask[vis._point_ix], 3] *= SCOPE_FADE_ALPHA
+                colors[~chunk_scope, 3] *= SCOPE_FADE_ALPHA
             vis.geometry.colors.set_data(colors)
             vis.geometry.colors.update_full()
 
@@ -3637,13 +3751,11 @@ class ScatterFigure(BaseFigure):
     def update_point_position(self):
         """Update the point positions from the figure's `positions` property."""
         # Add a z coordinate of 1
-        xyz = np.empty((len(self.positions), 3), dtype=np.float32)
-        xyz[:, :2] = self.positions
-        xyz[:, 2] = 1.0
-
-        # Update the positions of the points
-        for vis in self.point_visuals:
-            vis.geometry.positions.set_data(xyz[vis._point_ix])
+        # Build the buffer already in draw order, so each chunk gets a
+        # contiguous slice instead of a scattered gather over the whole array.
+        xyz = _as_xyz(self.positions, z=1.0, order=self._chunks.order)
+        for i, vis in enumerate(self.point_visuals):
+            vis.geometry.positions.set_data(xyz[self._chunks.slice_for(i)])
             vis.geometry.positions.update_full()
 
         # Update the positions of the labels (keeping any offset - and
@@ -3662,6 +3774,14 @@ class ScatterFigure(BaseFigure):
                     offset[2],
                 )
 
+        # Positions moved, so the cached extents are stale. Chunk *membership*
+        # is now stale too - the Morton grouping describes where the points
+        # used to be - but re-chunking means rebuilding every visual, which is
+        # far too expensive mid-animation. Callers settle it with `rechunk()`
+        # once the points stop moving (see `process_moves`).
+        self._chunks.refresh_bounds(xyz[:, :2])
+        self._chunks_stale = True
+
         # Keep the connector lines attached while points (and labels) move
         self._sync_label_connector_positions()
         self._sync_group_label_positions()
@@ -3673,8 +3793,13 @@ class ScatterFigure(BaseFigure):
 
         # Update the positions of selected points
         if hasattr(self, "highlight_visuals"):
+            # The overlay is built separately and is not part of the chunk
+            # layout, so it gathers its own rows - sized by the selection
+            # rather than by N.
             for vis in self.highlight_visuals:
-                vis.geometry.positions.set_data(xyz[vis._point_ix])
+                vis.geometry.positions.set_data(
+                    _as_xyz(self.positions, z=1.0, order=vis._point_ix)
+                )
                 vis.geometry.positions.update_full()
 
     def move_points(self, new_positions, n_frames=20):
@@ -3739,6 +3864,8 @@ class ScatterFigure(BaseFigure):
         # If there are no more steps, remove the `to_move` attribute
         if self.to_move.size == 0:
             del self.to_move
+            # The points have settled; restore chunk locality.
+            self.rechunk()
             if self.show_label_lines:
                 self.make_label_lines()
             if self.show_distance_edges:

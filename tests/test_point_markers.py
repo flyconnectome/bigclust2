@@ -80,23 +80,25 @@ def test_same_value_maps_to_same_symbol_regardless_of_row_order():
 # --------------------------------------------------------------------------- #
 
 
-def test_single_marker_builds_one_visual_covering_every_point(make_scatter):
+def test_single_marker_covers_every_point(make_scatter):
+    """One marker means one symbol, however many chunks it is split across."""
     fig, _, points = make_scatter(n=150)
-    assert len(fig.point_visuals) == 1
+    assert {v.material.marker for v in fig.point_visuals} == {AVAILABLE_MARKERS[0]}
 
-    vis = fig.point_visuals[0]
-    assert np.array_equal(vis._point_ix, np.arange(150))
-    assert np.allclose(vis.geometry.positions.data[:, :2], points)
-    # Points are stored (N, 2); the visual gets z=0.
-    assert np.allclose(vis.geometry.positions.data[:, 2], 0.0)
+    covered = np.sort(np.concatenate([v._point_ix for v in fig.point_visuals]))
+    assert np.array_equal(covered, np.arange(150))
+
+    for vis in fig.point_visuals:
+        assert np.allclose(vis.geometry.positions.data[:, :2], points[vis._point_ix])
+        # Points are stored (N, 2); the visual gets z=0.
+        assert np.allclose(vis.geometry.positions.data[:, 2], 0.0)
 
 
 def test_multiple_markers_partition_the_points(make_scatter):
     markers = np.random.default_rng(0).choice(["a", "b", "c"], 150)
     fig, _, points = make_scatter(n=150, markers=markers)
 
-    assert len(fig.point_visuals) == 3
-    assert sorted(v.material.marker for v in fig.point_visuals) == sorted(
+    assert {v.material.marker for v in fig.point_visuals} == set(
         AVAILABLE_MARKERS[:3]
     )
 
@@ -135,8 +137,8 @@ def test_per_point_sizes_with_multiple_markers(make_scatter):
     sizes = np.linspace(1.0, 2.0, 60).astype(np.float32)
     fig.point_size = sizes
 
-    rebuilt = fig.make_points()
-    assert len(rebuilt) == 2
+    rebuilt, _ = fig.make_points()
+    assert {v.material.marker for v in rebuilt} == set(AVAILABLE_MARKERS[:2])
     for vis in rebuilt:
         assert len(vis.geometry.sizes.data) == len(vis._point_ix)
         assert np.allclose(

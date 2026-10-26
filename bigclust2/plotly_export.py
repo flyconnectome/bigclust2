@@ -32,31 +32,27 @@ _PYGFX_TO_PLOTLY_SYMBOL = {
 def _resolve_marker_symbols(scatter):
     """Return a per-point array of Plotly symbol names for *scatter*.
 
-    Uses the already-computed ``_marker_symbols`` attribute when available
-    (populated by ``ScatterFigure.make_points``), otherwise derives it from
-    ``scatter.markers`` using the same logic.
+    Uses the marker codes already computed by ``ScatterFigure.set_points``
+    when available, otherwise derives them from ``scatter.markers``. The
+    pygfx->Plotly mapping is applied to the handful of distinct symbols and
+    then gathered, rather than per point.
     """
-    from .scatter import AVAILABLE_MARKERS
+    from .scatter import marker_codes
 
-    if getattr(scatter, "_marker_symbols", None) is not None:
-        gfx_symbols = scatter._marker_symbols
-    elif scatter.markers is None:
-        return None  # all circles, let Plotly use its default
+    names = getattr(scatter, "_marker_names", None)
+    if names is not None:
+        codes = scatter._marker_codes
     else:
-        unique_types = np.unique(scatter.markers)
-        marker_map = dict(zip(unique_types, AVAILABLE_MARKERS))
-        gfx_symbols = np.array([marker_map[t] for t in scatter.markers])
+        codes, names = marker_codes(scatter.markers)
 
-    plotly_symbols = np.array(
-        [_PYGFX_TO_PLOTLY_SYMBOL.get(s, "circle") for s in gfx_symbols]
-    )
+    plotly_names = [_PYGFX_TO_PLOTLY_SYMBOL.get(s, "circle") for s in names]
 
     # If every point uses the same symbol, return a scalar string instead of
-    # an array so Plotly can apply it more efficiently.
-    unique = np.unique(plotly_symbols)
-    if len(unique) == 1:
-        return unique[0]
-    return plotly_symbols
+    # an array so Plotly can apply it more efficiently. `codes is None` means
+    # there is only one symbol to begin with.
+    if codes is None or len(set(plotly_names)) == 1:
+        return plotly_names[0]
+    return np.asarray(plotly_names, dtype=object)[codes]
 
 
 def scatter_to_plotly_figure(
@@ -123,13 +119,11 @@ def scatter_to_plotly_figure(
         marker["symbol"] = plotly_symbols
 
     if scatter.colors is not None:
-        if isinstance(scatter.colors, np.ndarray) and scatter.colors.ndim == 2:
-            marker["color"] = [
-                f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, {a})"
-                for r, g, b, a in scatter.colors
-            ]
-        else:
-            marker["color"] = np.asarray(scatter.colors)
+        # `ScatterFigure` normalizes colours to (N, 4) RGBA floats.
+        marker["color"] = [
+            f"rgba({int(r * 255)}, {int(g * 255)}, {int(b * 255)}, {a})"
+            for r, g, b, a in scatter.colors
+        ]
 
     customdata = None
     hovertemplate = "%{text}<extra></extra>"

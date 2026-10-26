@@ -1783,11 +1783,16 @@ class FeatureComparisonWidget(QtWidgets.QWidget):
 
         marker_symbols_a = None
         marker_symbols_b = None
-        if self.figure is not None and hasattr(self.figure, "_marker_symbols"):
+        if self.figure is not None and hasattr(self.figure, "marker_symbols_at"):
             try:
-                all_markers = np.asarray(self.figure._marker_symbols, dtype=object)
-                marker_symbols_a = all_markers[np.asarray(self.group_a_indices, dtype=int)]
-                marker_symbols_b = all_markers[np.asarray(self.group_b_indices, dtype=int)]
+                # Gather only the points in each group - the figure never
+                # materializes a per-point array of marker names.
+                marker_symbols_a = self.figure.marker_symbols_at(
+                    np.asarray(self.group_a_indices, dtype=int)
+                )
+                marker_symbols_b = self.figure.marker_symbols_at(
+                    np.asarray(self.group_b_indices, dtype=int)
+                )
             except Exception:
                 marker_symbols_a = None
                 marker_symbols_b = None

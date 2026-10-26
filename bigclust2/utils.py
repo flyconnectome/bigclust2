@@ -471,6 +471,72 @@ def rgb_from_segment_id(color_seed, segment_id):
     return tuple([v * 255 for v in colorsys.hsv_to_rgb(h, s, v)])
 
 
+def sorted_unique(values):
+    """Return the sorted unique entries of ``values``.
+
+    Equivalent to ``np.unique`` but hashes instead of sorting the full input,
+    which matters for large object/string arrays: ``np.unique`` sorts all N
+    entries, while this only sorts the (usually far fewer) distinct ones.
+    """
+    if isinstance(values, list):
+        values = np.asarray(values)  # pd.unique does not accept plain lists
+    return np.sort(pd.unique(values))
+
+
+def colors_to_rgba(colors):
+    """Convert per-point colours to an ``(N, 4)`` float32 RGBA array.
+
+    Parameters
+    ----------
+    colors : array-like
+        Either an ``(N,)`` sequence of colour specs (strings or RGB(A) tuples)
+        or an already-numeric ``(N, 3)``/``(N, 4)`` float array in ``[0, 1]``.
+
+    Returns
+    -------
+    colors : np.ndarray of shape (N, 4), dtype float32
+
+    Notes
+    -----
+    Colour specs are de-duplicated before conversion, so the (comparatively
+    expensive) ``cmap.Color`` calls scale with the number of *distinct*
+    colours rather than with ``N``. That matters for large scatters, where a
+    per-point conversion dominates load time.
+    """
+    import cmap as _cmap
+
+    colors = np.asarray(colors)
+
+    if colors.ndim == 2:
+        if colors.shape[1] not in (3, 4):
+            raise ValueError(
+                f"Expected (N, 3) or (N, 4) colour array, got {colors.shape}."
+            )
+        if colors.dtype.kind != "f":
+            raise ValueError(
+                "Numeric colour arrays must be floats in [0, 1], got dtype "
+                f"{colors.dtype}."
+            )
+        if colors.shape[1] == 4:
+            return colors.astype(np.float32, copy=False)
+        # Add the alpha channel without the two copies `hstack` would make.
+        out = np.empty((len(colors), 4), dtype=np.float32)
+        out[:, :3] = colors
+        out[:, 3] = 1.0
+        return out
+
+    if colors.ndim != 1:
+        raise ValueError(f"Expected 1D or 2D colour array, got {colors.ndim}D.")
+
+    # Keep NaN/None as their own category so that an unconvertible colour
+    # raises here just as a per-point conversion would have.
+    codes, uniques = pd.factorize(colors, use_na_sentinel=False)
+    lut = np.array(
+        [tuple(_cmap.Color(c).rgba) for c in uniques], dtype=np.float32
+    ).reshape(-1, 4)
+    return lut[codes]
+
+
 def labels_to_colors(
     labels,
     palette="vispy:husl",
@@ -479,12 +545,13 @@ def labels_to_colors(
     vmax=None,
     vcenter=None,
 ):
-    """Map integer cluster labels to RGBA colours.
+    """Map per-point values to RGBA colours.
 
     Parameters
     ----------
-    labels : array-like of int
-        Cluster assignment per point.  ``-1`` is treated as noise/unassigned.
+    labels : array-like
+        Value per point. Float input is mapped continuously, anything else
+        categorically. Null entries (NaN/None) get ``nan_color``.
     palette : str
         A ``cmap``-compatible colormap name used for distinct cluster colours.
     nan_color : tuple of 4 floats
@@ -513,43 +580,38 @@ def labels_to_colors(
         hi = vmax if vmax is not None else float(np.nanmax(labels))
 
         if vcenter is not None:
-            # Piecewise diverging normalisation
-            left_span = max(vcenter - lo, 1e-12)
-            right_span = max(hi - vcenter, 1e-12)
-
-            def _diverging_norm(v):
-                if v <= vcenter:
-                    return 0.5 * (v - lo) / left_span
-                else:
-                    return 0.5 + 0.5 * (v - vcenter) / right_span
-
-            normed = np.array([_diverging_norm(v) for v in labels], dtype=np.float64)
+            # Piecewise diverging normalisation. Folding the division into the
+            # multiplier keeps this to one temporary per arm.
+            left_scale = 0.5 / max(vcenter - lo, 1e-12)
+            right_scale = 0.5 / max(hi - vcenter, 1e-12)
+            normed = np.where(
+                labels <= vcenter,
+                (labels - lo) * left_scale,
+                (labels - vcenter) * right_scale + 0.5,
+            )
         else:
             span = hi - lo if hi != lo else 1.0
-            normed = (labels - lo) / span
+            normed = (labels - lo) * (1.0 / span)
 
-        normed = np.clip(normed, 0.0, 1.0)
-        colors = np.empty((len(labels), 4), dtype=np.float32)
-        for i, val in enumerate(normed):
-            if np.isnan(val):
-                colors[i] = np.array(nan_color, dtype=np.float32)
-            else:
-                c = colormap_obj(val)
-                colors[i] = np.array(c.rgba, dtype=np.float32)
+        # `colormap_obj` is vectorised; NaNs come back as transparent black,
+        # so blank them out first and paint them with `nan_color` afterwards.
+        is_nan = np.isnan(normed)
+        np.clip(normed, 0.0, 1.0, out=normed)
+        normed[is_nan] = 0.0
+        colors = np.asarray(colormap_obj(normed), dtype=np.float32).reshape(-1, 4)
+        colors[is_nan] = np.asarray(nan_color, dtype=np.float32)
     else:
-        unique_labels = sorted(set(labels[~pd.isnull(labels)].tolist()))
-        n = max(len(unique_labels), 1)
+        # `sort=True` makes the codes index the sorted unique values directly,
+        # so a given label always gets the same palette entry.
+        codes, uniques = pd.factorize(labels, sort=True)
 
-        palette_colors = list(colormap_obj.iter_colors(n))
-        cluster_to_color = {
-            lbl: np.array(palette_colors[i].rgba, dtype=np.float32)
-            for i, lbl in enumerate(unique_labels)
-        }
-
-        ignore = np.array(nan_color, dtype=np.float32)
-        colors = np.empty((len(labels), 4), dtype=np.float32)
-        for i, lbl in enumerate(labels):
-            colors[i] = cluster_to_color.get(lbl, ignore)
+        # One extra row holding `nan_color`: `pd.factorize` codes nulls as -1,
+        # which indexes exactly that last row, so this is a single gather.
+        lut = np.empty((len(uniques) + 1, 4), dtype=np.float32)
+        if len(uniques):
+            lut[:-1] = [c.rgba for c in colormap_obj.iter_colors(len(uniques))]
+        lut[-1] = np.asarray(nan_color, dtype=np.float32)
+        colors = lut[codes]
 
     return colors
 

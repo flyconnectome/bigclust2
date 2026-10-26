@@ -3701,12 +3701,16 @@ class MainWindow(QMainWindow):
         if meta is None or "dataset" not in meta.columns:
             return []
 
-        values = []
-        for dataset in meta["dataset"].dropna().tolist():
-            text = str(dataset).strip()
-            if text:
-                values.append(text)
-        return sorted(set(values))
+        # Reduce to the distinct datasets first - this column has one entry
+        # per point, and only the (few) distinct values need cleaning up.
+        # NB: de-duplicate without sorting, as the raw values need not be
+        # mutually orderable (the strings are sorted on the way out).
+        values = {
+            text
+            for dataset in pd.unique(meta["dataset"].dropna())
+            if (text := str(dataset).strip())
+        }
+        return sorted(values)
 
     def show_annotation_dialog(self):
         """Show a single reusable annotation dialog for the current selection."""

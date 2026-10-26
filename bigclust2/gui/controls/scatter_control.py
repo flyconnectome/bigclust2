@@ -21,7 +21,7 @@ from ...embeddings import (
 )
 from ...clusters import evaluate_clustering_sample
 from ...data import embedding_entry_data
-from ...utils import labels_to_colors, is_color_column
+from ...utils import labels_to_colors, is_color_column, sorted_unique
 from .toggle_dialog import TabToggleDialog
 from .filters import (
     MultiHandleSlider as _MultiHandleSlider,
@@ -203,8 +203,11 @@ class ScatterControls(QtWidgets.QWidget):
 
     @property
     def labels_unique(self):
-        """Get unique labels."""
-        return np.unique(self.figure.labels)
+        """Get unique labels (empty before the figure has any points)."""
+        labels = self.figure.labels
+        if labels is None:
+            return np.array([], dtype=object)
+        return sorted_unique(labels)
 
     @property
     def selected_indices(self):
@@ -4136,31 +4139,27 @@ class ScatterControls(QtWidgets.QWidget):
             labels = self.meta_data[label].astype(str).fillna("").values
 
         # For labels that were set manually by the user (e.g. via pushing annotations)
-        for i, label in self.label_overrides.items():
+        for i, override in self.label_overrides.items():
             # Label overrides {dend index: label}
             # We need to translate into original indices
-            labels[i] = label
+            labels[i] = override
 
         # Add counts - e.g. "CB12345(10)"
         if self.label_count_check.isChecked():
-            counts = pd.Series(labels).value_counts().to_dict()  # dict is much faster
-            labels = [
-                f"{label}({counts[label]})" if counts[label] > 1 else label
-                for label in labels
-            ]
+            # Build the suffixed text once per distinct label, then gather, so
+            # the cost scales with the number of labels rather than of points.
+            codes, distinct = pd.factorize(labels)
+            counts = np.bincount(codes, minlength=len(distinct))
+            uniques = np.array(
+                [f"{u}({c})" if c > 1 else u for u, c in zip(distinct, counts)],
+                dtype=object,
+            )
+            labels = uniques[codes]
+        else:
+            uniques = None
         self.figure.labels = labels
 
-        # Update searchbar completer
-        if not hasattr(self, "_label_models"):
-            self._label_models = {}
-        if (label, self.label_count_check.isChecked()) not in self._label_models:
-            self._label_models[(label, self.label_count_check.isChecked())] = (
-                QtCore.QStringListModel(np.unique(labels).tolist())
-            )
-
-        self.searchbar_completer.setModel(
-            self._label_models[(label, self.label_count_check.isChecked())]
-        )
+        self.update_searchbar_completer(uniques)
 
         # Update label lines
         if self.figure.show_label_lines:
@@ -4473,8 +4472,15 @@ class ScatterControls(QtWidgets.QWidget):
         self._sync_method_settings_widgets()
         self.calculate_embeddings_maybe()
 
-    def update_searchbar_completer(self):
-        """Update the searchbar completer."""
+    def update_searchbar_completer(self, uniques=None):
+        """Update the searchbar completer.
+
+        Parameters
+        ----------
+        uniques :   array-like, optional
+                    The distinct labels, if the caller already knows them.
+                    Saves re-scanning every point to recover them.
+        """
         if not hasattr(self, "_label_models"):
             self._label_models = {}
 
@@ -4483,14 +4489,16 @@ class ScatterControls(QtWidgets.QWidget):
         logger.debug(
             f"Updating searchbar completer for {label} with {len(labels)} labels"
         )
-        if (label, self.label_count_check.isChecked()) not in self._label_models:
-            self._label_models[(label, self.label_count_check.isChecked())] = (
-                QtCore.QStringListModel(np.unique(labels).tolist())
+        key = (label, self.label_count_check.isChecked())
+        if key not in self._label_models:
+            uniques = (
+                sorted_unique(labels)
+                if uniques is None
+                else np.sort(np.asarray(uniques))
             )
+            self._label_models[key] = QtCore.QStringListModel(uniques.tolist())
 
-        self.searchbar_completer.setModel(
-            self._label_models[(label, self.label_count_check.isChecked())]
-        )
+        self.searchbar_completer.setModel(self._label_models[key])
 
     def calculate_embeddings_maybe(self):
         """Recalculate embeddings if the auto-run checkbox is checked."""

@@ -1,6 +1,5 @@
 import re
 import textwrap
-import cmap
 import inspect
 
 import numpy as np
@@ -25,12 +24,50 @@ from .label_placement import (
     spatial_components,
 )
 from .selection import LassoGizmo, SelectionGizmo
-from .utils import check_finite_features
+from .utils import check_finite_features, colors_to_rgba
 from .visuals import points2gfx, text2gfx, lines2gfx
 
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
 # Drop markers which look too similar to others
 AVAILABLE_MARKERS.remove("ring")
+
+
+def marker_codes(markers):
+    """Group per-point marker values onto pygfx marker names.
+
+    Distinct values are assigned symbols from `AVAILABLE_MARKERS` in sorted
+    order, so a given value always maps to the same symbol. Returning codes
+    rather than a per-point array of names keeps this cheap on large scatters:
+    the codes are a small integer array, and grouping by them is a vectorised
+    integer compare instead of an object-array one.
+
+    Parameters
+    ----------
+    markers :   (N,) array-like | None
+                Per-point marker values (e.g. the dataset each point is from).
+                `None` means "all the same marker".
+
+    Returns
+    -------
+    codes :     (N,) array of int | None
+                Index into `symbols` per point. `None` when `markers` is None,
+                meaning every point uses ``symbols[0]``.
+    symbols :   list of str
+                The pygfx marker name for each code.
+    """
+    if markers is None:
+        return None, [AVAILABLE_MARKERS[0]]
+
+    # `sort=True` makes the codes index the sorted unique values directly.
+    codes, unique_types = pd.factorize(markers, sort=True, use_na_sentinel=False)
+
+    assert len(unique_types) <= len(
+        AVAILABLE_MARKERS
+    ), f"Only {len(AVAILABLE_MARKERS)} unique types are supported."
+
+    # There are only a handful of markers, so int8 is plenty - and at scatter
+    # sizes it is both 8x smaller and ~6x faster to compare than pandas' intp.
+    return codes.astype(np.int8), AVAILABLE_MARKERS[: len(unique_types)]
 
 # Alpha multiplier for points outside the current selection scope
 SCOPE_FADE_ALPHA = 0.05
@@ -124,6 +161,9 @@ class ScatterFigure(BaseFigure):
         self.label_visuals = None
         self._label_colors = None
         self.point_visuals = None
+        self._marker_codes = None
+        self._marker_names = None
+        self.hover_info_org = None  # hover format/column, set by `set_points`
         self.positions = None
         self.metadata = None
         # Multiple-embedding support. `embedding_entries` is a list of dicts
@@ -572,19 +612,23 @@ class ScatterFigure(BaseFigure):
             ), "Selection mask must be the same length as the plot."
             x = np.where(x)[0]
 
+        # Sort and de-duplicate once. `_selected` is therefore always sorted
+        # and unique, which lets the "what is new" test below be a binary
+        # search rather than another sort.
+        x = np.unique(np.asarray(x, dtype=int))
+
         # Which points are newly selected
         # Update the selection counter and last selected time
-        newly_selected = (
-            set(x) - set(self._selected) if self._selected is not None else set(x)
-        )
-        if newly_selected:
+        prev = self._selected
+        newly_selected = x if prev is None or not len(prev) else x[~np.isin(x, prev)]
+        if len(newly_selected):
             self._selection_counter += 1
-            self.metadata.loc[list(newly_selected), "_last_selected"] = (
+            self.metadata.loc[newly_selected, "_last_selected"] = (
                 self._selection_counter
             )
 
-        # Set the selected points (make sure to sort them)
-        self._selected = np.asarray(sorted(x), dtype=int)
+        # Set the selected points (already sorted/de-duplicated above)
+        self._selected = x
 
         # Restrict selection to the current scope (see `set_scope`)
         mask = self._selection_scope_mask
@@ -1155,7 +1199,7 @@ class ScatterFigure(BaseFigure):
             ), "Selection mask must be the same length as the figure."
             points = np.where(points)[0]
         elif isinstance(points, int):
-            points = [points]
+            points = np.array([points])
         elif isinstance(points, list):
             points = np.array(points)
         elif not isinstance(points, np.ndarray):
@@ -1166,9 +1210,7 @@ class ScatterFigure(BaseFigure):
 
         # Create the new selection visuals
         if len(self.selected) > 0:
-            self.highlight_visuals = self.make_points(
-                mask=np.isin(np.arange(len(self)), points)
-            )
+            self.highlight_visuals = self.make_points(ix=points)
             for vis in self.highlight_visuals:
                 vis.material.edge_color = color
                 vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
@@ -1195,73 +1237,119 @@ class ScatterFigure(BaseFigure):
         self.point_visuals = self.make_points()
         for p in self.point_visuals:
             self.scatter_group.add(p)
+            if self._hover_enabled:
+                p.add_event_handler(self._on_hover, "pointer_enter", "pointer_leave")
 
-    def make_points(self, mask=None):
-        """Create the visuals for the points."""
+    @property
+    def _hover_enabled(self):
+        """Whether hover info was configured (see `set_points`)."""
+        return self.hover_info_org is not None
+
+    def marker_symbols_at(self, indices):
+        """Return the pygfx marker names for the given point indices.
+
+        Gathers from the (small) code array rather than materializing a
+        per-point array of names, which at scatter sizes would be hundreds of
+        MB of pointers. Returns `None` if no markers are set.
+        """
+        names = self._marker_names
+        if names is None:
+            return None
+        codes = self._marker_codes
+        if codes is None:
+            return np.full(len(np.asarray(indices)), names[0], dtype=object)
+        return np.asarray(names, dtype=object)[codes[indices]]
+
+    def make_points(self, ix=None):
+        """Create the visuals for the points.
+
+        Parameters
+        ----------
+        ix :    (M,) int array, optional
+                Restrict the visuals to these point indices (used for the
+                selection overlay, see `highlight_points`). `None` means all
+                points, in order - the common case, where the per-group
+                gathers below (a full copy of positions, colors and sizes
+                each) can be skipped entirely.
+        """
+        codes, symbols = self._marker_codes, self._marker_names
+        if symbols is None:
+            return []
+        if ix is not None:
+            ix = np.asarray(ix)
+
         visuals = []
-
-        if self.markers is None:
-            self._marker_symbols = np.full(len(self), "circle")
-        else:
-            assert len(self.markers) == len(
-                self
-            ), "Length of leaf_types must match length of figure."
-            unique_types = np.unique(self.markers)
-
-            assert len(unique_types) <= len(
-                AVAILABLE_MARKERS
-            ), "Only 10 unique types are supported."
-            marker_map = dict(zip(unique_types, AVAILABLE_MARKERS))
-            self._marker_symbols = np.array([marker_map[t] for t in self.markers])
-
-        # Create the visuals
-        for m in np.unique(self._marker_symbols):
-            color = "w"
-            if mask is None:
-                ix = np.where(self._marker_symbols == m)[0]
-                this_meta = self.metadata.iloc[ix]
-                this_pos = self.positions[ix]
-                if self.colors is not None:
-                    color = np.array(
-                        [
-                            tuple(cmap.Color(c).rgba)
-                            for c in self.colors[self._marker_symbols == m]
-                        ]
-                    )
-                this_size = self.point_size
+        for code, marker in enumerate(symbols):
+            # `group_ix is None` means "every point, in order".
+            if codes is None:
+                group_ix = ix
+            elif ix is None:
+                group_ix = np.where(codes == code)[0]
             else:
-                this_meta = self.metadata.iloc[mask & (self._marker_symbols == m)]
-                this_pos = self.positions[mask & (self._marker_symbols == m)]
-                ix = np.where(mask & (self._marker_symbols == m))[0]
-                if self.colors is not None:
-                    color = np.array(
-                        [
-                            tuple(cmap.Color(c).rgba)
-                            for c in self.colors[mask & (self._marker_symbols == m)]
-                        ]
-                    )
-                if isinstance(self.point_size, (int, float)):
-                    this_size = self.point_size
-                else:
-                    this_size = self.point_size[mask & (self._marker_symbols == m)]
-            if this_meta.empty:
+                # Only scan the requested points, not all N.
+                group_ix = ix[codes[ix] == code]
+
+            if group_ix is None:
+                n_pts = len(self)
+                positions, colors, sizes = self.positions, self.colors, self.point_size
+            else:
+                n_pts = len(group_ix)
+                positions = self.positions[group_ix]
+                colors = None if self.colors is None else self.colors[group_ix]
+                sizes = (
+                    self.point_size
+                    if isinstance(self.point_size, (int, float))
+                    else self.point_size[group_ix]
+                )
+            if not n_pts:
                 continue
+
+            # Points are stored as (N, 2); the visuals want (N, 3) at z=0.
+            xyz = np.empty((n_pts, 3), dtype=np.float32)
+            xyz[:, :2] = positions
+            xyz[:, 2] = 0.0
+
             vis = points2gfx(
-                np.append(
-                    this_pos,
-                    np.zeros(len(this_pos)).reshape(-1, 1),
-                    axis=1,
-                ),
-                color=color,
-                size=this_size * self.point_scale,
-                marker=m,
+                xyz,
+                color="w" if colors is None else colors,
+                size=sizes * self.point_scale,
+                marker=marker,
                 size_space="world",
-                pick_write=self.hover_info_org is not None,
+                pick_write=self._hover_enabled,
             )
-            vis._point_ix = ix
+            vis._point_ix = np.arange(n_pts) if group_ix is None else group_ix
+            # Record what we uploaded so the colour refresh does not have to
+            # read it back off the renderer.
+            if colors is not None:
+                vis._base_colors = colors
             visuals.append(vis)
 
         return visuals
+
+    def _on_hover(self, event):
+        """Show/hide the hover widget for the point under the cursor."""
+        # Note: we could use e.g. shift-hover to show more/different info?
+        # The renderer already resolved which point is under the cursor, so
+        # take its index straight from the pick buffer rather than scanning
+        # every point in the visual.
+        if (
+            event.type == "pointer_enter"
+            and not getattr(self, "_hide_hover", False)
+            and (hovered := (event.pick_info or {}).get("vertex_index")) is not None
+        ):
+            vis = event.current_target
+            coords = vis.geometry.positions.data
+            self.hover_widget.visible = True
+            self._update_hover_widget(
+                self.get_hover_info(vis._point_ix[hovered]),
+                (event.x, event.y),
+                self.world_to_screen(coords[hovered]),
+            )
+        elif self.hover_widget.visible:
+            self.hover_widget.visible = False
+
+        # Request a redraw
+        self.canvas.request_draw()
 
     def make_hover_widget(self, color=(0, 0, 0, 0.75), font_color=(1, 1, 1, 1)):
         """Generate a widget for hover info.
@@ -3139,7 +3227,7 @@ class ScatterFigure(BaseFigure):
                 raise ValueError(f"Column '{col}' not found in metadata.")
 
         # Add column to track when this row was last selected (for selection history tracking)
-        self.metadata["_last_selected"] = -1
+        self.metadata["_last_selected"] = np.full(len(metadata), -1, dtype=np.int32)
         self._selection_counter = 0
 
         self.default_label_col = label_col
@@ -3150,8 +3238,22 @@ class ScatterFigure(BaseFigure):
         self._invalidate_label_placement()
         self.labels = metadata[label_col].astype(str).values if label_col else None
         self.ids = metadata[id_col].values if id_col else None
-        self.colors = metadata[color_col].values if color_col else None
+        # Normalize to (N, 4) RGBA right here so that `self.colors` has a
+        # single representation everywhere downstream (and the - comparatively
+        # expensive - conversion happens once per colour change, not per
+        # `make_points` call).
+        self.colors = (
+            colors_to_rgba(metadata[color_col].values) if color_col else None
+        )
         self.markers = metadata[marker_col].values if marker_col else None
+        # Classify once here (like the colours above) so that rebuilding the
+        # visuals - which happens on every selection change, via
+        # `highlight_points` - does not re-factorize all N markers.
+        self._marker_codes, self._marker_names = marker_codes(self.markers)
+        if self._marker_codes is not None:
+            assert len(self._marker_codes) == len(
+                metadata
+            ), "Length of markers must match length of figure."
 
         # Make sure distances and features have the same order as the points
         # N.B. we're tracking both distances and features in a dictionary
@@ -3249,38 +3351,10 @@ class ScatterFigure(BaseFigure):
 
         # Re-apply scope fading to the new visuals (ignored if the
         # scope mask no longer matches the number of points)
-        self._apply_scope_to_visuals()
+        self._refresh_point_colors()
 
-        # Setup hover info
+        # Setup hover info (the handler itself is attached in `make_visuals`)
         if hover_col is not None:
-
-            def hover(event):
-                # Note: we could use e.g. shift-hover to show more/different info?
-                if event.type == "pointer_enter" and not getattr(
-                    self, "_hide_hover", False
-                ):
-                    pos = self.screen_to_world((event.x, event.y))
-                    vis = event.current_target
-                    coords = vis.geometry.positions.data
-                    dist = np.linalg.norm(coords[:, :2] - pos[:2], axis=1)
-                    closest = np.argmin(dist)
-                    point_ix = vis._point_ix[closest]
-
-                    self.hover_widget.visible = True
-                    self._update_hover_widget(
-                        self.get_hover_info(point_ix),
-                        (event.x, event.y),
-                        self.world_to_screen(coords[closest]),
-                    )
-                elif self.hover_widget.visible:
-                    self.hover_widget.visible = False
-
-                # Request a redraw
-                self.canvas.request_draw()
-
-            for vis in self.point_visuals:
-                vis.add_event_handler(hover, "pointer_enter", "pointer_leave")
-
             self.hover_widget = self.make_hover_widget()
             self.overlay_scene.add(self.hover_widget)
 
@@ -3329,7 +3403,7 @@ class ScatterFigure(BaseFigure):
     @property
     def hover_info(self):
         """Hover text for all points (computed on demand)."""
-        if getattr(self, "hover_info_org", None) is None:
+        if self.hover_info_org is None:
             return None
         return np.array(
             [
@@ -3427,12 +3501,17 @@ class ScatterFigure(BaseFigure):
         colors : np.ndarray
             Can be:
                 - (N, ) list of string colors
-                - (N, 3) array of RGB colors
-                - (N, 4) array of RGBA colors
+                - (N, 3) array of RGB floats in [0, 1]
+                - (N, 4) array of RGBA floats in [0, 1]
             N must match the number of points in the scatterplot.
             Same order as the points provided in `set_points()`.
         sync_to_viewer : bool
             Whether to also update the colors in the synced neuroglancer viewer (if any).
+
+        Notes
+        -----
+        An already-normalized ``(N, 4)`` float32 array is retained by
+        reference rather than copied, so do not mutate it in place afterwards.
 
         """
         if isinstance(colors, pd.arrays.ArrowStringArray):
@@ -3444,20 +3523,11 @@ class ScatterFigure(BaseFigure):
         if len(colors) != len(self):
             raise ValueError(f"Expected {len(self)} colors, got {len(colors)}.")
 
-        if isinstance(colors, list) and isinstance(colors[0], str):
-            colors = np.array([tuple(cmap.Color(c).rgba) for c in colors])
-        elif isinstance(colors, np.ndarray):
-            if colors.ndim == 1:
-                colors = np.array([tuple(cmap.Color(c).rgba) for c in colors])
-            elif colors.ndim == 2 and colors.shape[1] == 3:
-                # Add an alpha channel if not provided
-                colors = np.hstack((colors, np.ones((len(colors), 1))))
-
-        self.colors = colors.astype(np.float32)
+        self.colors = colors_to_rgba(colors)
 
         for vis in self.point_visuals:
             vis._base_colors = self.colors[vis._point_ix]
-        self._apply_scope_to_visuals()
+        self._refresh_point_colors()
 
         if sync_to_viewer and hasattr(self, "ngl_viewer"):
             self.set_viewer_colors(colors)
@@ -3488,10 +3558,15 @@ class ScatterFigure(BaseFigure):
         if mask is not None and self._selected is not None and len(self._selected):
             self.selected = self._selected
 
-        self._apply_scope_to_visuals()
+        self._refresh_point_colors()
 
-    def _apply_scope_to_visuals(self):
-        """(Re-)apply scope fading on top of the base point colors."""
+    def _refresh_point_colors(self):
+        """Push the base point colors to the GPU, with scope fading applied.
+
+        This is the single upload path for point colors: `set_colors` updates
+        `vis._base_colors` and relies on this to push them, and `set_scope`
+        calls it to (un)fade points outside the scope.
+        """
         mask = self._selection_scope_mask
         if mask is not None and len(mask) != len(self):
             mask = None  # stale mask (e.g. after set_points) -> ignore
@@ -3500,11 +3575,14 @@ class ScatterFigure(BaseFigure):
             return
 
         for vis in self.point_visuals:
-            if not hasattr(vis, "_base_colors"):
+            base = getattr(vis, "_base_colors", None)
+            if base is None:
                 # Lazily capture the unfaded colors created by make_points()
-                vis._base_colors = vis.geometry.colors.data.copy()
-            colors = vis._base_colors.copy()
-            if mask is not None:
+                base = vis._base_colors = vis.geometry.colors.data.copy()
+            if mask is None:
+                colors = base  # no fading -> upload the base colors as they are
+            else:
+                colors = base.copy()  # fading mutates alpha, so work on a copy
                 colors[~mask[vis._point_ix], 3] *= SCOPE_FADE_ALPHA
             vis.geometry.colors.set_data(colors)
             vis.geometry.colors.update_full()
@@ -3559,9 +3637,9 @@ class ScatterFigure(BaseFigure):
     def update_point_position(self):
         """Update the point positions from the figure's `positions` property."""
         # Add a z coordinate of 1
-        xyz = np.append(
-            self.positions, np.ones((len(self.positions), 1)), axis=1
-        ).astype(np.float32)
+        xyz = np.empty((len(self.positions), 3), dtype=np.float32)
+        xyz[:, :2] = self.positions
+        xyz[:, 2] = 1.0
 
         # Update the positions of the points
         for vis in self.point_visuals:

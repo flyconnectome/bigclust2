@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 
 import numpy as np
 
+from .utils import points_in_rect
+
 # Bits per axis for the Morton key. 16 gives a 65536x65536 grid, which is finer
 # than any display, and keeps the interleaved key inside uint32.
 MORTON_BITS = 16
@@ -177,7 +179,7 @@ def spatial_chunks(xy, target, min_size, bits=MORTON_BITS, rng=None):
         # One chunk: no grouping to do, but still a permutation to shuffle.
         np.arange(n, dtype=np.intp)
         if n_chunks <= 1
-        else _argsort_keys(morton_keys(xy, bits=bits))
+        else argsort_keys(morton_keys(xy, bits=bits))
     )
     # `linspace` spreads the remainder across chunks instead of leaving a
     # short one at the end.
@@ -191,17 +193,26 @@ def spatial_chunks(xy, target, min_size, bits=MORTON_BITS, rng=None):
     return order, starts
 
 
-def _argsort_keys(keys):
-    """Stable argsort of uint32 keys.
+def argsort_keys(keys):
+    """Stable argsort of non-negative integer keys that fit in 32 bits.
 
     ``np.argsort(kind="stable")`` does not take a radix path for this dtype and
     measures ~5x slower than packing each key together with its index into a
-    uint64 and sorting that. Carrying the index in the low bits also makes ties
-    resolve by index, which is exactly what "stable" means, so the result is
-    identical.
+    uint64 and sorting that (4.6s -> 0.5s over 20M label codes). Carrying the
+    index in the low bits also makes ties resolve by index, which is exactly
+    what "stable" means, so the result is identical.
+
+    Falls back to ``np.argsort`` when the keys or the indices do not fit. A
+    uint32 input is taken on trust - that is the Morton-key caller, and a range
+    check would be a wasted pass over every point.
     """
     n = len(keys)
     if n >= 1 << 32:  # indices no longer fit in the low 32 bits
+        return np.argsort(keys, kind="stable")
+    # uint32 is taken on trust - that is the Morton-key caller, and the range
+    # check would be a wasted pass over every point. For anything else it costs
+    # ~1% of the sort it is guarding.
+    if keys.dtype != np.uint32 and n and (keys.min() < 0 or keys.max() >= 1 << 32):
         return np.argsort(keys, kind="stable")
     packed = (keys.astype(np.uint64) << np.uint64(32)) | np.arange(
         n, dtype=np.uint64
@@ -285,6 +296,19 @@ def visible_chunks(bounds, view):
             & (bounds[:, 1] <= ymax)
             & (bounds[:, 3] >= ymin)
         )
+
+
+def contained_chunks(bounds, view):
+    """Mask of chunks lying entirely inside the view rectangle.
+
+    A subset of :func:`visible_chunks`. Useful when a caller needs an exact
+    count of the points on screen: every point of a contained chunk is on
+    screen, so those chunks can be counted from `sizes` alone and only the
+    chunks straddling the viewport edge have to be tested point by point.
+    """
+    # A box is contained exactly when both its corners are - which is the same
+    # point-in-rectangle test the figure applies to the points themselves.
+    return points_in_rect(bounds[:, :2], view) & points_in_rect(bounds[:, 2:], view)
 
 
 def draw_counts(sizes, visible, budget, min_per_chunk=1):
@@ -422,6 +446,52 @@ class ChunkLayout:
     def slice_for(self, i):
         """The slice of `order` (and of any draw-order buffer) for chunk `i`."""
         return slice(self.starts[i], self.starts[i + 1])
+
+    def points_in_view(self, xy, view, limit):
+        """Indices of the points of `xy` inside `view`, or ``None`` past `limit`.
+
+        Callers that only act on a small number of visible points - the label
+        system - do not need the set once it is bigger than they are willing to
+        handle, so this stops counting there instead of testing every point.
+
+        Chunks lying entirely inside the view are counted from `sizes` alone,
+        which is what makes a zoomed-out view (where the answer is always "too
+        many") cost a pass over the chunks rather than over the points. Only
+        chunks straddling the edge are tested point by point; the work is
+        bounded by how many points those chunks hold.
+
+        `xy` must be in the original point order, as `order` indexes it.
+        """
+        # Containment implies visibility, so the cheap bail needs only `inside`.
+        inside = contained_chunks(self.bounds, view)
+        if self.sizes[inside].sum() > limit:
+            return None
+
+        found = []
+        total = 0
+        for i in np.flatnonzero(visible_chunks(self.bounds, view)):
+            ix = self.points_in(i)
+            if not inside[i]:
+                ix = ix[points_in_rect(xy[ix], view)]
+            total += len(ix)
+            if total > limit:
+                return None
+            found.append(ix)
+
+        out = np.concatenate(found) if found else np.empty(0, dtype=np.intp)
+        # Chunks are visited in draw order, so sort to give callers point
+        # order - which is what a plain mask test would have returned, and what
+        # lets a caller cache on the result's bytes.
+        out.sort()
+        return out
+
+    def points_in(self, i):
+        """The original point indices making up chunk `i`.
+
+        The one place that spells out how `order` and `starts` combine, so
+        callers never have to index `order` themselves.
+        """
+        return self.order[self.slice_for(i)]
 
     def refresh_bounds(self, xyz_in_draw_order):
         """Recompute `bounds` after the points have moved."""

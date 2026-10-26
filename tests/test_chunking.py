@@ -16,7 +16,10 @@ import numpy as np
 import pytest
 
 from bigclust2.chunking import (
+    ChunkLayout,
+    argsort_keys,
     chunk_bounds,
+    contained_chunks,
     chunk_count,
     draw_counts,
     group_chunk_target,
@@ -509,3 +512,100 @@ def test_a_drawn_prefix_is_an_unbiased_sample():
         assert abs(prefix_rate - whole_rate) < 0.15, (
             f"chunk {i}: prefix {prefix_rate:.2f} vs whole {whole_rate:.2f}"
         )
+
+
+# --------------------------------------------------------------------------- #
+# argsort_keys
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    "keys",
+    [
+        np.array([], dtype=np.int64),
+        np.array([0], dtype=np.int64),
+        np.array([3, 1, 2, 1, 0], dtype=np.int64),
+        np.array([5, 5, 5, 5], dtype=np.int64),  # all ties: order must hold
+        np.array([2, 0, 1], dtype=np.uint32),
+    ],
+)
+def test_argsort_keys_matches_a_stable_argsort(keys):
+    assert np.array_equal(argsort_keys(keys), np.argsort(keys, kind="stable"))
+
+
+def test_argsort_keys_falls_back_for_keys_that_do_not_fit():
+    """The packing carries the key in the high 32 bits, so wide keys bail."""
+    keys = np.array([1 << 40, 0, 1 << 33], dtype=np.int64)
+    assert np.array_equal(argsort_keys(keys), np.argsort(keys, kind="stable"))
+
+
+def test_argsort_keys_falls_back_for_negative_keys():
+    keys = np.array([2, -1, 0], dtype=np.int64)
+    assert np.array_equal(argsort_keys(keys), np.argsort(keys, kind="stable"))
+
+
+def test_argsort_keys_is_stable_across_a_random_sweep():
+    rng = np.random.default_rng(0)
+    for _ in range(20):
+        keys = rng.integers(0, 50, rng.integers(1, 500)).astype(np.int64)
+        assert np.array_equal(argsort_keys(keys), np.argsort(keys, kind="stable"))
+
+
+# --------------------------------------------------------------------------- #
+# ChunkLayout.points_in
+# --------------------------------------------------------------------------- #
+
+
+def test_points_in_returns_a_chunks_original_indices():
+    layout = ChunkLayout(
+        order=np.array([4, 0, 2, 1, 3], dtype=np.intp),
+        starts=np.array([0, 2, 5], dtype=np.intp),
+        bounds=np.zeros((2, 4)),
+    )
+    assert list(layout.points_in(0)) == [4, 0]
+    assert list(layout.points_in(1)) == [2, 1, 3]
+
+
+def test_points_in_covers_every_point_exactly_once():
+    layout = ChunkLayout(
+        order=np.array([4, 0, 2, 1, 3], dtype=np.intp),
+        starts=np.array([0, 2, 5], dtype=np.intp),
+        bounds=np.zeros((2, 4)),
+    )
+    seen = np.concatenate([layout.points_in(i) for i in range(layout.n_chunks)])
+    assert sorted(seen.tolist()) == [0, 1, 2, 3, 4]
+
+
+# --------------------------------------------------------------------------- #
+# contained_chunks
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def chunk_boxes():
+    #              xmin  ymin  xmax  ymax
+    return np.array(
+        [
+            [0.1, 0.1, 0.2, 0.2],  # wholly inside
+            [-1.0, -1.0, 0.5, 0.5],  # straddles the left/bottom edge
+            [5.0, 5.0, 6.0, 6.0],  # far outside
+            [np.nan, np.nan, np.nan, np.nan],  # empty chunk
+            [0.0, 0.0, 1.0, 1.0],  # exactly the view
+        ]
+    )
+
+
+def test_contained_chunks_picks_the_fully_enclosed_ones(chunk_boxes):
+    inside = contained_chunks(chunk_boxes, (0.0, 0.0, 1.0, 1.0))
+    assert list(inside) == [True, False, False, False, True]
+
+
+def test_containment_implies_visibility(chunk_boxes):
+    view = (0.0, 0.0, 1.0, 1.0)
+    assert not (contained_chunks(chunk_boxes, view) & ~visible_chunks(chunk_boxes, view)).any()
+
+
+def test_a_chunk_with_no_finite_point_is_never_contained(chunk_boxes):
+    assert not contained_chunks(chunk_boxes, (-1e9, -1e9, 1e9, 1e9))[3]
+
+

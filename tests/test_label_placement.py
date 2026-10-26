@@ -13,6 +13,7 @@ import pygfx as gfx
 import pytest
 
 from bigclust2.figure import BaseFigure
+from bigclust2.utils import SparseMap
 from bigclust2.label_placement import (
     N_SLOTS,
     SLOT_LEFT,
@@ -397,14 +398,20 @@ class _StubFigure:
     _sync_group_label_positions = ScatterFigure._sync_group_label_positions
     _group_label_extent = ScatterFigure._group_label_extent
     _label_codes = ScatterFigure._label_codes
+    _visible_label_indices = ScatterFigure._visible_label_indices
     view_bounds = BaseFigure.view_bounds
     is_visible_pos = BaseFigure.is_visible_pos
     label_debug_report = ScatterFigure.label_debug_report
     _format_group_label_debug = ScatterFigure._format_group_label_debug
     _format_individual_label_debug = ScatterFigure._format_individual_label_debug
     _describe_blocker = staticmethod(ScatterFigure._describe_blocker)
+    show_labels = ScatterFigure.show_labels
     hide_labels = ScatterFigure.hide_labels
+    _is_label_suppressed = ScatterFigure._is_label_suppressed
+    _as_label_indices = staticmethod(ScatterFigure._as_label_indices)
     highlight_labels = ScatterFigure.highlight_labels
+    _apply_label_highlight = staticmethod(ScatterFigure._apply_label_highlight)
+    _clear_label_highlight = staticmethod(ScatterFigure._clear_label_highlight)
     smart_label_placement = ScatterFigure.smart_label_placement
     declutter_mode = ScatterFigure.declutter_mode
     unplaced_labels = ScatterFigure.unplaced_labels
@@ -412,8 +419,13 @@ class _StubFigure:
 
     def __init__(self, positions, labels):
         self.positions = np.asarray(positions, dtype=np.float32)
+        self._chunks = None  # exercises the unchunked fallback
         self.labels = np.asarray(labels)
-        self.label_visuals = [_StubVisual() for _ in labels]
+        # Dense here on purpose: these tests want every label to exist. The
+        # real figure fills the same sparse store lazily, from `show_labels`.
+        self.label_visuals = SparseMap(len(labels))
+        for i in range(len(labels)):
+            self.label_visuals[i] = _StubVisual()
         self.label_group = gfx.Group()
         self.canvas = SimpleNamespace(request_draw=lambda: None)
         self._smart_label_placement = True
@@ -429,6 +441,11 @@ class _StubFigure:
         self._render_stale = False
         self._label_layout_version = 0
         self._reset_label_placement_state()
+        # In the real figure the visibility tick calls `show_labels` on
+        # everything in view before the placement runs; that is what puts a
+        # label on screen in the first place. Mirror it, so these tests start
+        # where the solver actually sees them.
+        self.show_labels(np.arange(len(labels)))
 
     def __len__(self):
         return len(self.positions)
@@ -447,7 +464,7 @@ def test_figure_places_and_caches():
     assert fig._label_slots[2] == SLOT_RIGHT
     # ... while the two overlapping ones end up in different slots
     assert fig._label_slots[0] != fig._label_slots[1]
-    assert all(hasattr(v, "_label_target") for v in fig.label_visuals)
+    assert all(hasattr(v, "_label_target") for v in fig.label_visuals.values())
 
     # A second pass with an unchanged view is a no-op (solution is cached)
     key = fig._label_placement_key
@@ -466,12 +483,16 @@ def test_figure_suppresses_when_crowded():
     assert len(fig._label_suppressed) > 0
     assert all(not fig.label_visuals[ix].visible for ix in fig._label_suppressed)
 
-    # The cached pass re-asserts suppression (labels get re-shown by the
-    # visibility tick in the real figure)
-    for ix in fig._label_suppressed:
-        fig.label_visuals[ix].visible = True
+    # The visibility tick calls `show_labels` on everything in view each time,
+    # but it leaves suppressed labels alone - so they stay hidden without the
+    # placement having to hide them again on every cached pass.
+    suppressed = sorted(fig._label_suppressed)
+    fig.show_labels(visible)
+    assert all(not fig.label_visuals[ix].visible for ix in suppressed)
+
     fig._update_label_placement(visible)
-    assert all(not fig.label_visuals[ix].visible for ix in fig._label_suppressed)
+    assert all(not fig.label_visuals[ix].visible for ix in suppressed)
+    assert fig._label_suppressed == set(suppressed), "the solution was cached"
 
 
 def test_figure_reacts_to_text_change():
@@ -763,14 +784,14 @@ def test_figure_grouped_highlight_labels():
     visible = np.arange(5)
 
     fig._update_group_labels(visible)
-    for v in fig.label_visuals:
+    for v in fig.label_visuals.values():
         v.visible = False  # grouped mode keeps the per-point labels hidden
 
     fig.highlight_labels("A")
 
     # No per-point label was shown or recolored ...
-    assert not any(v.visible for v in fig.label_visuals)
-    assert not any(hasattr(v.material, "_original_color") for v in fig.label_visuals)
+    assert not any(v.visible for v in fig.label_visuals.values())
+    assert not any(hasattr(v.material, "_original_color") for v in fig.label_visuals.values())
 
     # ... the highlight invalidated the cached solution ...
     key = fig._group_placement_key
@@ -835,7 +856,7 @@ def test_figure_grouped_mode_switch():
 
     # Switching to grouped hides the per-point machinery
     fig.declutter_mode = "grouped"
-    assert all(not v.visible for v in fig.label_visuals)
+    assert all(not v.visible for v in fig.label_visuals.values())
     assert not fig._label_connector_vis.visible
 
     fig._update_group_labels(visible)
@@ -890,7 +911,7 @@ def test_figure_disable_smart_placement_restores_defaults():
 
     # All labels are back at the legacy fixed offset, undimmed and above the
     # points
-    for i, vis in enumerate(fig.label_visuals):
+    for i, vis in fig.label_visuals.items():
         assert vis._label_offset is None
         assert vis.material.opacity == 1.0
         assert vis.local.position[0] == pytest.approx(fig.positions[i, 0] + 0.005)

@@ -26,13 +26,15 @@ from .label_placement import (
 from .chunking import (
     CHUNK_SEED,
     ChunkLayout,
+    argsort_keys,
     chunk_bounds,
     group_chunk_target,
     spatial_chunks,
 )
 from .selection import LassoGizmo, SelectionGizmo
 from .utils import as_xyz as _as_xyz
-from .utils import check_finite_features, colors_to_rgba, take as _take
+from .utils import SparseMap, check_finite_features, colors_to_rgba, take as _take
+from .utils import points_in_rect
 from .visuals import points2gfx, text2gfx, lines2gfx
 
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
@@ -301,40 +303,9 @@ class ScatterFigure(BaseFigure):
 
         self.debug = debug
 
-        def _control_label_vis():
-            """Show only labels currently visible."""
-            # Skip entirely if no labels or labels are hidden
-            if self.labels is None or not self.label_group.visible:
-                return
-
-            # Check if we need to run this frame
-            if self.control_label_vis_tick % self.label_refresh_rate:
-                self.control_label_vis_tick += 1
-                return
-
-            # Reset the tick counter
-            self.control_label_vis_tick = 1
-
-            # Check which leafs are currently visible
-            iv = self.is_visible_pos(self.positions)
-
-            # If more points than the limit are visible, don't show any
-            # labels (this applies per-point in both declutter modes)
-            if iv.sum() > self.label_vis_limit:
-                for i, t in enumerate(self.label_group.children):
-                    t.visible = False
-            elif self._smart_label_placement and self._declutter_mode == "grouped":
-                # One label per unique value among the visible points
-                self._update_group_labels(np.where(iv)[0])
-            else:
-                vis_ix = np.where(iv)[0]
-                self.show_labels(vis_ix)
-                self.hide_labels(np.where(~iv)[0])
-                self._update_label_placement(vis_ix)
-
         # Turns out this is too slow to be run every frame - we're throttling it to every N frames
         self.control_label_vis_tick = 1
-        self.add_animation(_control_label_vis)
+        self.add_animation(self._label_visibility_tick)
         self.add_animation(self._animate_label_placement)
 
         self.add_animation(self.process_moves)
@@ -418,7 +389,6 @@ class ScatterFigure(BaseFigure):
         """Set the labels of leafs in the figure."""
         if x is None:
             self._labels = None
-            self._label_visuals = None
             return
         assert len(x) == len(self), "Number of labels must match number of leafs."
         self._labels = np.asarray(x)
@@ -433,7 +403,7 @@ class ScatterFigure(BaseFigure):
     def font_size(self, size):
         size = size / 100
         self._font_size = size
-        for t in self.label_visuals:
+        for t in self.label_visuals.values():
             if isinstance(t, gfx.Text):
                 t.font_size = size
         for t in getattr(self, "_group_label_visuals", {}).values():
@@ -458,9 +428,7 @@ class ScatterFigure(BaseFigure):
             # dimming/suppression the placement may have applied
             self._reset_label_placement_state()
             if self.label_visuals is not None and self.positions is not None:
-                for i, vis in enumerate(self.label_visuals):
-                    if vis is None:
-                        continue
+                for i, vis in self.label_visuals.items():
                     vis._label_offset = None
                     vis._label_target = None
                     vis.material.opacity = 1.0
@@ -1419,7 +1387,7 @@ class ScatterFigure(BaseFigure):
 
         layout = ChunkLayout(order=order, starts=starts, bounds=bounds)
         for i, vis in enumerate(visuals):
-            vis._point_ix = order[layout.slice_for(i)]
+            vis._point_ix = layout.points_in(i)
             # Cached so the per-frame budget pass and the position update do
             # not re-walk `geometry` (two tracked attribute hops per chunk).
             vis._pos_buffer = vis.geometry.positions
@@ -1798,19 +1766,28 @@ class ScatterFigure(BaseFigure):
         # Clear the group (we might call this function to update the lines)
         self.label_line_group.clear()
 
-        # Generate a dictionary mapping a unique label to the indices
-        labels = {
-            l: np.where(self.labels == l)[0]
-            for l in np.unique(self.labels[~pd.isnull(self.labels)])
-        }
+        # Group the point indices by label value. Sorting the factorization
+        # groups all N points in one pass; the obvious `np.where(labels == l)`
+        # per distinct value is a pass over all of them *per label*, which at
+        # millions of points and thousands of labels does not finish.
+        # Shifting the codes up by one sends the nulls (-1) into group 0, which
+        # saves masking them out first - at tens of millions of points each
+        # avoided full-size temporary is hundreds of MB.
+        codes = self._label_codes()[0] + 1
+        order = argsort_keys(codes)
+        # Group sizes come straight from a count, so the boundaries cost one
+        # pass with an output the size of the label set rather than of the
+        # points.
+        starts = np.cumsum(np.bincount(codes))
 
-        # Generate a line for each label
+        # Generate a line for each label. The first split is the nulls and the
+        # last is the empty remainder after the final boundary.
         vertices = []
         faces = []
         n_vertices = 0
-        for l, indices in labels.items():
+        for group in np.split(order, starts)[1:-1]:
             # Get the points for this label
-            points = self.positions[indices]
+            points = self.positions[group]
 
             # Generate a convex hull around the points
             if len(points) < 3:
@@ -1823,6 +1800,11 @@ class ScatterFigure(BaseFigure):
             vertices.append(points[hull.vertices])
             faces.append(tri.simplices + n_vertices)
             n_vertices += len(hull.vertices)
+
+        # Nothing had enough points to enclose - leave the group empty rather
+        # than concatenating nothing (which raises).
+        if not vertices:
+            return
 
         # Concatenate all vertices and faces
         vertices = np.concatenate(vertices, axis=0)
@@ -2079,14 +2061,12 @@ class ScatterFigure(BaseFigure):
             return
 
         if which is None:
+            # Builds a visual per point - fine for a small project, hopeless
+            # for a large one. Nothing internal takes this path; the visibility
+            # tick always passes the points actually on screen.
             which = np.arange(len(self))
-        elif isinstance(which, Number):
-            which = np.array([which])
-        elif isinstance(which, list):
-            which = np.array(which)
-
-        if not isinstance(which, (list, np.ndarray)):
-            raise ValueError(f"Expected list or array, got {type(which)}.")
+        else:
+            which = self._as_label_indices(which)
 
         for ix in which:
             if ix < 0:
@@ -2119,6 +2099,12 @@ class ScatterFigure(BaseFigure):
 
                 t.add_event_handler(partial(_highlight, text=t), "double_click")
 
+                # Highlights are recorded as indices rather than applied to
+                # visuals up front (see `highlight_labels`), so a label coming
+                # into existence now has to pick its highlight up here.
+                if ix in self._label_highlighted:
+                    self._apply_label_highlight(t, self._label_highlight_color)
+
                 # `_label_visuals` is in the same order as `_labels`
                 self.label_visuals[ix] = t
                 self.label_group.add(t)
@@ -2129,7 +2115,15 @@ class ScatterFigure(BaseFigure):
                 # Center the text
                 t.text_align = "center"
 
-            self.label_visuals[ix].visible = True
+            # `visible` is a tracked property in pygfx - writing one notifies
+            # even when the value is unchanged, and the tick re-asserts every
+            # label every time, so guard it (same reason as in
+            # `_apply_draw_budget`). Labels the placement has hidden stay
+            # hidden: showing them here only to have the placement hide them
+            # again is two wasted writes per suppressed label per tick.
+            vis = self.label_visuals[ix]
+            if not vis.visible and not self._is_label_suppressed(ix):
+                vis.visible = True
 
     @update_figure
     def hide_labels(self, which=None):
@@ -2138,27 +2132,150 @@ class ScatterFigure(BaseFigure):
         Parameters
         ----------
         which : list, optional
-            Indices of points for which to hide the labels. If None, all labels are hidden.
+            Indices of points for which to hide the labels. If None, all labels
+            are hidden - which costs only as much as the labels that actually
+            exist, not as much as the project has points.
 
         """
         if self.labels is None:
             return
 
         if which is None:
-            which = np.arange(len(self))
-        elif isinstance(which, int):
-            which = np.array([which])
-        elif isinstance(which, list):
-            which = np.array(which)
+            for vis in self.label_visuals.values():
+                if vis.visible:
+                    vis.visible = False
+            return
 
+        for ix in self._as_label_indices(which):
+            vis = self.label_visuals[ix]
+            if vis is not None and vis.visible:
+                vis.visible = False
+
+    def _is_label_suppressed(self, ix):
+        """Whether the placement is currently hiding this label.
+
+        Only "hide" suppresses - the other policies draw unplaced labels
+        (dimmed or not), so they are visible like any other.
+        """
+        return (
+            self._smart_label_placement
+            and self._unplaced_labels == "hide"
+            and ix in self._label_suppressed
+        )
+
+    @staticmethod
+    def _as_label_indices(which):
+        """Coerce a `show_labels`/`hide_labels` argument to an index array."""
+        if isinstance(which, Number):
+            return np.array([which])
         if not isinstance(which, (list, np.ndarray)):
             raise ValueError(f"Expected list or array, got {type(which)}.")
+        return np.asarray(which)
 
-        for ix in which:
-            if self.label_visuals[ix] is None:
-                continue
+    def _label_visibility_tick(self):
+        """Show only the labels currently in view.
 
-            self.label_visuals[ix].visible = False
+        Runs as an animation callback, throttled to every `label_refresh_rate`
+        frames. Everything it does is meant to cost what is on screen rather
+        than what the project holds - see `_visible_label_indices`.
+        """
+        # Skip entirely if no labels or labels are hidden
+        if self.labels is None or not self.label_group.visible:
+            return
+
+        # Check if we need to run this frame
+        if self.control_label_vis_tick % self.label_refresh_rate:
+            self.control_label_vis_tick += 1
+            return
+
+        # Reset the tick counter
+        self.control_label_vis_tick = 1
+
+        # Which leafs are currently visible - or None if there are more of
+        # them than we are willing to label (which is all this needs to know,
+        # so the query stops counting there)
+        vis_ix = self._visible_label_indices(self.label_vis_limit)
+
+        # Over the limit: don't show any labels (in both declutter modes)
+        if vis_ix is None:
+            self.hide_all_labels()
+            self._shown_labels = set()
+        elif self._smart_label_placement and self._declutter_mode == "grouped":
+            # One label per unique value among the visible points
+            self._update_group_labels(vis_ix)
+            self._shown_labels = set()
+        else:
+            # Hide the labels that have left the view - `show_labels` brings
+            # the rest up. Tracking what was shown last time keeps both halves
+            # proportional to what is on screen; scanning every label ever
+            # created would grow with how much of the project has been
+            # explored. The writes are guarded because `visible` is a tracked
+            # property in pygfx and notifies even when unchanged.
+            wanted = set(vis_ix.tolist())
+            for ix in self._shown_labels - wanted:
+                vis = self.label_visuals[ix]
+                if vis is not None and vis.visible:
+                    vis.visible = False
+            self._shown_labels = wanted
+            self.show_labels(vis_ix)
+            self._update_label_placement(vis_ix)
+
+    def _visible_label_indices(self, limit):
+        """Indices of the points on screen, or ``None`` if more than `limit`.
+
+        The label tick hides every label once more than `limit` points are in
+        view, so it never needs the set itself beyond that - and at tens of
+        millions of points, testing all of them to find that out costs more
+        than a frame. `ChunkLayout.points_in_view` does the narrowing; this
+        handles the cases where there is nothing to narrow with.
+
+        Mid-animation the chunk bounds describe where the points used to be
+        (see `update_point_position`), so the answer can lag until `rechunk`
+        settles it - the same contract the draw budget already works under, and
+        a moving scatter is over the limit anyway.
+        """
+        n = len(self)
+        if self.positions is None or not n:
+            return np.empty(0, dtype=np.intp)
+
+        view = self.view_bounds()
+        if view is None:
+            # No viewport - everything counts as visible, which is the safe
+            # answer for a caller that uses this to *hide* things.
+            return None if n > limit else np.arange(n)
+
+        if self._chunks is None:
+            # Nothing to narrow the search with. No figure reaches this today
+            # (`set_points` always builds a layout), but answering "nothing is
+            # on screen" would silently hide every label, so test every point.
+            ix = np.flatnonzero(self.is_visible_pos(self.positions))
+            return None if len(ix) > limit else ix
+
+        return self._chunks.points_in_view(self.positions, view, limit)
+
+    @update_figure
+    def hide_all_labels(self):
+        """Hide everything the label system draws.
+
+        Covers both stores: the per-point visuals and the grouped-mode
+        container. `hide_labels` knows only about the former, which is why the
+        label group's children are what gets walked here.
+        """
+        for vis in self.label_group.children:
+            if vis.visible:
+                vis.visible = False
+
+    @staticmethod
+    def _apply_label_highlight(vis, color):
+        """Recolor a label visual, remembering what it looked like before."""
+        vis.material._original_color = vis.material.color
+        vis.material.color = color
+
+    @staticmethod
+    def _clear_label_highlight(vis):
+        """Undo `_apply_label_highlight`, if it was ever applied."""
+        if hasattr(vis.material, "_original_color"):
+            vis.material.color = vis.material._original_color
 
     def _invalidate_label_placement(self):
         """Mark the current label placement as stale.
@@ -2171,6 +2288,20 @@ class ScatterFigure(BaseFigure):
 
     def _reset_label_placement_state(self):
         """Reset all cached label placement state (e.g. after `set_points`)."""
+        # The visibility tick hides labels incrementally, using `_shown_labels`
+        # to know what was up last time. Forgetting that set while labels are
+        # still on screen would leave them there with nothing to take them
+        # down, so hide them before dropping the record. Walking the visuals
+        # rather than the remembered indices keeps this safe when the store
+        # itself has just been replaced (`set_points` on a smaller dataset),
+        # where those indices no longer address anything.
+        visuals = getattr(self, "label_visuals", None)
+        if visuals is not None:
+            for vis in visuals.values():
+                if vis.visible:
+                    vis.visible = False
+        self._shown_labels = set()  # indices the last visibility tick left up
+
         self._label_placement_key = None  # (version, visible set) of last solve
         self._label_slots = {}  # label index -> last assigned slot (hysteresis)
         self._label_suppressed = set()  # labels hidden because no free slot
@@ -2245,12 +2376,8 @@ class ScatterFigure(BaseFigure):
 
         key = (self._label_layout_version, hash(visible_idx.tobytes()))
         if debug is None and key == self._label_placement_key:
-            # Solution still valid. Just re-assert suppression: show_labels()
-            # in the refresh tick will have re-shown suppressed labels.
-            if self._unplaced_labels == "hide":
-                for ix in self._label_suppressed:
-                    if self.label_visuals[ix] is not None:
-                        self.label_visuals[ix].visible = False
+            # Solution still valid, and nothing has re-shown the labels it
+            # suppressed (`show_labels` skips them), so there is nothing to do.
             return
         self._label_placement_key = key
 
@@ -2322,6 +2449,11 @@ class ScatterFigure(BaseFigure):
             placed = slots[j] >= 0
             if placed:
                 self._label_slots[ix] = int(slots[j])
+                # A label that was suppressed by the previous solution and is
+                # placed by this one has to be shown again - `show_labels`
+                # deliberately leaves suppressed labels alone.
+                if not vis.visible:
+                    vis.visible = True
             else:
                 self._label_suppressed.add(ix)
                 if policy == "hide":
@@ -2977,21 +3109,25 @@ class ScatterFigure(BaseFigure):
             f" | font size: {self._font_size * 100:g}"
         )
 
-        iv = self.is_visible_pos(self.positions)
-        vis_note = "" if self.view_bounds() else " (no viewport - assuming all visible)"
-        n_vis = int(iv.sum())
+        # Through the same query the visibility tick uses, so the report can
+        # not describe a different frame than the one on screen. It answers
+        # `None` rather than a count once the limit is passed, which is exactly
+        # the distinction the report goes on to make.
+        vis_ix = self._visible_label_indices(self.label_vis_limit)
+        bounds = self.view_bounds()
+        vis_note = "" if bounds else " (no viewport - assuming all visible)"
+        n_vis = "more than the limit" if vis_ix is None else len(vis_ix)
         lines.append(
             f"Visible points: {n_vis} / {len(self.positions)}"
             f" (limit: {self.label_vis_limit}){vis_note}"
         )
-        bounds = self.view_bounds()
         if bounds is not None:
             bounds_str = ", ".join(f"{float(b):.4g}" for b in bounds)
             lines.append(f"View bounds (x0, y0, x1, y1): ({bounds_str})")
         else:
             lines.append("View bounds: unknown")
 
-        if n_vis > self.label_vis_limit:
+        if vis_ix is None:
             lines.append(
                 "=> Over the visibility limit: ALL labels are hidden at this "
                 "zoom level. Zoom in further to see labels."
@@ -3004,7 +3140,6 @@ class ScatterFigure(BaseFigure):
             )
             return "\n".join(lines)
 
-        vis_ix = np.where(iv)[0]
         dbg = {}
         if self._declutter_mode == "grouped":
             self._update_group_labels(vis_ix, debug=dbg)
@@ -3219,11 +3354,8 @@ class ScatterFigure(BaseFigure):
             return
 
         # Reset existing highlights
-        for vis in self.label_visuals:
-            if vis is None:
-                continue
-            if hasattr(vis.material, "_original_color"):
-                vis.material.color = vis.material._original_color
+        for vis in self.label_visuals.values():
+            self._clear_label_highlight(vis)
 
         # Highlighted labels are exempt from placement suppression and get
         # priority slots - changing the highlights hence requires a re-solve
@@ -3237,32 +3369,41 @@ class ScatterFigure(BaseFigure):
             return
 
         if isinstance(x, str):
-            indices = [i for i, label in enumerate(self.labels) if label == x]
+            # Via the cached factorization: comparing an object array of N
+            # strings is a Python-level loop, while comparing the (far fewer)
+            # distinct values and then the integer codes is two numpy passes.
+            codes, uniques = self._label_codes()
+            hit = np.flatnonzero(uniques == x)
+            indices = (
+                np.flatnonzero(codes == hit[0])
+                if len(hit)
+                else np.empty(0, dtype=np.intp)
+            )
         elif isinstance(x, (list, np.ndarray)):
             indices = x
         else:
             raise ValueError(f"Expected str or list, got {type(x)}.")
 
+        self._label_highlighted = set(np.asarray(indices).tolist())
+        self._label_suppressed -= self._label_highlighted
+
         # In grouped mode there are no per-point labels to recolor (creating
         # them here would wrongly show individual labels on top of the group
         # ones) - the group labels pick up the highlight on the re-solve
-        grouped = self._smart_label_placement and self._declutter_mode == "grouped"
+        if self._smart_label_placement and self._declutter_mode == "grouped":
+            return
 
-        for ix in indices:
-            # Index in the original order
-            ix = int(ix)
-            self._label_highlighted.add(ix)
-            self._label_suppressed.discard(ix)
-
-            if grouped:
-                continue
-
-            if self.label_visuals[ix] is None:
-                self.show_labels(ix)
-            visual = self.label_visuals[ix]
-
-            visual.material._original_color = visual.material.color
-            visual.material.color = color
+        # Only labels that already exist are recolored, and the loop runs over
+        # those rather than over the matches: a match can run to thousands of
+        # points on a large project, while at most a few hundred of them have a
+        # visual. Building one per match would cost about a millisecond each,
+        # for labels the next visibility tick hides again anyway (that many
+        # matches is over the limit). The ones that do come into view are
+        # created by `show_labels`, which reads `_label_highlighted` and colors
+        # them on the way in.
+        for ix, visual in self.label_visuals.items():
+            if ix in self._label_highlighted:
+                self._apply_label_highlight(visual, color)
 
     def _world_xy(self):
         """Point positions in world space, for hit-testing.
@@ -3321,15 +3462,8 @@ class ScatterFigure(BaseFigure):
             Whether to add to the existing selection.
 
         """
-        self._select_where(
-            lambda xy: (
-                (xy[:, 0] >= bounds[0, 0])
-                & (xy[:, 0] <= bounds[1, 0])
-                & (xy[:, 1] >= bounds[0, 1])
-                & (xy[:, 1] <= bounds[1, 1])
-            ),
-            additive=additive,
-        )
+        rect = (bounds[0, 0], bounds[0, 1], bounds[1, 0], bounds[1, 1])
+        self._select_where(lambda xy: points_in_rect(xy, rect), additive=additive)
 
     @update_figure
     def select_points_lasso(self, polygon, additive=False):
@@ -3416,8 +3550,11 @@ class ScatterFigure(BaseFigure):
 
         self.default_label_col = label_col
         self.default_color_col = color_col
-        self.label_visuals = [None] * len(metadata) if label_col else None
-        self._label_colors = [None] * len(metadata) if label_col else None
+        # Sparse: at most `label_vis_limit` of these are ever filled in, and a
+        # dense list of one `None` per point costs hundreds of MB on a large
+        # project (and makes every traversal O(N) in Python).
+        self.label_visuals = SparseMap(len(metadata)) if label_col else None
+        self._label_colors = SparseMap(len(metadata)) if label_col else None
         self._reset_label_placement_state()
         self._invalidate_label_placement()
         self.labels = metadata[label_col].astype(str).values if label_col else None
@@ -3825,9 +3962,7 @@ class ScatterFigure(BaseFigure):
         if self.labels is None:
             return
 
-        for i, l in enumerate(self.label_visuals):
-            if l is None:
-                continue
+        for i, l in self.label_visuals.items():
             l.set_text(self.labels[i])
             l._text = self.labels[i]
 
@@ -3850,9 +3985,7 @@ class ScatterFigure(BaseFigure):
         # z-layer, stored in the third component - the smart placement has
         # assigned)
         if self.label_visuals is not None:
-            for i, l in enumerate(self.label_visuals):
-                if l is None:
-                    continue
+            for i, l in self.label_visuals.items():
                 offset = getattr(l, "_label_offset", None)
                 if offset is None:
                     offset = (0.005, 0.0, LABEL_Z)
@@ -4189,7 +4322,7 @@ class ScatterFigure(BaseFigure):
         ), "Number of indices and colors must match."
 
         if self._label_colors is None:
-            self._label_colors = [None] * len(self)
+            self._label_colors = SparseMap(len(self))
 
         for ix, color in zip(indices, new_color):
             if ix < 0:

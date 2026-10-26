@@ -508,6 +508,23 @@ def as_xyz(xy, z=0.0, order=None):
     return xyz
 
 
+def points_in_rect(xy, rect):
+    """Mask of which of ``xy`` ((N, 2)) fall inside ``rect``.
+
+    ``rect`` is ``(xmin, ymin, xmax, ymax)``; the edges are inclusive. Points
+    with a non-finite coordinate compare False throughout, so they are never
+    reported inside.
+    """
+    xmin, ymin, xmax, ymax = rect
+    with np.errstate(invalid="ignore"):  # NaN compares False, as intended
+        return (
+            (xy[:, 0] >= xmin)
+            & (xy[:, 0] <= xmax)
+            & (xy[:, 1] >= ymin)
+            & (xy[:, 1] <= ymax)
+        )
+
+
 def sorted_unique(values):
     """Return the sorted unique entries of ``values``.
 
@@ -718,3 +735,71 @@ def is_color_column(series: pd.Series) -> bool:
             return False
 
     return True
+
+
+class SparseMap:
+    """A fixed-length ``index -> value`` store whose default is ``None``.
+
+    Stands in for a ``[None] * n`` list where only a handful of the entries are
+    ever filled in - which is the case for the figure's per-point label visuals
+    and label colours: only labels that have been on screen exist, out of
+    however many points the project has. A dense list of 71M ``None``
+    references costs 568 MB and makes every traversal O(N) in Python; this
+    costs nothing for the empty entries and iterates only the filled ones.
+
+    Indexing, assignment and ``len`` behave as they would on the list, negative
+    indices included. Deliberately *not* iterable: ``for v in sparse`` could
+    only reasonably yield the filled values, which would silently disagree with
+    ``len``. Use :meth:`values` or :meth:`items` instead - both of which make
+    the O(filled) cost explicit at the call site.
+
+    How many entries end up set is bounded by how many labels have been shown,
+    not by `n` - but nothing removes them, so it grows with how much of a
+    project has been explored rather than staying at `label_vis_limit`.
+    """
+
+    def __init__(self, n):
+        self._n = int(n)
+        self._values = {}
+
+    def _key(self, ix):
+        ix = int(ix)
+        if ix < 0:
+            ix += self._n
+        if not 0 <= ix < self._n:
+            raise IndexError(f"index {ix} out of range for length {self._n}")
+        return ix
+
+    def __len__(self):
+        return self._n
+
+    def __getitem__(self, ix):
+        return self._values.get(self._key(ix))
+
+    def __setitem__(self, ix, value):
+        key = self._key(ix)
+        if value is None:
+            self._values.pop(key, None)
+        else:
+            self._values[key] = value
+
+    def __iter__(self):
+        # Without this, Python's old iteration protocol would fall back to
+        # `__getitem__` and happily walk all `n` indices - which is the O(N)
+        # traversal this class exists to prevent, only now invisible.
+        raise TypeError(
+            "SparseMap is not iterable; use .values() or .items() to iterate "
+            "the entries that are set"
+        )
+
+    def __repr__(self):
+        return f"<SparseMap {len(self._values)}/{self._n} set>"
+
+    def values(self):
+        """The values that have been set, in no particular order."""
+        return self._values.values()
+
+    def items(self):
+        """``(index, value)`` for the entries that have been set."""
+        return self._values.items()
+

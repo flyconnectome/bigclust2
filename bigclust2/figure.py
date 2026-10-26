@@ -9,6 +9,7 @@ from functools import wraps
 from rendercanvas.auto import RenderCanvas
 
 from . import visuals
+from .utils import points_in_rect
 
 
 def update_figure(func):
@@ -305,7 +306,7 @@ class BaseFigure:
         except Exception:
             return None
 
-    def is_visible_pos(self, pos, offset=0):
+    def is_visible_pos(self, pos):
         """Mask of which of `pos` ((N, 2) world coordinates) are on screen.
 
         Everything is reported visible when the viewport is unavailable, which
@@ -318,14 +319,7 @@ class BaseFigure:
         bounds = self.view_bounds()
         if bounds is None:
             return np.ones(len(pos), dtype=bool)
-        x0, y0, x1, y1 = bounds
-
-        is_visible = np.ones(len(pos), dtype=bool)
-        is_visible[pos[:, 0] < x0] = False
-        is_visible[pos[:, 1] < y0] = False
-        is_visible[pos[:, 0] > x1] = False
-        is_visible[pos[:, 1] > y1] = False
-        return is_visible
+        return points_in_rect(pos, bounds)
 
     def screen_to_world(self, pos):
         """Translate screen position to world coordinates."""

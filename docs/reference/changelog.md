@@ -28,6 +28,14 @@ For the complete commit-level history, see the
   which dominated load time on big projects; selecting, recolouring and hovering
   are no longer proportional to the total number of points. A project of tens of
   millions of points now opens in seconds rather than minutes.
+- **Labels no longer slow down as a project grows.** Deciding which labels are
+  on screen used to test every point in the project several times a second,
+  which on a very large embedding stalled the view - worst of all when zoomed
+  in, which is exactly when labels are wanted. It now only looks at what the
+  viewport actually covers. Highlighting a label (**Search**, or double-clicking
+  one) no longer slows down with the number of points that carry it, and
+  **Show label lines** no longer takes time proportional to the number of
+  points *times* the number of distinct labels. What you see is unchanged.
 - `Render trigger: Reactive` now also redraws when you pan or zoom. Previously a
   camera move alone did not count as a change, so labels and culling could stop
   updating until something else triggered a redraw.

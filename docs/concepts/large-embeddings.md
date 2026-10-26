@@ -63,7 +63,8 @@ detail when you are holding still.
       including ones that were not drawn. The count in the corner is the real
       count, and so is everything it propagates to — the 3D viewer, the
       widgets, annotations.
-    - **Labels**, which are placed from point positions.
+    - **Labels**, which are placed from point positions (see
+      [below](#labels)) rather than from what was drawn.
     - **Export.** A Plotly export writes the points, not the sample.
 
     So a sparse-looking scatter is a drawing of your data, not a subset of it.
@@ -72,6 +73,25 @@ detail when you are holding still.
     cursor and so can only find points that were actually drawn. Zoom in — or
     raise the budget — if you want to inspect a point the scatter is currently
     sampling out.
+
+## Labels
+
+Labels work from the points themselves, not from the sample, so the budget does
+not change which ones you get. What does change them is how crowded the view is:
+labels only appear once a few hundred points are on screen, and a view holding
+more than that shows none at all. Zooming in is what brings them back, exactly
+as on a small project.
+
+That threshold is why a large embedding shows no labels at first. It is not a
+limit on the project — it is a limit on how many labels fit on a screen before
+they stop being readable.
+
+**Show label lines**, which outlines each label's points, is the one label
+feature whose cost does scale with the project: it builds an outline per
+distinct label value over all of their points. On an embedding of tens of
+millions of points that takes a while to appear after you tick it — and it is
+rebuilt whenever the points move, so leaving it on makes every layout change
+and embedding switch pay the same cost again.
 
 ## What this costs
 

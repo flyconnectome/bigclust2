@@ -23,6 +23,14 @@ For the complete commit-level history, see the
 
 ### Changed
 
+- **Loading and interacting with large embeddings is much faster.** Setting up
+  the colours, markers and labels of a scatter no longer works point by point,
+  which dominated load time on big projects; selecting, recolouring and hovering
+  are no longer proportional to the total number of points. A project of tens of
+  millions of points now opens in seconds rather than minutes.
+- `Render trigger: Reactive` now also redraws when you pan or zoom. Previously a
+  camera move alone did not count as a change, so labels and culling could stop
+  updating until something else triggered a redraw.
 - **Widgets are opened per embedding.** In a project with several embeddings,
   **View → Connectivity Table / Distance Heatmap / Feature Comparison** are now
   submenus listing the embeddings, so a widget no longer has to be reached by
@@ -38,6 +46,16 @@ For the complete commit-level history, see the
   start noticeably faster — on machines with no display or GPU.
 
 ### Added
+
+- **Large embeddings are drawn at a level of detail.** Past about 200,000 points
+  the scatter is split into spatially coherent chunks and stops drawing the ones
+  outside the viewport; past the draw budget (`Max points drawn` in the Settings
+  tab, 3 million by default) the chunks in view are sampled rather than drawn in
+  full, and zooming in draws the remaining area more densely. The sample is
+  unbiased — points are shuffled within each chunk — and selection, labels and
+  export continue to work from every point, drawn or not. Hover is the exception:
+  it asks the renderer what is under the cursor, so it only finds drawn points.
+  See [large embeddings](../concepts/large-embeddings.md).
 
 - **Headless meta-data refresh** — `bigclust2 update /path/to/project` pulls
   current annotations from the project's declared sources and writes them into

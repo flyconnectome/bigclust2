@@ -8,6 +8,9 @@ import os
 # ``bigclust2.figure`` does at module import), so that the figure fixture below
 # gets a canvas that needs neither a window nor a display.
 os.environ.setdefault("RENDERCANVAS_FORCE_OFFSCREEN", "1")
+# Qt widgets run fine headless under the offscreen platform (the wgpu canvas
+# does not, which is why figures use the offscreen rendercanvas above).
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
@@ -208,3 +211,34 @@ def hover_probe():
         return seen
 
     return _probe
+
+
+@pytest.fixture(scope="session")
+def qapp():
+    """The shared QApplication, for tests that build real Qt widgets."""
+    from PySide6 import QtWidgets
+
+    yield QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
+
+
+@pytest.fixture
+def chunked(scatter_factory, force_chunks):
+    """A figure whose points are split into several chunks per marker.
+
+    Production thresholds would leave a test-sized scatter unchunked, so the
+    chunk settings are lowered - but still applied through the real
+    `set_points` -> `make_visuals` path, so the visuals are wired up (hover
+    handlers included) exactly as they are in the app.
+
+    Uses `scatter_factory` rather than `make_scatter`: these tests force
+    chunking anyway, so running them under both of `make_scatter`'s layouts
+    would just duplicate every result.
+    """
+
+    def _make(**kwargs):
+        kwargs.setdefault("n", 6000)
+        for key, value in force_chunks.items():
+            kwargs.setdefault(key, value)
+        return scatter_factory(**kwargs)
+
+    return _make

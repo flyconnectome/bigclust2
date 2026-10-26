@@ -162,8 +162,9 @@ See [reclustering](../how-to/recluster.md) for the full method reference.
 
 | Control | Does |
 |---|---|
-| `Render trigger:` | `Continuous`, `Reactive` or `Active Window`. `Reactive` redraws only on change — use it on a laptop on battery. |
+| `Render trigger:` | `Continuous`, `Reactive` or `Active Window`. `Reactive` redraws only on change (including panning and zooming) — use it on a laptop on battery. |
 | `Max frame rate:` | Cap the frame rate |
+| `Max points drawn:` | How many points may be drawn per frame. Only applies to embeddings too large to draw whole — see [Large embeddings](../concepts/large-embeddings.md). |
 | `Font size:` | Label size (also ++left++ / ++right++) |
 | `Point scale:` | Marker size (also ++up++ / ++down++) |
 | `Max visible labels:` | How many labels may be drawn at once |

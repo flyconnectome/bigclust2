@@ -559,6 +559,40 @@ class ScatterControls(QtWidgets.QWidget):
         )
         self.max_frame_rate_layout.addWidget(self.max_frame_rate_value_label)
 
+        # Draw budget: how many points may be drawn per frame. Only bites on
+        # scatters too large to draw whole (see `ScatterFigure.draw_budget`).
+        label = QtWidgets.QLabel("Max points drawn:")
+        label.setToolTip(
+            "Maximum number of points drawn per frame. Large embeddings are "
+            "sampled down to this; zooming in draws the remaining area more "
+            "densely. Lower it for a smoother frame rate, raise it for more "
+            "detail. Selection always uses every point, drawn or not; hover "
+            "can only find points that were drawn."
+        )
+        self.tab4_layout.addWidget(label)
+
+        self.draw_budget_layout = QtWidgets.QHBoxLayout()
+        self.tab4_layout.addLayout(self.draw_budget_layout)
+
+        self.draw_budget_slider = QtWidgets.QSlider(QtCore.Qt.Horizontal)
+        # In units of 100k points, so the slider stays usable across the range.
+        self.draw_budget_slider.setRange(1, 200)
+        self.draw_budget_slider.setValue(round(self.figure.draw_budget / 100_000))
+        self.draw_budget_slider.valueChanged.connect(
+            lambda x: setattr(self.figure, "draw_budget", int(x) * 100_000)
+        )
+        self.draw_budget_slider.valueChanged.connect(
+            lambda x: self.draw_budget_value_label.setText(
+                self._format_draw_budget(int(x) * 100_000)
+            )
+        )
+        self.draw_budget_layout.addWidget(self.draw_budget_slider)
+
+        self.draw_budget_value_label = QtWidgets.QLabel(
+            self._format_draw_budget(self.figure.draw_budget)
+        )
+        self.draw_budget_layout.addWidget(self.draw_budget_value_label)
+
         # Add SpinBox for font size
         hlayout = QtWidgets.QHBoxLayout()
         self.tab4_layout.addLayout(hlayout)
@@ -2727,6 +2761,10 @@ class ScatterControls(QtWidgets.QWidget):
         self.update_searchbar_completer()
         self.update_distance_edges_controls()
         self.update_scope_options()
+
+    @staticmethod
+    def _format_draw_budget(budget):
+        return f"{budget / 1e6:.1f}M" if budget >= 1e6 else f"{budget // 1000}k"
 
     def sync_point_scale_spinbox(self):
         """Refresh the point-scale spinbox to match the figure's current scale.

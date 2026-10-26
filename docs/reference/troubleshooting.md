@@ -53,6 +53,7 @@ See [the id-column trap](data-format.md#distances).
 | Everything is noise (`-1`) after clustering | Either `Min cluster size` is too large, or you are hitting the [singleton rule](../how-to/recluster.md#singletons-become-noise). |
 | A pasted ID list is rejected | The bare-list form is [digits-only](../how-to/filter-a-dataset.md#filter-syntax). Use `id in ("abc", "def")`. |
 | Project Details says `has features: False` but features work | It only inspects the top level of `info`. [Known limitation](widgets.md#other-dialogs). |
+| The plot is sluggish with a very large embedding | Lower `Max points drawn` in the Settings tab — see [Large embeddings](../concepts/large-embeddings.md) |
 | The plot is sluggish on battery | Set **Settings → Render trigger** to `Reactive`. |
 | Neurons show as skeletons, not meshes | The source has no meshes, or those segments were never meshed — BigClust [falls back to skeletons](data-format.md#meshes-vs-skeletons). Run with `--debug` to see which fetch failed. |
 | A `skeletons://` source loads nothing | Files must be named after their segment ID (`12345.swc`). Anything else is [ignored](data-format.md#local-skeletons). |

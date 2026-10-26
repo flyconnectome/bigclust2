@@ -15,29 +15,6 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-@pytest.fixture
-def chunked(scatter_factory, force_chunks):
-    """A figure whose points are split into several chunks per marker.
-
-    Production thresholds would leave a test-sized scatter unchunked, so the
-    chunk settings are lowered - but still applied through the real
-    `set_points` -> `make_visuals` path, so the visuals are wired up (hover
-    handlers included) exactly as they are in the app.
-
-    Uses `scatter_factory` rather than `make_scatter`: these tests force
-    chunking anyway, so running them under both of `make_scatter`'s layouts
-    would just duplicate every result.
-    """
-
-    def _make(**kwargs):
-        kwargs.setdefault("n", 6000)
-        for key, value in force_chunks.items():
-            kwargs.setdefault(key, value)
-        return scatter_factory(**kwargs)
-
-    return _make
-
-
 def _markers(n, groups=("a", "b", "c"), seed=0):
     return np.random.default_rng(seed).choice(list(groups), n)
 
@@ -230,3 +207,37 @@ def test_finishing_an_animated_move_rechunks(chunked):
 
     covered = np.sort(np.concatenate([v._point_ix for v in fig.point_visuals]))
     assert np.array_equal(covered, np.arange(6000))
+
+
+def _scatter_groups(fig):
+    return [c for c in fig.scene.children if getattr(c, "_object_id", None) == "scatter"]
+
+
+def test_rebuilding_does_not_leave_the_old_visuals_in_the_scene(chunked):
+    """Regression: `rechunk` used to add a group without detaching the old one.
+
+    The orphans stayed visible at the positions they were built with, so a
+    moved scatter drew a ghost copy of its previous layout - and every move
+    animation added another one.
+    """
+    fig, _, _ = chunked(n=6000)
+    assert len(_scatter_groups(fig)) == 1
+
+    for _ in range(2):
+        fig.positions = (fig.positions + 5.0).astype(np.float32)
+        fig.update_point_position()
+        fig.rechunk()
+
+    groups = _scatter_groups(fig)
+    assert len(groups) == 1, "a rebuild must replace the group, not add one"
+
+    in_scene = sum(len(g.children) for g in groups)
+    # The group also holds the selection overlay, so compare the point visuals.
+    assert all(v.parent is groups[0] for v in fig.point_visuals)
+    assert in_scene >= len(fig.point_visuals)
+
+    # Everything drawn sits at the current positions, not an older layout.
+    for vis in fig.point_visuals:
+        assert np.allclose(
+            vis.geometry.positions.data[:, :2], fig.positions[vis._point_ix]
+        )

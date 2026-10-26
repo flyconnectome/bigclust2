@@ -93,6 +93,8 @@ class BaseFigure:
 
         # Finally, setting some variables
         self._animations = []
+        self.camera_version = 0  # bumped by `_poll_camera`
+        self._last_camera_state = None
         self.render_trigger = "active_window" # "continuous", "reactive"
 
         # Set up the scene
@@ -177,9 +179,50 @@ class BaseFigure:
         else:
             raise TypeError(f"Expected callable or index (int), got {type(x)}")
 
+    def _poll_camera(self):
+        """Bump `camera_version` if the viewport has changed since last frame.
+
+        Panning and zooming go straight to the camera via the controller - no
+        event is emitted and nothing marks the figure stale - so anything that
+        derives from the viewport has to notice for itself. Published as a
+        counter rather than a "has it moved?" boolean, so that several
+        consumers can each cache against it; a boolean would be consumed by
+        whoever asked first.
+
+        pygfx offers nothing to subscribe to here (its controller emits no
+        event, and `Camera.last_modified` is bumped by the renderer itself
+        every frame), so polling is the available technique. Comparing the
+        matrix by value rather than by pygfx's internal timestamp costs well
+        under a microsecond and does not report a move for a write that
+        changed nothing.
+        """
+        state = (
+            self.camera.world.matrix.tobytes(),
+            self.camera.width,
+            self.camera.height,
+            # `zoom` moves the view without touching the matrix - pygfx's
+            # quickzoom peek changes nothing else at all.
+            self.camera.zoom,
+            self.size,  # the view rectangle depends on the canvas too
+        )
+        if state == self._last_camera_state:
+            return
+        self._last_camera_state = state
+        self.camera_version += 1
+
     def animate(self):
         """Run the render loop."""
         rm = self.render_trigger
+
+        # A camera move changes what should be on screen, so it counts as
+        # staleness. Checked before the `reactive` gate below, which would
+        # otherwise skip every animation that reacts to the viewport - the
+        # chunk culling, but also label culling and placement, which in
+        # `reactive` mode previously stopped updating after a pan.
+        before = self.camera_version
+        self._poll_camera()
+        if self.camera_version != before:
+            self._render_stale = True
 
         if rm == "active_window":
             # Note to self: we need to explore how to do this with different backends / Window managers
@@ -247,22 +290,41 @@ class BaseFigure:
         """Clear scene of objects."""
         self.scene.clear()
 
+    def view_bounds(self):
+        """The viewport in world coordinates as ``(x0, y0, x1, y1)``.
+
+        Returns None if the bounds can not be determined (e.g. headless, or
+        before the canvas has a size).
+        """
+        try:
+            top_left = self.screen_to_world((0, 0))
+            bottom_right = self.screen_to_world(self.size)
+            if top_left is None or bottom_right is None:
+                return None
+            return (top_left[0], bottom_right[1], bottom_right[0], top_left[1])
+        except Exception:
+            return None
+
     def is_visible_pos(self, pos, offset=0):
-        """Test if positions are visible to camera."""
+        """Mask of which of `pos` ((N, 2) world coordinates) are on screen.
+
+        Everything is reported visible when the viewport is unavailable, which
+        is the safe answer for the callers (they use it to *hide* things).
+        """
         assert isinstance(pos, np.ndarray)
         assert pos.ndim == 2
         assert pos.shape[1] == 2
 
-        top_left = self.screen_to_world((0, 0))
-        bottom_right = self.screen_to_world(self.size)
+        bounds = self.view_bounds()
+        if bounds is None:
+            return np.ones(len(pos), dtype=bool)
+        x0, y0, x1, y1 = bounds
 
         is_visible = np.ones(len(pos), dtype=bool)
-
-        is_visible[pos[:, 0] < top_left[0]] = False
-        is_visible[pos[:, 1] > top_left[1]] = False
-        is_visible[pos[:, 0] > bottom_right[0]] = False
-        is_visible[pos[:, 1] < bottom_right[1]] = False
-
+        is_visible[pos[:, 0] < x0] = False
+        is_visible[pos[:, 1] < y0] = False
+        is_visible[pos[:, 0] > x1] = False
+        is_visible[pos[:, 1] > y1] = False
         return is_visible
 
     def screen_to_world(self, pos):

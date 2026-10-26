@@ -18,9 +18,11 @@ import pytest
 from bigclust2.chunking import (
     chunk_bounds,
     chunk_count,
+    draw_counts,
     group_chunk_target,
     morton_keys,
     spatial_chunks,
+    visible_chunks,
 )
 
 
@@ -267,3 +269,192 @@ def test_bounds_are_per_chunk_not_global():
     bounds = chunk_bounds(xy, np.array([0, 100, 200]))
     assert np.allclose(bounds[0], [0, 0, 0, 0])
     assert np.allclose(bounds[1], [5, 5, 5, 5])
+
+
+# --------------------------------------------------------------------------- #
+# visible_chunks
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def bounds():
+    # Four unit squares in a row along x, at x = 0..1, 2..3, 4..5, 6..7.
+    return np.array(
+        [
+            [0.0, 0.0, 1.0, 1.0],
+            [2.0, 0.0, 3.0, 1.0],
+            [4.0, 0.0, 5.0, 1.0],
+            [6.0, 0.0, 7.0, 1.0],
+        ]
+    )
+
+
+def test_only_overlapping_chunks_are_visible(bounds):
+    assert list(visible_chunks(bounds, (2.5, 0.0, 4.5, 1.0))) == [
+        False,
+        True,
+        True,
+        False,
+    ]
+
+
+def test_a_view_containing_everything_sees_everything(bounds):
+    assert visible_chunks(bounds, (-10, -10, 10, 10)).all()
+
+
+def test_a_view_outside_everything_sees_nothing(bounds):
+    assert not visible_chunks(bounds, (100, 100, 200, 200)).any()
+
+
+def test_touching_edges_count_as_visible(bounds):
+    """A chunk exactly at the viewport edge must not pop out of existence."""
+    mask = visible_chunks(bounds, (1.0, 0.0, 2.0, 1.0))
+    assert mask[0] and mask[1]
+
+
+def test_nan_bounds_are_never_visible(bounds):
+    """A chunk with no finite point has NaN bounds."""
+    bounds = np.vstack([bounds, np.full((1, 4), np.nan)])
+    assert not visible_chunks(bounds, (-10, -10, 10, 10))[-1]
+
+
+# --------------------------------------------------------------------------- #
+# draw_counts
+# --------------------------------------------------------------------------- #
+
+
+def test_everything_is_drawn_when_it_fits_the_budget():
+    sizes = np.array([100, 100, 100])
+    counts = draw_counts(sizes, np.ones(3, bool), budget=1000)
+    assert list(counts) == [100, 100, 100]
+
+
+def test_invisible_chunks_draw_nothing():
+    sizes = np.array([100, 100, 100])
+    counts = draw_counts(sizes, np.array([True, False, True]), budget=1000)
+    assert list(counts) == [100, 0, 100]
+
+
+def test_the_budget_is_shared_in_proportion_to_size():
+    sizes = np.array([600, 300, 100])
+    counts = draw_counts(sizes, np.ones(3, bool), budget=100, min_per_chunk=1)
+    assert counts.sum() <= 100
+    # Same ordering as the sizes, roughly proportional.
+    assert counts[0] > counts[1] > counts[2]
+
+
+def test_no_chunk_is_asked_for_more_than_it_holds():
+    sizes = np.array([10, 1000])
+    counts = draw_counts(sizes, np.ones(2, bool), budget=500)
+    assert (counts <= sizes).all()
+
+
+def test_a_visible_chunk_keeps_a_floor():
+    """Otherwise a chunk in view could vanish when many share the budget."""
+    sizes = np.full(10, 1000)
+    counts = draw_counts(sizes, np.ones(10, bool), budget=100, min_per_chunk=4)
+    assert (counts >= 4).all()
+    assert counts.sum() <= 100
+
+
+def test_the_floor_never_overruns_the_budget():
+    """With enough visible chunks the floor cannot be paid for in full.
+
+    `min_per_chunk` exists to stop a chunk disappearing, not to override the
+    budget - 1000 chunks at a floor of 32 would be 32x a budget of 1000.
+    """
+    sizes = np.full(1000, 1000)
+    counts = draw_counts(sizes, np.ones(1000, bool), budget=1000, min_per_chunk=32)
+
+    assert counts.sum() <= 1000
+    assert (counts >= 1).all(), "every visible chunk should still draw something"
+
+
+def test_nothing_visible_draws_nothing():
+    counts = draw_counts(np.array([10, 20]), np.zeros(2, bool), budget=1000)
+    assert list(counts) == [0, 0]
+
+
+def test_narrowing_the_view_draws_the_survivors_more_densely():
+    """The property that makes zooming in reveal detail."""
+    sizes = np.full(10, 1000)
+    budget = 2000
+
+    wide = draw_counts(sizes, np.ones(10, bool), budget=budget)
+    narrow = draw_counts(sizes, np.array([True] * 2 + [False] * 8), budget=budget)
+
+    assert narrow[0] > wide[0]
+    assert narrow.sum() <= budget
+
+
+# --------------------------------------------------------------------------- #
+# The within-chunk shuffle
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def shuffle_xy():
+    return np.random.default_rng(0).random((2000, 2)).astype(np.float32)
+
+
+def test_shuffling_keeps_chunk_membership(shuffle_xy):
+    xy = shuffle_xy
+    plain, starts = spatial_chunks(xy, target=8, min_size=10)
+    shuffled, starts2 = spatial_chunks(
+        xy, target=8, min_size=10, rng=np.random.default_rng(0)
+    )
+
+    assert np.array_equal(starts, starts2)
+    for i in range(len(starts) - 1):
+        sl = slice(starts[i], starts[i + 1])
+        assert set(shuffled[sl].tolist()) == set(plain[sl].tolist())
+
+
+def test_shuffling_changes_the_order_within_a_chunk(shuffle_xy):
+    xy = shuffle_xy
+    plain, _ = spatial_chunks(xy, target=8, min_size=10)
+    shuffled, _ = spatial_chunks(
+        xy, target=8, min_size=10, rng=np.random.default_rng(0)
+    )
+    assert not np.array_equal(plain, shuffled)
+
+
+def test_shuffling_is_still_a_permutation(shuffle_xy):
+    xy = shuffle_xy
+    order, _ = spatial_chunks(xy, target=8, min_size=10, rng=np.random.default_rng(1))
+    assert np.array_equal(np.sort(order), np.arange(2000))
+
+
+def test_an_unchunked_cloud_still_shuffles():
+    """With one chunk there is no ordering to preserve, but still one to sample."""
+    xy = np.random.default_rng(0).random((500, 2)).astype(np.float32)
+    order, starts = spatial_chunks(
+        xy, target=8, min_size=10_000, rng=np.random.default_rng(0)
+    )
+    assert list(starts) == [0, 500]
+    assert order is not None
+    assert np.array_equal(np.sort(order), np.arange(500))
+    assert not np.array_equal(order, np.arange(500))
+
+
+def test_a_drawn_prefix_is_an_unbiased_sample():
+    """The property the whole budget scheme rests on.
+
+    A prefix of a shuffled chunk must look like the chunk as a whole - here,
+    half the points carry a marker value and the prefix should contain roughly
+    half of them, not a spatially-sorted run of one or the other.
+    """
+    rng = np.random.default_rng(0)
+    xy = rng.random((20_000, 2)).astype(np.float32)
+    flagged = xy[:, 0] > 0.5  # a spatially-correlated property
+
+    order, starts = spatial_chunks(xy, target=10, min_size=10, rng=rng)
+
+    for i in range(len(starts) - 1):
+        chunk = order[starts[i] : starts[i + 1]]
+        prefix = chunk[: max(len(chunk) // 10, 1)]
+        whole_rate = flagged[chunk].mean()
+        prefix_rate = flagged[prefix].mean()
+        assert abs(prefix_rate - whole_rate) < 0.15, (
+            f"chunk {i}: prefix {prefix_rate:.2f} vs whole {whole_rate:.2f}"
+        )

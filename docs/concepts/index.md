@@ -1,6 +1,6 @@
 # Concepts
 
-Three pages of background. Nothing here tells you which button to press — that is
+Four pages of background. Nothing here tells you which button to press — that is
 what the [how-to guides](../how-to/index.md) are for. This is the model the app is
 built on, and it is what makes the buttons make sense.
 
@@ -30,6 +30,15 @@ buys you.
 
 Selection is the app's central verb. What it propagates to, and how growing and
 shrinking actually work.
+
+</div>
+
+<div class="bc-card" markdown>
+
+### :material-chart-scatter-plot: [Large embeddings](large-embeddings.md)
+
+What changes as a project grows: chunking and culling, when the scatter starts
+drawing a sample of what is in view, and why selection still sees every point.
 
 </div>
 

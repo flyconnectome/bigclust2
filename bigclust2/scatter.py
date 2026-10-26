@@ -24,6 +24,7 @@ from .label_placement import (
     spatial_components,
 )
 from .chunking import (
+    CHUNK_SEED,
     ChunkLayout,
     chunk_bounds,
     group_chunk_target,
@@ -166,6 +167,12 @@ class ScatterFigure(BaseFigure):
     chunk_target = 1000
     chunk_min_size = 100_000
 
+    #: Default for the `draw_budget` property below.
+    _draw_budget = 3_000_000
+    #: Floor per visible chunk, so a chunk in view never vanishes entirely
+    #: just because many others are sharing the budget.
+    draw_min_per_chunk = 32
+
     def __init__(self, selection_counter=None, debug=False, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
@@ -178,6 +185,7 @@ class ScatterFigure(BaseFigure):
         self.point_visuals = None
         self._chunks = None
         self._chunks_stale = False
+        self._draw_budget_key = None
         self._marker_codes = None
         self._marker_names = None
         self.hover_info_org = None  # hover format/column, set by `set_points`
@@ -330,6 +338,7 @@ class ScatterFigure(BaseFigure):
         self.add_animation(self._animate_label_placement)
 
         self.add_animation(self.process_moves)
+        self.add_animation(self._apply_draw_budget)
 
     def __len__(self):
         return len(self.positions) if self.positions is not None else 0
@@ -1247,6 +1256,13 @@ class ScatterFigure(BaseFigure):
         if clear:
             self.clear()
 
+        # Detach the previous group first: this is also the rebuild path
+        # (`rechunk`, and switching embeddings), and an orphaned group keeps
+        # drawing its points at wherever they were when it was built.
+        previous = getattr(self, "scatter_group", None)
+        if previous is not None and previous.parent is not None:
+            previous.parent.remove(previous)
+
         # Create the group for the points
         self.scatter_group = gfx.Group()
         self.scatter_group._object_id = "scatter"
@@ -1315,6 +1331,9 @@ class ScatterFigure(BaseFigure):
             ix = np.asarray(ix)
 
         total = len(self) if ix is None else len(ix)
+        # Seeded, so a given scatter always samples the same points rather
+        # than flickering between rebuilds.
+        rng = np.random.default_rng(CHUNK_SEED)
         visuals = []
         group_rows = []  # one row-index array per marker group
         group_bounds = []
@@ -1340,6 +1359,7 @@ class ScatterFigure(BaseFigure):
                     group_xy,
                     target=group_chunk_target(self.chunk_target, n_group, total),
                     min_size=self.chunk_min_size,
+                    rng=rng,
                 )
             else:
                 order, starts = None, np.array([0, n_group], dtype=np.intp)
@@ -1364,7 +1384,7 @@ class ScatterFigure(BaseFigure):
                 group_sizes = group_sizes[group_ix]
             group_sizes = group_sizes * self.point_scale
 
-            group_bounds.append(chunk_bounds(group_xyz[:, :2], starts))
+            group_bounds.append(chunk_bounds(group_xyz, starts))
             group_rows.append(group_ix)
 
             for i in range(len(starts) - 1):
@@ -1400,8 +1420,94 @@ class ScatterFigure(BaseFigure):
         layout = ChunkLayout(order=order, starts=starts, bounds=bounds)
         for i, vis in enumerate(visuals):
             vis._point_ix = order[layout.slice_for(i)]
+            # Cached so the per-frame budget pass and the position update do
+            # not re-walk `geometry` (two tracked attribute hops per chunk).
+            vis._pos_buffer = vis.geometry.positions
 
         return visuals, (layout if chunk else None)
+
+    def _apply_draw_budget(self):
+        """Cull chunks outside the view and decimate the rest to the budget.
+
+        Cheap enough to call per frame: the work is one vectorised test over
+        the chunk bounds plus a `draw_range` assignment per chunk, and it
+        short-circuits entirely while the view and the layout are unchanged.
+        Nothing is re-uploaded - the points stay resident on the GPU and only
+        the drawn count changes.
+        """
+        layout = self._chunks
+        if layout is None or not self.point_visuals:
+            return
+
+        # Key on versions, not on the view rectangle: deriving that rectangle
+        # costs two unprojections (~28us), which on a static frame would be
+        # the entire cost of this pass. The layout's version covers both a
+        # rebuild and moved points, so nothing has to announce either.
+        key = (
+            self.camera_version,
+            layout.version,
+            self.draw_budget,
+            self.draw_min_per_chunk,
+        )
+        if key == self._draw_budget_key:
+            return
+
+        view = self.view_bounds()
+        if view is None:  # headless; try again once there is a viewport
+            return
+        self._draw_budget_key = key
+
+        counts = layout.draw_counts(
+            view, self.draw_budget, min_per_chunk=self.draw_min_per_chunk
+        )
+
+        # `visible` and `draw_range` are tracked properties in pygfx - writing
+        # one costs even when the value is unchanged - so guard every write.
+        # At ~1000 chunks that is the difference between ~1.4ms and ~0.35ms,
+        # on a frame budget of a few ms. `_pos_buffer` caches the geometry
+        # lookup, which is two tracked attribute hops per chunk.
+        changed = False
+        for vis, count in zip(self.point_visuals, counts.tolist()):
+            buf = vis._pos_buffer
+            if count <= 0:
+                if vis.visible:
+                    vis.visible = False
+                    changed = True
+                continue
+            if not vis.visible:
+                vis.visible = True
+                changed = True
+            # Other vertex buffers follow the positions' range, so setting it
+            # here is enough (verified against pygfx 0.16).
+            if buf.draw_range != (0, count):
+                buf.draw_range = (0, count)
+                changed = True
+
+        if changed:
+            self._render_stale = True
+
+    @property
+    def draw_budget(self):
+        """Maximum number of points drawn per frame.
+
+        Beyond this, the chunks in view are sampled rather than drawn in full
+        - each chunk's points are in random order, so a drawn prefix is an
+        unbiased sample of it. Scatters small enough to draw whole never hit
+        this. Changing it takes effect on the next frame.
+        """
+        return self._draw_budget
+
+    @draw_budget.setter
+    @update_figure
+    def draw_budget(self, value):
+        self._draw_budget = int(value)
+
+    @property
+    def drawn_point_count(self):
+        """How many points the last budget pass left on screen."""
+        if not self.point_visuals:
+            return 0
+        return sum(v._pos_buffer.draw_range[1] for v in self.point_visuals if v.visible)
 
     def rechunk(self):
         """Rebuild the chunk layout for the current point positions.
@@ -2340,20 +2446,6 @@ class ScatterFigure(BaseFigure):
             )
         positions.update_full()
 
-    def _view_bounds(self):
-        """Return the current viewport in world coordinates as (x0, y0, x1, y1).
-
-        Returns None if the bounds can not be determined (e.g. headless).
-        """
-        try:
-            top_left = self.screen_to_world((0, 0))
-            bottom_right = self.screen_to_world(self.size)
-            if top_left is None or bottom_right is None:
-                return None
-            return (top_left[0], bottom_right[1], bottom_right[0], top_left[1])
-        except Exception:
-            return None
-
     def _label_codes(self):
         """Return a cached factorization (codes, uniques) of `self.labels`."""
         cached = self._label_codes_cache
@@ -2592,7 +2684,7 @@ class ScatterFigure(BaseFigure):
         # Keep group labels inside the current viewport (a label at a
         # group's rim can otherwise easily stick out of view), with farther
         # fallback rings for crowded scenes
-        bounds = self._view_bounds()
+        bounds = self.view_bounds()
 
         slots = np.full(n_groups, -1, dtype=int)
         offsets = np.zeros((n_groups, 2), dtype=float)
@@ -2885,18 +2977,14 @@ class ScatterFigure(BaseFigure):
             f" | font size: {self._font_size * 100:g}"
         )
 
-        try:
-            iv = self.is_visible_pos(self.positions)
-            vis_note = ""
-        except Exception:
-            iv = np.ones(len(self.positions), dtype=bool)
-            vis_note = " (visibility check unavailable - assuming all visible)"
+        iv = self.is_visible_pos(self.positions)
+        vis_note = "" if self.view_bounds() else " (no viewport - assuming all visible)"
         n_vis = int(iv.sum())
         lines.append(
             f"Visible points: {n_vis} / {len(self.positions)}"
             f" (limit: {self.label_vis_limit}){vis_note}"
         )
-        bounds = self._view_bounds()
+        bounds = self.view_bounds()
         if bounds is not None:
             bounds_str = ", ".join(f"{float(b):.4g}" for b in bounds)
             lines.append(f"View bounds (x0, y0, x1, y1): ({bounds_str})")
@@ -3755,8 +3843,8 @@ class ScatterFigure(BaseFigure):
         # contiguous slice instead of a scattered gather over the whole array.
         xyz = _as_xyz(self.positions, z=1.0, order=self._chunks.order)
         for i, vis in enumerate(self.point_visuals):
-            vis.geometry.positions.set_data(xyz[self._chunks.slice_for(i)])
-            vis.geometry.positions.update_full()
+            vis._pos_buffer.set_data(xyz[self._chunks.slice_for(i)])
+            vis._pos_buffer.update_full()
 
         # Update the positions of the labels (keeping any offset - and
         # z-layer, stored in the third component - the smart placement has
@@ -3779,7 +3867,9 @@ class ScatterFigure(BaseFigure):
         # used to be - but re-chunking means rebuilding every visual, which is
         # far too expensive mid-animation. Callers settle it with `rechunk()`
         # once the points stop moving (see `process_moves`).
-        self._chunks.refresh_bounds(xyz[:, :2])
+        # Also bumps the layout's version, which is what makes the next
+        # budget pass notice that different chunks are now in view.
+        self._chunks.refresh_bounds(xyz)
         self._chunks_stale = True
 
         # Keep the connector lines attached while points (and labels) move

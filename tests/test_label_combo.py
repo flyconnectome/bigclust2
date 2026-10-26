@@ -14,21 +14,12 @@ platform.
 
 from __future__ import annotations
 
-import os
-
-os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-
 import numpy as np  # noqa: E402
 import pandas as pd  # noqa: E402
 import pytest  # noqa: E402
 from PySide6 import QtWidgets  # noqa: E402
 
 from bigclust2.gui.controls.scatter_control import ScatterControls  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def qapp():
-    yield QtWidgets.QApplication.instance() or QtWidgets.QApplication([])
 
 
 class _Figure:

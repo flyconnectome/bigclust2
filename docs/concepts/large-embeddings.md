@@ -1,0 +1,95 @@
+# Large embeddings
+
+Most projects are small enough that BigClust draws every point, every frame,
+and nothing on this page applies.
+
+Two things change as a project grows. Past about **200,000** points the scatter
+is split into **chunks** and stops drawing the ones you are not looking at —
+which changes nothing you can see. Only once what is *in view* exceeds the draw
+budget (**3 million** points by default) does it start drawing a **sample** of
+them. That second step is worth understanding, because it changes what you see
+while deliberately not changing what you get.
+
+(The 200,000 is counted per marker symbol, so a project that draws several
+datasets with different markers reaches it later than its total suggests.)
+
+## Why drawing everything stops working
+
+The cost of drawing a scatter is close to linear in the number of points
+submitted to the GPU, and it does not care that most of them are invisible.
+Zoomed out, tens of millions of points land on the same few thousand pixels: the
+GPU draws all of them, and you see the handful that happen to be on top.
+
+So the expensive work buys nothing. The fix is to stop submitting points you
+cannot distinguish anyway.
+
+## Chunks
+
+The points are divided into **chunks** — groups of a few tens of thousands that
+are near each other in the embedding. Chunks hold roughly equal numbers of
+points, so a chunk covering a dense cluster is physically small while one over
+empty space is large.
+
+That gives the renderer two things it can do per chunk:
+
+- **Skip chunks you are not looking at.** Panning or zooming in means most
+  chunks fall outside the viewport, and those cost nothing at all.
+- **Draw only part of a chunk.** The points inside a chunk are shuffled when the
+  project loads, so the first half of a chunk is a fair sample of the whole
+  chunk — not its left half, or its oldest neurons, or anything else
+  systematic.
+
+## The draw budget
+
+`Max points drawn` in the Settings tab caps how many points may be drawn per
+frame. If everything in view fits under the cap, everything in view is drawn.
+If it does not, each visible chunk contributes a share in proportion to its
+size.
+
+The effect when you zoom in is that fewer chunks are in view, so each one gets a
+bigger share of the budget and is drawn more densely — until you are close
+enough that everything in view is on screen. Detail appears as you approach it,
+which is roughly what you would expect from a map.
+
+Lower the budget for a smoother frame rate on a busy scene, raise it for more
+detail when you are holding still.
+
+!!! note "What the budget does not affect"
+
+    The budget is a **rendering** setting. The things that work from your data
+    rather than from the screen are unaffected, whatever is currently drawn:
+
+    - **Selection.** A lasso or rectangle selects every point in the region,
+      including ones that were not drawn. The count in the corner is the real
+      count, and so is everything it propagates to — the 3D viewer, the
+      widgets, annotations.
+    - **Labels**, which are placed from point positions.
+    - **Export.** A Plotly export writes the points, not the sample.
+
+    So a sparse-looking scatter is a drawing of your data, not a subset of it.
+
+    The exception is **hover**, which asks the renderer what is under the
+    cursor and so can only find points that were actually drawn. Zoom in — or
+    raise the budget — if you want to inspect a point the scatter is currently
+    sampling out.
+
+## What this costs
+
+Chunking is built when a project loads, which is why a very large project takes
+longer to open than its file size suggests — the points have to be sorted into
+chunks and shuffled within them. It is rebuilt whenever the points change:
+switching embeddings pays the cost again, as does a layout change once its
+animation settles.
+
+Memory is the other limit, and it scales with the number of points rather than
+with the budget: every point stays resident on the GPU, and only the number
+*drawn* changes. A project of tens of millions of points needs several GB of RAM
+on top of whatever its metadata occupies.
+
+## If it still feels slow
+
+- Lower `Max points drawn`.
+- Try the other remedies in [troubleshooting](../reference/troubleshooting.md).
+- Use [filters](../how-to/filter-a-dataset.md) or
+  [views](../how-to/work-in-several-views.md) to work on a subset. A filtered
+  view holds fewer points, so it is cheaper in every respect, not just to draw.

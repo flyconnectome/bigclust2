@@ -55,6 +55,7 @@ nav = [
     { "Embeddings, distances, features" = "concepts/data-model.md" },
     { "Why data sources are directories" = "concepts/data-sources.md" },
     { "How selection works" = "concepts/selection.md" },
+    { "Large embeddings" = "concepts/large-embeddings.md" },
   ] },
   { "Reference" = [
     { "Reference" = "reference/index.md" },

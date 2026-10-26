@@ -370,6 +370,57 @@ def test_the_floor_never_overruns_the_budget():
     assert (counts >= 1).all(), "every visible chunk should still draw something"
 
 
+def test_a_budget_below_the_chunk_count_still_draws_something():
+    """Regression: every proportional share truncated to zero and went blank.
+
+    The remainder from that truncation is handed out, so the budget is spent
+    rather than rounded away - and the alternative the floor used to produce
+    (one point per chunk, 10x the budget) is not acceptable either.
+    """
+    counts = draw_counts(np.full(1000, 1000), np.ones(1000, bool), budget=100)
+
+    assert counts.sum() == 100
+    assert (counts <= 1).all(), "100 points cannot cover 1000 chunks twice over"
+
+
+def test_the_budget_is_never_exceeded():
+    """Across shapes the hand-picked cases miss - it is a cap, not a target."""
+    rng = np.random.default_rng(0)
+    for _ in range(2000):
+        n = int(rng.integers(1, 60))
+        sizes = rng.integers(1, 5000, n)
+        visible = rng.random(n) < rng.random()
+        budget = int(rng.integers(0, 20000))
+        counts = draw_counts(
+            sizes, visible, budget, min_per_chunk=int(rng.integers(0, 100))
+        )
+
+        assert counts.sum() <= budget
+        assert (counts <= sizes).all(), "a chunk cannot draw more than it holds"
+        assert (counts[~visible] == 0).all()
+
+
+def test_the_budget_is_spent_when_there_is_enough_to_draw():
+    """Handing back the floor's excess must not leave the budget unused."""
+    rng = np.random.default_rng(1)
+    sizes = rng.integers(500, 5000, 50)
+    budget = 10_000
+    assert sizes.sum() > budget
+
+    counts = draw_counts(sizes, np.ones(50, bool), budget, min_per_chunk=32)
+
+    assert counts.sum() == budget
+
+
+def test_a_chunk_smaller_than_the_floor_draws_only_what_it_holds():
+    """Regression: handing back the excess used to *add* points to these."""
+    sizes = np.array([2, 5000, 5000])
+    counts = draw_counts(sizes, np.ones(3, bool), budget=600, min_per_chunk=100)
+
+    assert counts[0] == 2
+    assert counts.sum() <= 600
+
+
 def test_nothing_visible_draws_nothing():
     counts = draw_counts(np.array([10, 20]), np.zeros(2, bool), budget=1000)
     assert list(counts) == [0, 0]

@@ -327,13 +327,40 @@ def draw_counts(sizes, visible, budget, min_per_chunk=1):
         counts[visible] = vis_sizes
         return counts
 
-    share = (budget * (vis_sizes / total)).astype(np.int64)
+    exact = budget * (vis_sizes / total)
+    share = exact.astype(np.int64)
+    # Truncating to an integer loses up to a point per chunk, and with many
+    # chunks sharing a small budget every share truncates to zero and the
+    # scatter goes blank. Hand the lost points to the largest fractions, which
+    # spends the budget exactly.
+    remainder = budget - int(share.sum())
+    if remainder > 0:
+        share[np.argsort(share - exact)[:remainder]] += 1
+
     # The floor keeps a visible chunk on screen, but it cannot be allowed to
-    # push the total past the budget - with many visible chunks and a small
-    # budget, `min_per_chunk` each would do exactly that.
-    floor = min(min_per_chunk, max(budget // len(vis_sizes), 1))
+    # push the total past the budget, so cap it at what every visible chunk
+    # could draw and still fit. A budget smaller than the number of visible
+    # chunks leaves no floor at all - there is simply nothing to go round.
+    floor = min(min_per_chunk, budget // len(vis_sizes))
     # Never below the floor, never more than the chunk actually holds.
-    counts[visible] = np.minimum(np.maximum(share, floor), vis_sizes)
+    drawn = np.minimum(np.maximum(share, floor), vis_sizes)
+
+    # The proportional shares already add up to the budget, so raising the
+    # small chunks to the floor overshoots it. Take the excess back from the
+    # chunks that have room above the floor, in proportion to that room. A
+    # chunk holding less than the floor has no room - clamping at zero keeps
+    # it from being handed points it does not have.
+    excess = int(drawn.sum()) - budget
+    if excess > 0:
+        headroom = np.maximum(drawn - floor, 0)
+        available = int(headroom.sum())
+        if available > 0:
+            # Rounding up so the give-back always covers the excess; that can
+            # land a point or two under budget, never over.
+            give = np.ceil(headroom * (excess / available)).astype(np.int64)
+            drawn -= np.minimum(headroom, give)
+
+    counts[visible] = drawn
     return counts
 
 

@@ -412,6 +412,11 @@ class ChunkLayout:
              vectorised pass rather than a loop over visuals.
     version : int
              Changes whenever `bounds` is refreshed or a new layout is built.
+    structure : int
+             Changes only when a new layout is built. `refresh_bounds` moves
+             the boxes but leaves `order` and `starts` alone, so anything
+             keyed on *which points are in which chunk* stays valid across a
+             refresh and should key on this instead of on `version`.
     """
 
     order: np.ndarray
@@ -420,6 +425,8 @@ class ChunkLayout:
     #: Bumped whenever anything here changes, so consumers can cache on it
     #: instead of being told to invalidate.
     version: int = field(default_factory=lambda: next(_LAYOUT_VERSIONS))
+    #: Identifies the chunk *membership*, which a bounds refresh preserves.
+    structure: int = field(default_factory=lambda: next(_LAYOUT_VERSIONS))
 
     @property
     def n_chunks(self):
@@ -484,6 +491,69 @@ class ChunkLayout:
         # lets a caller cache on the result's bytes.
         out.sort()
         return out
+
+    def subset_in_draw_order(self, mask):
+        """Where a subset of the points sits in this layout's draw order.
+
+        The renderer draws a prefix of each chunk, so anything that wants to
+        annotate exactly what was drawn - the selection overlay - needs its own
+        points ordered the same way. Laid out like this, the members of a
+        chunk's drawn prefix are a prefix of the subset's chunk too, and
+        picking them up is a `searchsorted` rather than a set intersection.
+
+        Parameters
+        ----------
+        mask : (N,) bool array
+               True for the points of interest, indexed by point number.
+               A mask rather than indices because this walks `order`, and at
+               tens of millions of points one bool per point is far cheaper
+               than inverting the permutation.
+
+        Returns
+        -------
+        ix :        (M,) intp array
+                    The chosen point indices, in draw order.
+        splits :    (n_chunks + 1,) intp array
+                    Offsets into `ix`: chunk `i` holds
+                    ``ix[splits[i]:splits[i+1]]``.
+        positions : (M,) intp array
+                    Each point's position in the full draw order, ascending.
+                    Feed back to :meth:`prefix_counts` to find how many of them
+                    a given set of per-chunk draw counts covers.
+        """
+        positions = np.flatnonzero(mask[self.order])
+        ix = self.order[positions]
+        # `side="left"`: a point sitting exactly on a chunk boundary is the
+        # first point of that chunk, not the last of the one before.
+        splits = np.searchsorted(positions, self.starts)
+        return ix, splits, positions
+
+    def prefix_counts(self, positions, offsets, chunks, counts):
+        """How much of a subset falls inside each chunk's drawn prefix.
+
+        The renderer draws the first `counts[i]` points of chunk `i`, and
+        `positions` is ascending, so the subset's share of that prefix is found
+        by one search rather than a pass per chunk.
+
+        Parameters
+        ----------
+        positions : (M,) intp array
+                    From :meth:`subset_in_draw_order`.
+        offsets :   (V,) intp array
+                    Where each wanted chunk's points start within `positions`
+                    (``splits[chunks]``).
+        chunks :    (V,) intp array
+                    The chunks being asked about.
+        counts :    (n_chunks,) int array
+                    Points drawn per chunk, from :meth:`draw_counts`.
+
+        Returns
+        -------
+        counts : (V,) intp array
+                 How many of the subset's points each of `chunks` draws.
+        """
+        ends = np.searchsorted(positions, self.starts[chunks] + counts[chunks])
+        return ends - offsets
 
     def points_in(self, i):
         """The original point indices making up chunk `i`.

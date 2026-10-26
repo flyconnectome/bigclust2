@@ -62,7 +62,9 @@ detail when you are holding still.
     - **Selection.** A lasso or rectangle selects every point in the region,
       including ones that were not drawn. The count in the corner is the real
       count, and so is everything it propagates to — the 3D viewer, the
-      widgets, annotations.
+      widgets, annotations. What you *see* of a selection does depend on the
+      budget (see [below](#selection-highlights)), but what is selected does
+      not.
     - **Labels**, which are placed from point positions (see
       [below](#labels)) rather than from what was drawn.
     - **Export.** A Plotly export writes the points, not the sample.
@@ -73,6 +75,30 @@ detail when you are holding still.
     cursor and so can only find points that were actually drawn. Zoom in — or
     raise the budget — if you want to inspect a point the scatter is currently
     sampling out.
+
+## Selection highlights
+
+Selected points are drawn with a ring around them, and how much of that
+highlight you get depends on how big the selection is relative to
+`Max points drawn`.
+
+**Up to a tenth of the budget** — 300,000 points at the default — the selection
+is ringed in full. Rings are never sampled away, so you can see all of a modest
+selection even where the scatter underneath it is sampled. These rings are not
+culled either, so zoomed right in you can be drawing more of them than the
+scatter is drawing points; what bounds the cost is the threshold itself, which
+moves with `Max points drawn`. Lower the budget and this limit drops with it.
+
+**Above it**, the highlight follows the scatter. Ringing ten million points
+over a scatter showing one million costs more than the scatter does and shows
+nothing extra, so instead a selected point that is drawn gets its ring and one
+that was sampled out does not. For these the rings and the dots agree exactly:
+you never see a visible point that looks unselected, and zooming in fills both
+in together.
+
+The difference between the two is deliberate — a small selection is worth
+showing you completely, a huge one is not — and in neither case does any of it
+touch what is *selected*. Only the drawing changes.
 
 ## Labels
 

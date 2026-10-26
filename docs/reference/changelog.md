@@ -28,6 +28,13 @@ For the complete commit-level history, see the
   which dominated load time on big projects; selecting, recolouring and hovering
   are no longer proportional to the total number of points. A project of tens of
   millions of points now opens in seconds rather than minutes.
+- **Selection highlights no longer outweigh the scatter.** Zoomed in on a very
+  large selection, the rings were all still drawn while the points underneath
+  them were not — more work for the highlight than for the plot. A selection
+  above a tenth of `Max points drawn` is now sampled in step with the scatter,
+  so a point that is drawn is ringed and one that is not drawn is not. Smaller
+  selections are ringed in full, exactly as before, and what is *selected*
+  never changes.
 - **Labels no longer slow down as a project grows.** Deciding which labels are
   on screen used to test every point in the project several times a second,
   which on a very large embedding stalled the view - worst of all when zoomed

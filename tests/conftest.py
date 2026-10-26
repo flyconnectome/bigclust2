@@ -213,6 +213,48 @@ def hover_probe():
     return _probe
 
 
+@pytest.fixture
+def look_at():
+    """Point a figure's camera at a world rectangle and render a frame.
+
+    The render is what gives `view_bounds` something to work from, so culling
+    and label visibility only mean anything after it.
+    """
+
+    def _look(fig, x0, x1, y0, y1):
+        fig.camera.show_rect(x0, x1, y0, y1)
+        fig.renderer.render(fig.scene, fig.camera)
+        fig.canvas.draw()
+        # What `animate` does on a real frame, and what tells the draw-budget
+        # pass the view moved. Without it a test that pans would be silently
+        # served the previous frame's culling.
+        fig._poll_camera()
+
+    return _look
+
+
+@pytest.fixture
+def drawn_points():
+    """The point indices a list of visuals is currently drawing.
+
+    Reads `draw_range` rather than the buffer length: culling and the draw
+    budget both work by moving that range, so the buffer still holds points
+    that are not on screen.
+    """
+
+    def _drawn(visuals):
+        found = []
+        for vis in visuals:
+            if not vis.visible:
+                continue
+            offset, count = vis._pos_buffer.draw_range
+            assert offset == 0, "the figure only ever draws a prefix"
+            found.append(vis._point_ix[offset : offset + count])
+        return set(np.concatenate(found).tolist()) if found else set()
+
+    return _drawn
+
+
 @pytest.fixture(scope="session")
 def qapp():
     """The shared QApplication, for tests that build real Qt widgets."""

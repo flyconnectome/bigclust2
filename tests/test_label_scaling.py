@@ -79,20 +79,22 @@ def _full_scan(fig):
 
 
 @pytest.fixture
-def viewed(make_scatter):
-    """A rendered figure plus a helper to point the camera somewhere."""
+def viewed(make_scatter, look_at):
+    """A rendered figure plus a helper to point the camera somewhere.
+
+    The helper is the conftest `look_at` with the figure already bound, so it
+    takes the rectangle alone.
+    """
 
     def _make(**kwargs):
         kwargs.setdefault("n", 400)
         fig, meta, points = make_scatter(**kwargs)
 
-        def look_at(x0, x1, y0, y1):
-            fig.camera.show_rect(x0, x1, y0, y1)
-            fig.renderer.render(fig.scene, fig.camera)
-            fig.canvas.draw()
+        def _at(x0, x1, y0, y1):
+            look_at(fig, x0, x1, y0, y1)
 
-        look_at(0, 1, 0, 1)
-        return fig, look_at, points
+        _at(0, 1, 0, 1)
+        return fig, _at, points
 
     return _make
 
@@ -454,3 +456,33 @@ def test_loading_a_smaller_dataset_over_a_larger_one(viewed):
 
     assert len(fig) == 20
     assert fig._shown_labels == set()
+
+
+def test_loading_a_new_dataset_takes_down_the_old_labels(viewed):
+    """Regression: the reset ran after the label store had been replaced.
+
+    `set_points` swapped in a fresh, empty `SparseMap` first, so the reset
+    walked that instead of the labels actually on screen - leaving the previous
+    dataset's text parented to the label group, visible, with nothing left
+    holding a reference able to hide it.
+    """
+    fig, look_at, _ = viewed(n=400, seed=5)
+    fig.label_refresh_rate = 1
+    fig.smart_label_placement = False
+    look_at(0.0, 0.3, 0.0, 0.3)
+    fig._label_visibility_tick()
+    stale = [v for v in fig.label_visuals.values() if v.visible]
+    assert stale, "the first dataset has to put labels on screen"
+
+    frame = pd.DataFrame(
+        {
+            "id": np.arange(20),
+            "label": [f"q{i}" for i in range(20)],
+            "dataset": np.full(20, "ds", dtype=object),
+            "_color": np.full(20, "red", dtype=object),
+        }
+    )
+    points = np.random.default_rng(3).random((20, 2)).astype(np.float32)
+    fig.set_points(points=points, metadata=frame, color_col="_color")
+
+    assert not any(v.visible for v in stale), "labels from the old data are still up"

@@ -7,6 +7,7 @@ import pygfx as gfx
 import pandas as pd
 import pylinalg as la
 
+from dataclasses import dataclass
 from numbers import Number
 from functools import partial
 from itertools import combinations
@@ -40,6 +41,26 @@ from .visuals import points2gfx, text2gfx, lines2gfx
 AVAILABLE_MARKERS = list(gfx.MarkerShape)
 # Drop markers which look too similar to others
 AVAILABLE_MARKERS.remove("ring")
+
+
+@dataclass
+class _HighlightAlignment:
+    """How a following selection overlay lines up with the scatter's chunks.
+
+    Produced and invalidated together, so they travel as one object rather
+    than as parallel attributes on the figure. `chunks`, `offsets` and `ends`
+    are parallel to `ScatterFigure.highlight_visuals`.
+    """
+
+    #: Chunk each overlay visual follows.
+    chunks: np.ndarray
+    #: Where each visual's points start and end within `positions`.
+    offsets: np.ndarray
+    ends: np.ndarray
+    #: Draw position of every overlay point, ascending.
+    positions: np.ndarray
+    #: The `ChunkLayout.structure` this was built against.
+    structure: int
 
 
 def marker_codes(markers):
@@ -201,6 +222,8 @@ class ScatterFigure(BaseFigure):
         self._embedding_frame = None  # shared (center, scale) for normalization
         self.controls = None  # back-reference set by ScatterControls once built
         self._selected = None
+        self.highlight_visuals = []  # the selection overlay
+        self._highlight = None  # how it lines up with the scatter, if it does
         self._selection_scope_mask = None
         self.deselect_on_empty = (
             False  # whether to deselect everything on empty selection
@@ -1175,13 +1198,18 @@ class ScatterFigure(BaseFigure):
         color : str
             Color to use for highlighting.
 
+        Notes
+        -----
+        How much of the highlight is drawn depends on the draw budget. Up to
+        `highlight_whole_limit` points are ringed in full, so a ring can sit on
+        a point the scatter itself sampled out. Past that the highlight follows
+        the scatter instead, ringing the points it drew and no others - drawing
+        millions of rings over a scatter showing far fewer points costs more
+        than the scatter does and shows nothing extra. Either way every point
+        given here is highlighted as far as the plot shows it; what is
+        *selected* is never affected.
         """
-        # Clear existing selection
-        if hasattr(self, "highlight_visuals"):
-            for vis in self.highlight_visuals:
-                if vis.parent:
-                    vis.parent.remove(vis)
-            del self.highlight_visuals
+        self._clear_highlight()
 
         # If no points are given, return
         if points is None:
@@ -1203,16 +1231,109 @@ class ScatterFigure(BaseFigure):
         if len(points) == 0:
             return
 
-        # Create the new selection visuals
-        if len(self.selected) > 0:
+        # A selection small enough to be a rounding error against the draw
+        # budget is drawn whole: one visual, nothing to cull, and none of the
+        # alignment work - which costs a pass over every point in the project
+        # and would make clicking a single point pay for it. Anything bigger
+        # follows the scatter's own sampling, or the overlay ends up drawing
+        # far more points than the scatter it is annotating.
+        if self._should_follow(points):
+            self.highlight_visuals = self._make_following_highlight(points)
+            # The overlay's draw ranges come from the scatter's, so a new
+            # selection has to re-run the budget pass even on an unchanged
+            # view. A selection drawn whole needs nothing from it.
+            self._draw_budget_key = None
+        else:
             self.highlight_visuals, _ = self.make_points(ix=points, chunk=False)
-            for vis in self.highlight_visuals:
-                vis.material.edge_color = color
-                vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
-                vis.material.color = (1, 1, 1, 0)
-                vis.material.edge_mode = "outer"
-                vis.material.min_edge_width = 2  # min size in pixels
-                self.scatter_group.add(vis)
+
+        for vis in self.highlight_visuals:
+            vis.material.edge_color = color
+            vis.material.edge_width = .2 * self.point_scale  # 20% of the point size
+            vis.material.color = (1, 1, 1, 0)
+            vis.material.edge_mode = "outer"
+            vis.material.min_edge_width = 2  # min size in pixels
+            self.scatter_group.add(vis)
+
+    def _should_follow(self, points):
+        """Whether an overlay for `points` should follow the scatter's sampling.
+
+        Only a chunked figure can be followed, and only a selection big enough
+        to be worth the alignment pass - see `highlight_whole_limit`.
+        """
+        return (
+            len(points) > self.highlight_whole_limit
+            and self._chunks is not None
+            and bool(self.point_visuals)
+        )
+
+    def _clear_highlight(self):
+        """Detach the selection overlay and forget it.
+
+        The visuals hang off `scatter_group` and carry point indices, so
+        anything that replaces either - a new dataset, a rebuild - has to come
+        through here or it leaves visuals addressing points that no longer
+        exist.
+        """
+        for vis in self.highlight_visuals:
+            if vis.parent:
+                vis.parent.remove(vis)
+        self.highlight_visuals = []
+        self._highlight = None
+
+    def _make_following_highlight(self, points):
+        """Build an overlay that draws what the scatter draws, selected only.
+
+        One visual per chunk that holds any selected point, carrying that
+        chunk's points *in the scatter's own draw order*. That is up to
+        `chunk_target` more objects for the renderer to walk - the cap that
+        target exists to set is on the scatter alone - but they are the price
+        of culling the overlay at all, and a selection confined to one region
+        touches few chunks. Because the scatter
+        draws a prefix of each chunk, the selected members of that prefix are
+        then a prefix of the overlay chunk too - so the overlay can be
+        decimated alongside the scatter (see `_apply_draw_budget`) without ever
+        leaving a drawn point without its ring, or ringing one that was
+        sampled out.
+        """
+        layout = self._chunks
+        selected = np.zeros(len(self), dtype=bool)
+        selected[points] = True
+        ix, splits, positions = layout.subset_in_draw_order(selected)
+        chunks = np.flatnonzero(np.diff(splits))
+
+        # Gathered straight into the (n, 3) buffer, so the (n, 2) copy never
+        # has to exist. The per-chunk slices below are views into it, exactly
+        # as `make_points` has its chunks share one backing array.
+        xyz = _as_xyz(self.positions, order=ix)
+        # No colours: the overlay draws rings, with the fill set transparent
+        # by the caller, so a per-point colour would never be seen.
+        sizes, per_point_size = self._scaled_point_size(ix)
+
+        visuals = []
+        # `point_visuals[i]` is chunk `i` - the alignment `_apply_draw_budget`
+        # already relies on - so the marker comes off the chunk being followed.
+        for i in chunks.tolist():
+            sl = slice(splits[i], splits[i + 1])
+            vis = points2gfx(
+                xyz[sl],
+                color="w",
+                size=sizes[sl] if per_point_size else sizes,
+                marker=self.point_visuals[i].material.marker,
+                size_space="world",
+                pick_write=False,
+            )
+            vis._pos_buffer = vis.geometry.positions
+            vis._point_ix = ix[sl]
+            visuals.append(vis)
+
+        self._highlight = _HighlightAlignment(
+            chunks=chunks,
+            offsets=splits[chunks],
+            ends=splits[chunks + 1],
+            positions=positions,
+            structure=layout.structure,
+        )
+        return visuals
 
     @update_figure
     def toggle_labels(self):
@@ -1230,6 +1351,11 @@ class ScatterFigure(BaseFigure):
         previous = getattr(self, "scatter_group", None)
         if previous is not None and previous.parent is not None:
             previous.parent.remove(previous)
+
+        # The overlay hangs off the group just detached and carries point
+        # indices into the old data, so it cannot outlive either. Callers that
+        # want it back (`rechunk`) rebuild it after this returns.
+        self._clear_highlight()
 
         # Create the group for the points
         self.scatter_group = gfx.Group()
@@ -1261,6 +1387,18 @@ class ScatterFigure(BaseFigure):
         if codes is None:
             return np.full(len(np.asarray(indices)), names[0], dtype=object)
         return np.asarray(names, dtype=object)[codes[indices]]
+
+    def _scaled_point_size(self, ix):
+        """World-unit point sizes for `ix`, and whether they vary per point.
+
+        A scalar `point_size` stays scalar - `points2gfx` takes either - so the
+        caller has to know which it got before slicing.
+        """
+        sizes = self.point_size
+        per_point = not isinstance(sizes, (int, float))
+        if per_point:
+            sizes = sizes[ix]
+        return sizes * self.point_scale, per_point
 
     def make_points(self, ix=None, chunk=True):
         """Create the visuals for the points.
@@ -1346,11 +1484,7 @@ class ScatterFigure(BaseFigure):
 
             group_colors = None if self.colors is None else self.colors[group_ix]
             # Scale once per group: the per-chunk slice is then a view.
-            group_sizes = self.point_size
-            per_point_size = not isinstance(group_sizes, (int, float))
-            if per_point_size:
-                group_sizes = group_sizes[group_ix]
-            group_sizes = group_sizes * self.point_scale
+            group_sizes, per_point_size = self._scaled_point_size(group_ix)
 
             group_bounds.append(chunk_bounds(group_xyz, starts))
             group_rows.append(group_ix)
@@ -1436,23 +1570,76 @@ class ScatterFigure(BaseFigure):
         # lookup, which is two tracked attribute hops per chunk.
         changed = False
         for vis, count in zip(self.point_visuals, counts.tolist()):
-            buf = vis._pos_buffer
-            if count <= 0:
-                if vis.visible:
-                    vis.visible = False
-                    changed = True
-                continue
-            if not vis.visible:
-                vis.visible = True
-                changed = True
-            # Other vertex buffers follow the positions' range, so setting it
-            # here is enough (verified against pygfx 0.16).
-            if buf.draw_range != (0, count):
-                buf.draw_range = (0, count)
-                changed = True
+            changed |= self._set_drawn(vis, count)
+
+        if self._apply_highlight_budget(counts):
+            changed = True
 
         if changed:
             self._render_stale = True
+
+    @staticmethod
+    def _set_drawn(vis, count):
+        """Draw the first `count` points of `vis`, or hide it. Changed?
+
+        `visible` and `draw_range` are tracked properties in pygfx - writing
+        one costs even when the value is unchanged - so every write is guarded.
+        At ~1000 chunks that is the difference between ~1.4ms and ~0.35ms, on a
+        frame budget of a few ms. `_pos_buffer` caches the geometry lookup,
+        which is two tracked attribute hops per visual.
+        """
+        if count <= 0:
+            if vis.visible:
+                vis.visible = False
+                return True
+            return False
+
+        changed = False
+        if not vis.visible:
+            vis.visible = True
+            changed = True
+        # Other vertex buffers follow the positions' range, so setting it here
+        # is enough (verified against pygfx 0.16).
+        buf = vis._pos_buffer
+        if buf.draw_range != (0, count):
+            buf.draw_range = (0, count)
+            changed = True
+        return changed
+
+    def _apply_highlight_budget(self, counts):
+        """Point the selection overlay at whatever the scatter is drawing.
+
+        Only for an overlay built by `_make_following_highlight`; a selection
+        small enough to draw whole has nothing to follow. Returns whether
+        anything changed.
+
+        Keyed on the layout's `structure` rather than its `version`: a bounds
+        refresh (every frame of a move animation) leaves chunk membership -
+        and so this alignment - untouched, and bailing there would freeze the
+        overlay while the scatter kept re-culling.
+        """
+        align = self._highlight
+        if align is None or align.structure != self._chunks.structure:
+            return False  # drawn whole, or stale and about to be rebuilt
+
+        shares = self._chunks.prefix_counts(
+            align.positions, align.offsets, align.chunks, counts
+        )
+        changed = False
+        for vis, count in zip(self.highlight_visuals, shares.tolist()):
+            changed |= self._set_drawn(vis, count)
+        return changed
+
+    @property
+    def highlight_whole_limit(self):
+        """Selection size up to which the overlay is drawn in full.
+
+        A tenth of the draw budget: big enough that ordinary selections never
+        pay for alignment, small enough that an overlay drawn in full stays a
+        rounding error against what the scatter itself is drawing. Lowering the
+        budget tightens this with it.
+        """
+        return max(self.draw_budget // 10, 1)
 
     @property
     def draw_budget(self):
@@ -1469,6 +1656,15 @@ class ScatterFigure(BaseFigure):
     @update_figure
     def draw_budget(self, value):
         self._draw_budget = int(value)
+        # `highlight_whole_limit` moves with the budget, so a change can leave
+        # a selection drawn whole that no longer qualifies - and an unculled
+        # overlay outweighing the scatter is exactly what it exists to
+        # prevent. Rebuild only when the decision actually flips, not on every
+        # tick of the slider.
+        selected = self._selected
+        if selected is not None and len(selected):
+            if (self._highlight is not None) != self._should_follow(selected):
+                self.highlight_points(selected, color=self.selection_color)
 
     @property
     def drawn_point_count(self):
@@ -3550,12 +3746,14 @@ class ScatterFigure(BaseFigure):
 
         self.default_label_col = label_col
         self.default_color_col = color_col
-        # Sparse: at most `label_vis_limit` of these are ever filled in, and a
-        # dense list of one `None` per point costs hundreds of MB on a large
-        # project (and makes every traversal O(N) in Python).
+        # Before the stores are replaced, so the reset can still see - and take
+        # down - the labels the previous dataset left on screen.
+        self._reset_label_placement_state()
+        # Sparse: only labels that have been on screen exist, and a dense list
+        # of one `None` per point costs hundreds of MB on a large project (and
+        # makes every traversal O(N) in Python).
         self.label_visuals = SparseMap(len(metadata)) if label_col else None
         self._label_colors = SparseMap(len(metadata)) if label_col else None
-        self._reset_label_placement_state()
         self._invalidate_label_placement()
         self.labels = metadata[label_col].astype(str).values if label_col else None
         self.ids = metadata[id_col].values if id_col else None
@@ -4014,16 +4212,22 @@ class ScatterFigure(BaseFigure):
         self._label_anim_active.clear()
         self._invalidate_label_placement()
 
-        # Update the positions of selected points
-        if hasattr(self, "highlight_visuals"):
-            # The overlay is built separately and is not part of the chunk
-            # layout, so it gathers its own rows - sized by the selection
-            # rather than by N.
+        # Update the positions of selected points. A following overlay holds
+        # rows of the draw-order buffer just built, so it gathers from there
+        # rather than walking `positions` again per visual. (`set_data` marks
+        # the whole buffer dirty itself, so no `update_full` is needed.)
+        align = self._highlight
+        if align is not None and align.structure == self._chunks.structure:
+            over = np.take(xyz, align.positions, axis=0)
+            for vis, lo, hi in zip(
+                self.highlight_visuals, align.offsets.tolist(), align.ends.tolist()
+            ):
+                vis._pos_buffer.set_data(over[lo:hi])
+        else:
             for vis in self.highlight_visuals:
-                vis.geometry.positions.set_data(
+                vis._pos_buffer.set_data(
                     _as_xyz(self.positions, z=1.0, order=vis._point_ix)
                 )
-                vis.geometry.positions.update_full()
 
     def move_points(self, new_positions, n_frames=20):
         """Move the points to new positions.

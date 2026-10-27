@@ -350,7 +350,10 @@ class NglViewer:
             return SkeletonVolume(url)
         else:
             try:
-                return cv.CloudVolume(url, progress=False, use_https=True)
+                vol = cv.CloudVolume(url, progress=False, use_https=True)
+                if vol.mesh.meta.is_multires() and mip is not None:
+                    vol.mesh.mip = mip
+                return vol
             except KeyError as e:
                 # Try with a simple wrapper - CloudVolume is really finicky
                 if url.startswith("precomputed://"):
@@ -1275,6 +1278,9 @@ def fetch_segment(vol, x, lod=-1):
 
         try:
             if "lod" in inspect.signature(source.get).parameters:
+                if lod < 0:
+                    # Turn e.g. -1 into the highest LOD available for this segment
+                    lod = vol.mesh.get_manifest(x).num_lods + lod
                 data = source.get(x, lod=lod)
             else:
                 data = source.get(x)

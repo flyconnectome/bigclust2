@@ -1280,7 +1280,9 @@ def fetch_segment(vol, x, lod=-1):
             if "lod" in inspect.signature(source.get).parameters:
                 if lod < 0:
                     # Turn e.g. -1 into the highest LOD available for this segment
-                    lod = vol.mesh.get_manifest(x).num_lods + lod
+                    man = vol.mesh.get_manifest(x)
+                    if man is not None:
+                        lod = man.num_lods + lod
                 data = source.get(x, lod=lod)
             else:
                 data = source.get(x)
